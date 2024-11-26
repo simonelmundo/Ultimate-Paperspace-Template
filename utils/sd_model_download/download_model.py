@@ -6,15 +6,11 @@ import json
 from bs4 import BeautifulSoup
 import os
 from dotenv import load_dotenv
-import urllib.request
-import time
-from urllib.parse import urlparse, parse_qs, unquote
 
 load_dotenv()
 
 model_storage_dir = os.environ['MODEL_DIR']
 hf_token = os.environ.get('HF_TOKEN', None)
-civitai_token = "bf5a73346bccc8ab11cd99e1386a0e1b"
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
 
 def is_url(url_str):
@@ -22,26 +18,37 @@ def is_url(url_str):
 
 def dl_web_file(web_dl_file, filename=None, token=None):
     web_dl_file = is_url(web_dl_file)[0] # clean the URL string
-    filename_cmd = f'--out="{filename}"' if filename else ''
     
-    headers = []
-    if token:
-        if 'huggingface.co' in web_dl_file:
-            headers.append(f"Authorization: Bearer {token}")
-        elif 'civitai.com' in web_dl_file:
-            headers.append(f"Authorization: Bearer {token}")
-    
-    header_cmd = ' '.join([f'--header="{h}"' for h in headers]) if headers else ''
-    
-    command = f'''aria2c {header_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
-    os.system(command)
-    
+    if os.environ['DOWNLOAD_METHOD'] == 'aria2c':
+        aria2c_path = os.environ['ARIA2C_PATH']
+        filename_cmd = f'--out="{filename}"' if filename else ''
+        token_cmd = f"--header='Authorization: Bearer {token}'" if token else ''
+        command = f'''"{aria2c_path}" {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}"'''
+        os.system(command)
+    else:
+        # Use requests-based download
+        from test_download import download_with_requests
+        output_path = filename if filename else web_dl_file.split('/')[-1]
+        download_with_requests(web_dl_file, output_path, token)
+
 def downlaod_model(model_uri):
     model_uri = model_uri.strip()
     headers={'User-Agent': user_agent}
     magnet_match = re.search(r'magnet:\?xt=urn:btih:[\-_A-Za-z0-9&=%.]*', model_uri)
-    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/models\/\d*\/.*?$', model_uri)
+    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/(?:api\/download\/)?models\/\d*.*?$', model_uri)
     web_match = is_url(model_uri)
+
+    # Get Civitai token from environment
+    civitai_token = "bf5a73346bccc8ab11cd99e1386a0e1b"
+
+    if civitai_match:
+        # Handle direct Civitai API download URLs
+        if civitai_token:
+            dl_web_file(model_uri, token=civitai_token)
+        else:
+            print("Warning: Civitai token not found. Some models may fail to download.")
+            dl_web_file(model_uri)
+        return
 
     if magnet_match:
         bash_var = magnet_match[0]
@@ -63,50 +70,6 @@ def downlaod_model(model_uri):
         gdrive_file_id, _ = gdown.parse_url.parse_url(model_uri)
         gdown.download(f"https://drive.google.com/uc?id={gdrive_file_id}&confirm=t")
         # clean exit here
-    elif civitai_match:
-        if not is_url(civitai_match[0]):
-            print('URL does not match known civitai.com pattern.')
-        else:
-            headers = {
-                'User-Agent': user_agent,
-                'Authorization': f'Bearer {civitai_token}'
-            }
-            
-            # Get the model ID from the URL
-            model_uri = model_uri.strip()
-            soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
-            data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
-            model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
-            latest_model = model_data['modelVersions'][0]
-            model_id = latest_model['id']
-            
-            # Construct direct download URL
-            download_url = f"https://civitai.com/api/download/models/{model_id}"
-            print(f'Downloading model: {model_data["name"]}')
-            
-            # Create request with headers
-            request = urllib.request.Request(download_url, headers=headers)
-            
-            try:
-                with urllib.request.urlopen(request) as response:
-                    # Get filename from content disposition
-                    content_disposition = response.headers.get('Content-Disposition')
-                    if content_disposition:
-                        filename = re.findall("filename=(.+)", content_disposition)[0].strip('"')
-                    else:
-                        filename = f"model_{model_id}.safetensors"
-                    
-                    # Download with aria2c
-                    dl_web_file(download_url, filename=filename, token=civitai_token)
-                    
-            except urllib.error.HTTPError as e:
-                print(f"Download failed: {str(e)}")
-                if e.code == 401:
-                    print("Authentication failed. Please check your Civitai API token.")
-                elif e.code == 404:
-                    print("Model not found.")
-                else:
-                    print(f"HTTP Error: {e.code}")
     elif web_match:
         # Always do the web match last
         with requests.get(web_match[0], allow_redirects=True, stream=True, headers=headers) as r:
