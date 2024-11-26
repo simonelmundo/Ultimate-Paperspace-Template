@@ -6,6 +6,9 @@ import json
 from bs4 import BeautifulSoup
 import os
 from dotenv import load_dotenv
+import urllib.request
+import time
+from urllib.parse import urlparse, parse_qs, unquote
 
 load_dotenv()
 
@@ -64,19 +67,46 @@ def downlaod_model(model_uri):
         if not is_url(civitai_match[0]):
             print('URL does not match known civitai.com pattern.')
         else:
-            headers = {'User-Agent': user_agent}
-            if civitai_token:
-                headers['Authorization'] = f'Bearer {civitai_token}'
-                
+            headers = {
+                'User-Agent': user_agent,
+                'Authorization': f'Bearer {civitai_token}'
+            }
+            
+            # Get the model ID from the URL
+            model_uri = model_uri.strip()
             soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
             data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
             model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
             latest_model = model_data['modelVersions'][0]
-            latest_model_url = f"https://civitai.com/api/download/models/{latest_model['id']}"
-            print('Downloading model:', model_data['name'])
+            model_id = latest_model['id']
             
-            dl_web_file(latest_model_url, token=civitai_token)
-            # clean exit here
+            # Construct direct download URL
+            download_url = f"https://civitai.com/api/download/models/{model_id}"
+            print(f'Downloading model: {model_data["name"]}')
+            
+            # Create request with headers
+            request = urllib.request.Request(download_url, headers=headers)
+            
+            try:
+                with urllib.request.urlopen(request) as response:
+                    # Get filename from content disposition
+                    content_disposition = response.headers.get('Content-Disposition')
+                    if content_disposition:
+                        filename = re.findall("filename=(.+)", content_disposition)[0].strip('"')
+                    else:
+                        filename = f"model_{model_id}.safetensors"
+                    
+                    # Download with aria2c
+                    dl_web_file(download_url, filename=filename, token=civitai_token)
+                    
+            except urllib.error.HTTPError as e:
+                print(f"Download failed: {str(e)}")
+                if e.code == 401:
+                    print("Authentication failed. Please check your Civitai API token.")
+                elif e.code == 404:
+                    print("Model not found.")
+                else:
+                    print(f"HTTP Error: {e.code}")
     elif web_match:
         # Always do the web match last
         with requests.get(web_match[0], allow_redirects=True, stream=True, headers=headers) as r:
