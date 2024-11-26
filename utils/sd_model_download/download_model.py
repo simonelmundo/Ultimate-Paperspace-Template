@@ -11,7 +11,7 @@ load_dotenv()
 
 model_storage_dir = os.environ['MODEL_DIR']
 hf_token = os.environ.get('HF_TOKEN', None)
-civitai_token = bf5a73346bccc8ab11cd99e1386a0e1b
+civitai_token = "bf5a73346bccc8ab11cd99e1386a0e1b"
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
 
 def is_url(url_str):
