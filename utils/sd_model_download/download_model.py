@@ -11,18 +11,26 @@ load_dotenv()
 
 model_storage_dir = os.environ['MODEL_DIR']
 hf_token = os.environ.get('HF_TOKEN', None)
+civitai_token = bf5a73346bccc8ab11cd99e1386a0e1b
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
 
 def is_url(url_str):
     return re.search(r'https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|www\.[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9]+\.[^\s]{2,}|www\.[a-zA-Z0-9]+\.[^\s]{2,}', url_str)
 
-def dl_web_file(web_dl_file, filename=None,  token=None):
+def dl_web_file(web_dl_file, filename=None, token=None):
     web_dl_file = is_url(web_dl_file)[0] # clean the URL string
     filename_cmd = f'--out="{filename}"' if filename else ''
-    token_cmd = f"--header='Authorization: Bearer {token}'" if token else ''
-    # We're going to use aria2 to split the download into threads which will allow us to download
-    # the file very fast even if the site serves the file slow.
-    command = f'''aria2c {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
+    
+    headers = []
+    if token:
+        if 'huggingface.co' in web_dl_file:
+            headers.append(f"Authorization: Bearer {token}")
+        elif 'civitai.com' in web_dl_file:
+            headers.append(f"Authorization: Bearer {token}")
+    
+    header_cmd = ' '.join([f'--header="{h}"' for h in headers]) if headers else ''
+    
+    command = f'''aria2c {header_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
     os.system(command)
     
 def downlaod_model(model_uri):
@@ -55,8 +63,11 @@ def downlaod_model(model_uri):
     elif civitai_match:
         if not is_url(civitai_match[0]):
             print('URL does not match known civitai.com pattern.')
-            # clean exit here
         else:
+            headers = {'User-Agent': user_agent}
+            if civitai_token:
+                headers['Authorization'] = f'Bearer {civitai_token}'
+                
             soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
             data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
             model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
@@ -64,19 +75,7 @@ def downlaod_model(model_uri):
             latest_model_url = f"https://civitai.com/api/download/models/{latest_model['id']}"
             print('Downloading model:', model_data['name'])
             
-            # Download the description to a markdown file next to the checkpoint
-            # desc = markdownify(model_data['description'])
-            # req = urllib.request.Request(latest_model_url, data=None, headers={'User-Agent': user_agent})
-            # content_disp = urllib.request.urlopen(req).getheader('Content-Disposition')
-            # if content_disp:
-            #     filename = Path(re.match(r'attachment; filename="(.*?)"', content_disp)[1]).stem
-            #     with open(Path(model_storage_dir, f'{filename}.md'), 'w') as file:
-            #         file.write(f"# {model_data['name']}\n")
-            #         file.write(f'Original CivitAI URL: {model_uri}\n\n<br>\n\n')
-            #         file.write(desc)
-            # else:
-            #     print('Failed to get filename of checkpoint for markdown file')
-            dl_web_file(latest_model_url)
+            dl_web_file(latest_model_url, token=civitai_token)
             # clean exit here
     elif web_match:
         # Always do the web match last
