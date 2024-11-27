@@ -40,6 +40,21 @@ def downlaod_model(model_uri):
         command = f'''aria2c --seed-time=0 --max-overall-upload-limit=1K --bt-max-peers=120 --summary-interval=0 --console-log-level=warn --file-allocation=none "{bash_var}"'''
         os.system(command)
         # clean exit here
+    elif 'https://huggingface.co/' in model_uri:
+        from urllib.parse import urlparse
+        filename = os.path.basename(urlparse(model_uri.replace('/blob/', '/resolve/')).path)
+        if hf_token:
+            headers['Authorization'] = f'Bearer {hf_token}'
+        response = requests.head(model_uri, allow_redirects=True, headers=headers)
+        if response.status_code == 401:
+            print('Huggingface token is invalid or not provided, please check your HF_TOKEN environment variable.')
+        else:
+            dl_web_file(model_uri.replace('/blob/', '/resolve/'), filename, token=hf_token)
+            # clean exit here
+    elif 'https://drive.google.com' in model_uri:
+        gdrive_file_id, _ = gdown.parse_url.parse_url(model_uri)
+        gdown.download(f"https://drive.google.com/uc?id={gdrive_file_id}&confirm=t")
+        # clean exit here
     elif civitai_match:
         if '/api/download/' in model_uri:
             model_id = model_uri.split('/')[-1].split('?')[0]  # Extract model ID
