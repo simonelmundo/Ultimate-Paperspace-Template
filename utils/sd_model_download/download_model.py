@@ -11,79 +11,57 @@ load_dotenv()
 
 model_storage_dir = os.environ['MODEL_DIR']
 hf_token = os.environ.get('HF_TOKEN', None)
-# Get Civitai token from environment or use default
-civitai_token = os.environ.get('CIVITAI_TOKEN', 'bf5a73346bccc8ab11cd99e1386a0e1b')
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
+
+# Add new environment variable for Civitai token
+civitai_token = 'bf5a73346bccc8ab11cd99e1386a0e1b'
 
 def is_url(url_str):
     return re.search(r'https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|www\.[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9]+\.[^\s]{2,}|www\.[a-zA-Z0-9]+\.[^\s]{2,}', url_str)
 
-def dl_web_file(web_dl_file, filename=None, token=None):
+def dl_web_file(web_dl_file, filename=None,  token=None):
     web_dl_file = is_url(web_dl_file)[0] # clean the URL string
+    filename_cmd = f'--out="{filename}"' if filename else ''
+    token_cmd = f"--header='Authorization: Bearer {token}'" if token else ''
+    # We're going to use aria2 to split the download into threads which will allow us to download
+    # the file very fast even if the site serves the file slow.
+    command = f'''aria2c {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
+    os.system(command)
     
-    if os.environ.get('DOWNLOAD_METHOD') == 'aria2c':
-        aria2c_path = os.environ.get('ARIA2C_PATH', 'aria2c')  # Default to 'aria2c' if not set
-        filename_cmd = f'--out="{filename}"' if filename else ''
-        token_cmd = f"--header='Authorization: Bearer {token}'" if token else ''
-        command = f'''"{aria2c_path}" {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}"'''
-        os.system(command)
-    else:
-        # Use requests-based download
-        headers = {'User-Agent': user_agent}
-        if token:
-            # Add token to URL for Civitai downloads
-            if '?' in web_dl_file:
-                web_dl_file += f'&token={token}'
-            else:
-                web_dl_file += f'?token={token}'
-        
-        response = requests.get(web_dl_file, headers=headers, stream=True)
-        response.raise_for_status()
-        
-        output_path = filename if filename else web_dl_file.split('/')[-1].split('?')[0]
-        total_size = int(response.headers.get('content-length', 0))
-        
-        print(f"Downloading to: {output_path}")
-        with open(output_path, 'wb') as file:
-            for data in response.iter_content(chunk_size=1024):
-                file.write(data)
-
 def downlaod_model(model_uri):
     model_uri = model_uri.strip()
     headers={'User-Agent': user_agent}
     magnet_match = re.search(r'magnet:\?xt=urn:btih:[\-_A-Za-z0-9&=%.]*', model_uri)
-    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/(?:api\/download\/)?models\/\d*.*?$', model_uri)
+    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/(models\/\d+|api\/download\/models\/\d+)', model_uri)
     web_match = is_url(model_uri)
-
-    if civitai_match:
-        # Handle direct Civitai API download URLs
-        if civitai_token:
-            dl_web_file(model_uri, token=civitai_token)
-        else:
-            print("Warning: Civitai token not found. Some models may fail to download.")
-            dl_web_file(model_uri)
-        return
 
     if magnet_match:
         bash_var = magnet_match[0]
         command = f'''aria2c --seed-time=0 --max-overall-upload-limit=1K --bt-max-peers=120 --summary-interval=0 --console-log-level=warn --file-allocation=none "{bash_var}"'''
         os.system(command)
         # clean exit here
-    elif 'https://huggingface.co/' in model_uri:
-        from urllib.parse import urlparse
-        filename = os.path.basename(urlparse(model_uri.replace('/blob/', '/resolve/')).path)
-        if hf_token:
-            headers['Authorization'] = f'Bearer {hf_token}'
-        response = requests.head(model_uri, allow_redirects=True, headers=headers)
-        if response.status_code == 401:
-            print('Huggingface token is invalid or not provided, please check your HF_TOKEN environment variable.')
+    elif civitai_match:
+        if '/api/download/' in model_uri:
+            model_id = model_uri.split('/')[-1].split('?')[0]  # Extract model ID
+            download_url = f"https://civitai.com/api/download/models/{model_id}"
+            if civitai_token:
+                download_url += f"?token={civitai_token}"
+            dl_web_file(download_url)
         else:
-            dl_web_file(model_uri.replace('/blob/', '/resolve/'), filename, token=hf_token)
-            # clean exit here
-    elif 'https://drive.google.com' in model_uri:
-        gdrive_file_id, _ = gdown.parse_url.parse_url(model_uri)
-        gdown.download(f"https://drive.google.com/uc?id={gdrive_file_id}&confirm=t")
-        # clean exit here
+            if not is_url(civitai_match[0]):
+                print('URL does not match known civitai.com pattern.')
+            else:
+                soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
+                data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
+                model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
+                latest_model = model_data['modelVersions'][0]
+                
+                latest_model_url = f"https://civitai.com/api/download/models/{latest_model['id']}"
+                if civitai_token:
+                    latest_model_url += f"?token={civitai_token}"
+                
+                print('Downloading model:', model_data['name'])
+                dl_web_file(latest_model_url)
     elif web_match:
         # Always do the web match last
         with requests.get(web_match[0], allow_redirects=True, stream=True, headers=headers) as r:
