@@ -14,7 +14,7 @@ hf_token = os.environ.get('HF_TOKEN', None)
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
 
 # Add new environment variable for Civitai token
-civitai_token = 'bf5a73346bccc8ab11cd99e1386a0e1b'
+civitai_token = 'be4ab0abfc4f8ff45247122f0ccd0196'
 
 def is_url(url_str):
     return re.search(r'https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|www\.[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9]+\.[^\s]{2,}|www\.[a-zA-Z0-9]+\.[^\s]{2,}', url_str)
