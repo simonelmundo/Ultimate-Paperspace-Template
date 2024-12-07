@@ -6,6 +6,8 @@ import json
 from bs4 import BeautifulSoup
 import os
 from dotenv import load_dotenv
+from pathlib import Path
+from urllib.parse import urlparse
 
 load_dotenv()
 
@@ -25,9 +27,64 @@ def dl_web_file(web_dl_file, filename=None,  token=None):
     command = f'''aria2c {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
     os.system(command)
     
+def get_model_name_from_hf_url(url):
+    # Extract model name from URL like https://huggingface.co/bartowski/magnum-v4-22b-GGUF/blob/main/magnum-v4-22b-Q6_K.gguf
+    parts = urlparse(url).path.split('/')
+    if len(parts) >= 3:
+        return parts[2]  # Get the model name part (e.g., 'magnum-v4-22b-GGUF')
+    return None
+
+def prepare_llm_folder(model_name):
+    """Create a specific folder for each LLM model"""
+    folder_path = Path(f"{model_storage_dir}/llm_checkpoints/{model_name}")
+    folder_path.mkdir(parents=True, exist_ok=True)
+    os.chdir(folder_path)
+    return folder_path
+
+def get_hf_repo_files(repo_id, headers):
+    """Get list of files from a Hugging Face repository"""
+    api_url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
+    response = requests.get(api_url, headers=headers)
+    if response.status_code == 200:
+        return [item['path'] for item in response.json()]
+    return []
+
+def download_hf_model(model_uri, headers):
+    # Extract repo_id from URL (e.g., "Downtown-Case/CohereForAI_c4ai-command-r-08-2024-exl2-3.75bpw")
+    repo_id = '/'.join(urlparse(model_uri).path.split('/')[1:3])
+    model_name = repo_id.split('/')[-1]
+    
+    # Prepare folder for this specific model
+    folder_path = prepare_llm_folder(model_name)
+    
+    # Get list of files in the repository
+    files = get_hf_repo_files(repo_id, headers)
+    
+    # Download each file
+    for file in files:
+        # Skip .gitattributes and README
+        if file in ['.gitattributes', 'README.md']:
+            continue
+            
+        file_url = f"https://huggingface.co/{repo_id}/resolve/main/{file}"
+        print(f"Downloading {file}...")
+        dl_web_file(file_url, filename=file, token=hf_token)
+
 def downlaod_model(model_uri):
     model_uri = model_uri.strip()
     headers={'User-Agent': user_agent}
+    
+    # Handle Hugging Face downloads
+    if 'https://huggingface.co/' in model_uri:
+        if hf_token:
+            headers['Authorization'] = f'Bearer {hf_token}'
+        response = requests.head(model_uri, allow_redirects=True, headers=headers)
+        if response.status_code == 401:
+            print('Huggingface token is invalid or not provided, please check your HF_TOKEN environment variable.')
+        else:
+            download_hf_model(model_uri, headers)
+        return
+    
     magnet_match = re.search(r'magnet:\?xt=urn:btih:[\-_A-Za-z0-9&=%.]*', model_uri)
     civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/models\/\d*\/.*?$', model_uri)
     web_match = is_url(model_uri)
@@ -37,17 +94,6 @@ def downlaod_model(model_uri):
         command = f'''aria2c --seed-time=0 --max-overall-upload-limit=1K --bt-max-peers=120 --summary-interval=0 --console-log-level=warn --file-allocation=none "{bash_var}"'''
         os.system(command)
         # clean exit here
-    elif 'https://huggingface.co/' in model_uri:
-        from urllib.parse import urlparse
-        filename = os.path.basename(urlparse(model_uri.replace('/blob/', '/resolve/')).path)
-        if hf_token:
-            headers['Authorization'] = f'Bearer {hf_token}'
-        response = requests.head(model_uri, allow_redirects=True, headers=headers)
-        if response.status_code == 401:
-            print('Huggingface token is invalid or not provided, please check your HF_TOKEN environment variable.')
-        else:
-            dl_web_file(model_uri.replace('/blob/', '/resolve/'), filename, token=hf_token)
-            # clean exit here
     elif 'https://drive.google.com' in model_uri:
         gdrive_file_id, _ = gdown.parse_url.parse_url(model_uri)
         gdown.download(f"https://drive.google.com/uc?id={gdrive_file_id}&confirm=t")
@@ -143,5 +189,12 @@ for uri in embedding_list:
 prepare_folder("upscaler") 
 upscaler_list = os.environ.get('UPSCALER_LIST', "").split(',')
 for uri in upscaler_list:
+    if uri != '':
+        downlaod_model(uri)
+
+# Add new LLM model list handling
+prepare_folder("llm_checkpoints")
+llm_list = os.environ.get('LLM_LIST', "").split(',')
+for uri in llm_list:
     if uri != '':
         downlaod_model(uri)
