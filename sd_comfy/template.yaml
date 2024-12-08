@@ -22,6 +22,7 @@ prepare_repo: |-
     "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO"
     "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO"
     "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO"
+    "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
   )
   prepare_link "${symlinks[@]}"
 
@@ -57,3 +58,4 @@ other_commands: |-
   export LINK_CONTROLNET_TO=${{ '{' ~ name|upper }}_LINK_CONTROLNET_TO:-"${REPO_DIR}/models/controlnet"}
   export LINK_EMBEDDING_TO=${{ '{' ~ name|upper }}_LINK_EMBEDDING_TO:-"${REPO_DIR}/models/embeddings"}
   export LINK_UPSCALER_TO=${{ '{' ~ name|upper }}_LINK_EMBEDDING_TO:-"${REPO_DIR}/models/upscale_models"}
+  export LINK_LLM_TO=${{ '{' ~ name|upper }}_LINK_LLM_TO:-"${REPO_DIR}/models/llm_checkpoints"}
