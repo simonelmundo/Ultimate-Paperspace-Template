@@ -29,7 +29,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
       "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO"
       "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO"
       "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO"
-      "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
+      "$MODEL_DIR/llm_checkpoints:$WORKING_DIR/models/LLM_checkpoints"
     )
     prepare_link "${symlinks[@]}"
     rm -rf $VENV_DIR/sd_comfy-env
