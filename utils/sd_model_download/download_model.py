@@ -14,19 +14,51 @@ load_dotenv()
 model_storage_dir = os.environ['MODEL_DIR']
 hf_token = os.environ.get('HF_TOKEN', None)
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
+civitai_token = 'bf5a73346bccc8ab11cd99e1386a0e1b'
 
 def is_url(url_str):
     return re.search(r'https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|www\.[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9]+\.[^\s]{2,}|www\.[a-zA-Z0-9]+\.[^\s]{2,}', url_str)
 
-def dl_web_file(web_dl_file, filename=None,  token=None):
-    web_dl_file = is_url(web_dl_file)[0] # clean the URL string
+def check_disk_space(required_bytes, path="/tmp"):
+    """Check if there's enough disk space available"""
+    st = os.statvfs(path)
+    free_bytes = st.f_frsize * st.f_bavail
+    return free_bytes > required_bytes
+
+def dl_web_file(web_dl_file, filename=None, token=None):
+    web_dl_file = is_url(web_dl_file)[0]  # clean the URL string
+    
+    # Get file size before downloading
+    response = requests.head(web_dl_file, headers={'Authorization': f'Bearer {token}'} if token else {})
+    file_size = int(response.headers.get('content-length', 0))
+    
+    # Check if we have enough space (file size + 1GB buffer)
+    if not check_disk_space(file_size + (1024 * 1024 * 1024)):
+        print(f"Error: Not enough disk space to download {filename}")
+        print(f"Required: {file_size / (1024*1024*1024):.2f}GB")
+        return False
+        
     filename_cmd = f'--out="{filename}"' if filename else ''
     token_cmd = f"--header='Authorization: Bearer {token}'" if token else ''
-    # We're going to use aria2 to split the download into threads which will allow us to download
-    # the file very fast even if the site serves the file slow.
-    command = f'''aria2c {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
-    os.system(command)
     
+    command = f'''aria2c {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
+    
+    # Try the download up to 3 times
+    for attempt in range(3):
+        try:
+            result = os.system(command)
+            if result == 0:
+                return True
+            print(f"Download attempt {attempt + 1} failed, retrying...")
+        except Exception as e:
+            print(f"Error during download: {str(e)}")
+            if attempt < 2:
+                print("Retrying...")
+            continue
+    
+    print(f"Failed to download {filename} after 3 attempts")
+    return False
+
 def get_model_name_from_hf_url(url):
     # Extract model name from URL like https://huggingface.co/bartowski/magnum-v4-22b-GGUF/blob/main/magnum-v4-22b-Q6_K.gguf
     parts = urlparse(url).path.split('/')
@@ -68,7 +100,8 @@ def download_hf_model(model_uri, headers, model_type=None):
         filename = os.path.basename(model_uri)
         file_url = model_uri.replace('/blob/', '/resolve/')
         print(f"Downloading single file: {filename}...")
-        dl_web_file(file_url, filename=filename, token=hf_token)
+        if not dl_web_file(file_url, filename=filename, token=hf_token):
+            print(f"Failed to download {filename}, skipping...")
         return
         
     # If not a specific file, download all repository files
@@ -78,7 +111,8 @@ def download_hf_model(model_uri, headers, model_type=None):
             continue
         file_url = f"https://huggingface.co/{repo_id}/resolve/main/{file}"
         print(f"Downloading {file}...")
-        dl_web_file(file_url, filename=file, token=hf_token)
+        if not dl_web_file(file_url, filename=file, token=hf_token):
+            print(f"Failed to download {file}, skipping...")
 
 def downlaod_model(model_uri, model_type=None):
     model_uri = model_uri.strip()
@@ -96,44 +130,38 @@ def downlaod_model(model_uri, model_type=None):
         return
     
     magnet_match = re.search(r'magnet:\?xt=urn:btih:[\-_A-Za-z0-9&=%.]*', model_uri)
-    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/models\/\d*\/.*?$', model_uri)
+    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/(models\/\d+|api\/download\/models\/\d+)', model_uri)
     web_match = is_url(model_uri)
 
     if magnet_match:
         bash_var = magnet_match[0]
         command = f'''aria2c --seed-time=0 --max-overall-upload-limit=1K --bt-max-peers=120 --summary-interval=0 --console-log-level=warn --file-allocation=none "{bash_var}"'''
         os.system(command)
-        # clean exit here
     elif 'https://drive.google.com' in model_uri:
         gdrive_file_id, _ = gdown.parse_url.parse_url(model_uri)
         gdown.download(f"https://drive.google.com/uc?id={gdrive_file_id}&confirm=t")
-        # clean exit here
     elif civitai_match:
-        if not is_url(civitai_match[0]):
-            print('URL does not match known civitai.com pattern.')
-            # clean exit here
+        if '/api/download/' in model_uri:
+            model_id = model_uri.split('/')[-1].split('?')[0]  # Extract model ID
+            download_url = f"https://civitai.com/api/download/models/{model_id}"
+            if civitai_token:
+                download_url += f"?token={civitai_token}"
+            dl_web_file(download_url)
         else:
-            soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
-            data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
-            model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
-            latest_model = model_data['modelVersions'][0]
-            latest_model_url = f"https://civitai.com/api/download/models/{latest_model['id']}"
-            print('Downloading model:', model_data['name'])
-            
-            # Download the description to a markdown file next to the checkpoint
-            # desc = markdownify(model_data['description'])
-            # req = urllib.request.Request(latest_model_url, data=None, headers={'User-Agent': user_agent})
-            # content_disp = urllib.request.urlopen(req).getheader('Content-Disposition')
-            # if content_disp:
-            #     filename = Path(re.match(r'attachment; filename="(.*?)"', content_disp)[1]).stem
-            #     with open(Path(model_storage_dir, f'{filename}.md'), 'w') as file:
-            #         file.write(f"# {model_data['name']}\n")
-            #         file.write(f'Original CivitAI URL: {model_uri}\n\n<br>\n\n')
-            #         file.write(desc)
-            # else:
-            #     print('Failed to get filename of checkpoint for markdown file')
-            dl_web_file(latest_model_url)
-            # clean exit here
+            if not is_url(civitai_match[0]):
+                print('URL does not match known civitai.com pattern.')
+            else:
+                soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
+                data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
+                model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
+                latest_model = model_data['modelVersions'][0]
+                
+                latest_model_url = f"https://civitai.com/api/download/models/{latest_model['id']}"
+                if civitai_token:
+                    latest_model_url += f"?token={civitai_token}"
+                
+                print('Downloading model:', model_data['name'])
+                dl_web_file(latest_model_url)
     elif web_match:
         # Always do the web match last
         with requests.get(web_match[0], allow_redirects=True, stream=True, headers=headers) as r:
