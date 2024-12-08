@@ -63,20 +63,22 @@ def download_hf_model(model_uri, headers, model_type=None):
     
     os.chdir(folder_path)
     
-    # Check if this is a specific file URL
-    if '/blob/' in model_uri or len(parts) > 4:
+    # Check if this is a specific file URL (contains /blob/main/)
+    if '/blob/' in model_uri:
         filename = os.path.basename(model_uri)
         file_url = model_uri.replace('/blob/', '/resolve/')
         print(f"Downloading single file: {filename}...")
         dl_web_file(file_url, filename=filename, token=hf_token)
-    else:
-        files = get_hf_repo_files(repo_id, headers)
-        for file in files:
-            if file in ['.gitattributes', 'README.md']:
-                continue
-            file_url = f"https://huggingface.co/{repo_id}/resolve/main/{file}"
-            print(f"Downloading {file}...")
-            dl_web_file(file_url, filename=file, token=hf_token)
+        return
+        
+    # If not a specific file, download all repository files
+    files = get_hf_repo_files(repo_id, headers)
+    for file in files:
+        if file in ['.gitattributes']:  # Only skip git files
+            continue
+        file_url = f"https://huggingface.co/{repo_id}/resolve/main/{file}"
+        print(f"Downloading {file}...")
+        dl_web_file(file_url, filename=file, token=hf_token)
 
 def downlaod_model(model_uri, model_type=None):
     model_uri = model_uri.strip()
@@ -168,7 +170,11 @@ prepare_folder("sd")
 model_list = os.environ.get('MODEL_LIST', "").split(',')
 for uri in model_list:
     if uri != '':
-        downlaod_model(uri, 'sd')
+        # If it's a HuggingFace URL, treat it as an LLM model
+        if 'https://huggingface.co/' in uri:
+            downlaod_model(uri, 'llm')
+        else:
+            downlaod_model(uri, 'sd')
 
 prepare_folder("lora")
 lora_list = os.environ.get('LORA_LIST', "").split(',')
@@ -201,7 +207,7 @@ for uri in upscaler_list:
         downlaod_model(uri, 'upscaler')
 
 # Add new LLM model list handling
-prepare_folder("llm_checkpoints")
+prepare_folder("LLM_checkpoints")
 llm_list = os.environ.get('LLM_LIST', "").split(',')
 for uri in llm_list:
     if uri != '':
