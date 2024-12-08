@@ -6,15 +6,14 @@ import json
 from bs4 import BeautifulSoup
 import os
 from dotenv import load_dotenv
+from pathlib import Path
+from urllib.parse import urlparse
 
 load_dotenv()
 
 model_storage_dir = os.environ['MODEL_DIR']
 hf_token = os.environ.get('HF_TOKEN', None)
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
-
-# Add new environment variable for Civitai token
-civitai_token = 'be4ab0abfc4f8ff45247122f0ccd0196'
 
 def is_url(url_str):
     return re.search(r'https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|www\.[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9]+\.[^\s]{2,}|www\.[a-zA-Z0-9]+\.[^\s]{2,}', url_str)
@@ -28,11 +27,74 @@ def dl_web_file(web_dl_file, filename=None,  token=None):
     command = f'''aria2c {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
     os.system(command)
     
-def downlaod_model(model_uri):
+def get_model_name_from_hf_url(url):
+    # Extract model name from URL like https://huggingface.co/bartowski/magnum-v4-22b-GGUF/blob/main/magnum-v4-22b-Q6_K.gguf
+    parts = urlparse(url).path.split('/')
+    if len(parts) >= 3:
+        return parts[2]  # Get the model name part (e.g., 'magnum-v4-22b-GGUF')
+    return None
+
+def prepare_llm_folder(model_name):
+    """Create a specific folder for each LLM model"""
+    folder_path = Path(f"{model_storage_dir}/llm_checkpoints/{model_name}")
+    folder_path.mkdir(parents=True, exist_ok=True)
+    os.chdir(folder_path)
+    return folder_path
+
+def get_hf_repo_files(repo_id, headers):
+    """Get list of files from a Hugging Face repository"""
+    api_url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
+    response = requests.get(api_url, headers=headers)
+    if response.status_code == 200:
+        return [item['path'] for item in response.json()]
+    return []
+
+def download_hf_model(model_uri, headers, model_type=None):
+    # Extract repo_id from URL
+    parts = urlparse(model_uri).path.split('/')
+    repo_id = '/'.join(parts[1:3])
+    model_name = repo_id.split('/')[-1]
+    
+    # If this is not an LLM model, don't create a specific subfolder
+    if model_type != 'llm':
+        folder_path = Path(model_storage_dir) / model_type
+    else:
+        folder_path = prepare_llm_folder(model_name)
+    
+    os.chdir(folder_path)
+    
+    # Check if this is a specific file URL
+    if '/blob/' in model_uri or len(parts) > 4:
+        filename = os.path.basename(model_uri)
+        file_url = model_uri.replace('/blob/', '/resolve/')
+        print(f"Downloading single file: {filename}...")
+        dl_web_file(file_url, filename=filename, token=hf_token)
+    else:
+        files = get_hf_repo_files(repo_id, headers)
+        for file in files:
+            if file in ['.gitattributes', 'README.md']:
+                continue
+            file_url = f"https://huggingface.co/{repo_id}/resolve/main/{file}"
+            print(f"Downloading {file}...")
+            dl_web_file(file_url, filename=file, token=hf_token)
+
+def downlaod_model(model_uri, model_type=None):
     model_uri = model_uri.strip()
     headers={'User-Agent': user_agent}
+    
+    # Handle Hugging Face downloads
+    if 'https://huggingface.co/' in model_uri:
+        if hf_token:
+            headers['Authorization'] = f'Bearer {hf_token}'
+        response = requests.head(model_uri, allow_redirects=True, headers=headers)
+        if response.status_code == 401:
+            print('Huggingface token is invalid or not provided, please check your HF_TOKEN environment variable.')
+        else:
+            download_hf_model(model_uri, headers, model_type)
+        return
+    
     magnet_match = re.search(r'magnet:\?xt=urn:btih:[\-_A-Za-z0-9&=%.]*', model_uri)
-    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/(models\/\d+|api\/download\/models\/\d+)', model_uri)
+    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/models\/\d*\/.*?$', model_uri)
     web_match = is_url(model_uri)
 
     if magnet_match:
@@ -40,43 +102,36 @@ def downlaod_model(model_uri):
         command = f'''aria2c --seed-time=0 --max-overall-upload-limit=1K --bt-max-peers=120 --summary-interval=0 --console-log-level=warn --file-allocation=none "{bash_var}"'''
         os.system(command)
         # clean exit here
-    elif 'https://huggingface.co/' in model_uri:
-        from urllib.parse import urlparse
-        filename = os.path.basename(urlparse(model_uri.replace('/blob/', '/resolve/')).path)
-        if hf_token:
-            headers['Authorization'] = f'Bearer {hf_token}'
-        response = requests.head(model_uri, allow_redirects=True, headers=headers)
-        if response.status_code == 401:
-            print('Huggingface token is invalid or not provided, please check your HF_TOKEN environment variable.')
-        else:
-            dl_web_file(model_uri.replace('/blob/', '/resolve/'), filename, token=hf_token)
-            # clean exit here
     elif 'https://drive.google.com' in model_uri:
         gdrive_file_id, _ = gdown.parse_url.parse_url(model_uri)
         gdown.download(f"https://drive.google.com/uc?id={gdrive_file_id}&confirm=t")
         # clean exit here
     elif civitai_match:
-        if '/api/download/' in model_uri:
-            model_id = model_uri.split('/')[-1].split('?')[0]  # Extract model ID
-            download_url = f"https://civitai.com/api/download/models/{model_id}"
-            if civitai_token:
-                download_url += f"?token={civitai_token}"
-            dl_web_file(download_url)
+        if not is_url(civitai_match[0]):
+            print('URL does not match known civitai.com pattern.')
+            # clean exit here
         else:
-            if not is_url(civitai_match[0]):
-                print('URL does not match known civitai.com pattern.')
-            else:
-                soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
-                data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
-                model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
-                latest_model = model_data['modelVersions'][0]
-                
-                latest_model_url = f"https://civitai.com/api/download/models/{latest_model['id']}"
-                if civitai_token:
-                    latest_model_url += f"?token={civitai_token}"
-                
-                print('Downloading model:', model_data['name'])
-                dl_web_file(latest_model_url)
+            soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
+            data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
+            model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
+            latest_model = model_data['modelVersions'][0]
+            latest_model_url = f"https://civitai.com/api/download/models/{latest_model['id']}"
+            print('Downloading model:', model_data['name'])
+            
+            # Download the description to a markdown file next to the checkpoint
+            # desc = markdownify(model_data['description'])
+            # req = urllib.request.Request(latest_model_url, data=None, headers={'User-Agent': user_agent})
+            # content_disp = urllib.request.urlopen(req).getheader('Content-Disposition')
+            # if content_disp:
+            #     filename = Path(re.match(r'attachment; filename="(.*?)"', content_disp)[1]).stem
+            #     with open(Path(model_storage_dir, f'{filename}.md'), 'w') as file:
+            #         file.write(f"# {model_data['name']}\n")
+            #         file.write(f'Original CivitAI URL: {model_uri}\n\n<br>\n\n')
+            #         file.write(desc)
+            # else:
+            #     print('Failed to get filename of checkpoint for markdown file')
+            dl_web_file(latest_model_url)
+            # clean exit here
     elif web_match:
         # Always do the web match last
         with requests.get(web_match[0], allow_redirects=True, stream=True, headers=headers) as r:
@@ -113,34 +168,41 @@ prepare_folder("sd")
 model_list = os.environ.get('MODEL_LIST', "").split(',')
 for uri in model_list:
     if uri != '':
-        downlaod_model(uri)
+        downlaod_model(uri, 'sd')
 
 prepare_folder("lora")
 lora_list = os.environ.get('LORA_LIST', "").split(',')
 for uri in lora_list:
     if uri != '':
-        downlaod_model(uri)
+        downlaod_model(uri, 'lora')
 
 prepare_folder("controlnet")
 controlnet_list = os.environ.get('CONTROLNET_LIST', "").split(',')
 for uri in controlnet_list:
     if uri != '':
-        downlaod_model(uri)
+        downlaod_model(uri, 'controlnet')
 
 prepare_folder("vae")
 vae_list = os.environ.get('VAE_LIST', "").split(',')
 for uri in vae_list:
     if uri != '':
-        downlaod_model(uri)
+        downlaod_model(uri, 'vae')
         
 prepare_folder("embedding") 
 embedding_list = os.environ.get('EMBEDDING_LIST', "").split(',')
 for uri in embedding_list:
     if uri != '':
-        downlaod_model(uri)
+        downlaod_model(uri, 'embedding')
         
 prepare_folder("upscaler") 
 upscaler_list = os.environ.get('UPSCALER_LIST', "").split(',')
 for uri in upscaler_list:
     if uri != '':
-        downlaod_model(uri)
+        downlaod_model(uri, 'upscaler')
+
+# Add new LLM model list handling
+prepare_folder("llm_checkpoints")
+llm_list = os.environ.get('LLM_LIST', "").split(',')
+for uri in llm_list:
+    if uri != '':
+        downlaod_model(uri, 'llm')
