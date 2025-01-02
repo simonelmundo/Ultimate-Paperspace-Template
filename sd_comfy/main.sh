@@ -118,16 +118,39 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # Install base requirements first
     try_install "pip==24.0"
     try_install "--upgrade wheel setuptools"
-    try_install "numpy"  # Install numpy first as it's a common dependency
-    
+    try_install "numpy>=1.26.0,<2.3.0"
+
+    # Install PyTorch with CUDA first
+    echo "Installing PyTorch with CUDA support..."
+    pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121
+
     cd $REPO_DIR
     try_install "xformers"
-    try_install "torchvision torchaudio --no-deps"
-    
-    # Install and verify DepthFlow
-    try_install "depthflow"
-    verify_depthflow
-    
+    try_install "shaderflow"
+
+    # Install and setup DepthFlow with proper symlink
+    echo "Installing and configuring DepthFlow..."
+    # Suppress root warning during installation
+    export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
+
+    # Create answer file for DepthFlow's CUDA prompt
+    echo "cuda" > /tmp/depthflow_answer
+
+    # Install DepthFlow with shaderflow extras
+    cat /tmp/depthflow_answer | try_install "depthflow[shaderflow]"
+    rm /tmp/depthflow_answer
+
+    # Create clean symlink for DepthFlow
+    if python3 -c "import DepthFlow" 2>/dev/null; then
+        echo "Setting up DepthFlow symlink..."
+        cd /storage/stable-diffusion-comfy/custom_nodes
+        rm -f DepthFlow  # Remove any existing symlink
+        ln -sf "/tmp/sd_comfy-env/lib/python3.10/site-packages/DepthFlow" DepthFlow
+        echo "DepthFlow symlink created successfully"
+    else
+        echo "Warning: DepthFlow installation not found"
+    fi
+
     # Handle tensorflow version compatibility
     if ! pip install "tensorflow==2.6.2" 2>/dev/null; then
         echo "Attempting to install compatible tensorflow version..."
