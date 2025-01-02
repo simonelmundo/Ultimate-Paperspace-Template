@@ -46,7 +46,20 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         libxrandr-dev \
         libxinerama-dev \
         libxcursor-dev \
-        libxi-dev || true
+        libxi-dev \
+        libatlas-base-dev \
+        libblas-dev \
+        liblapack-dev \
+        libjpeg-dev \
+        libpng-dev \
+        libtiff-dev \
+        libbz2-dev \
+        libgl1-mesa-dev \
+        python2-dev \
+        libopenblas-dev \
+        cmake \
+        build-essential \
+        || true
 
     # Initialize array for failed installations
     failed_installations=()
@@ -58,31 +71,83 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         if ! pip install $package 2>&1 | tee /tmp/pip_install.log; then
             failed_installations+=("$package")
             echo "Failed to install: $package"
-            return 0  # Return 0 to continue script execution
+            return 0
         fi
         return 0
     }
 
-    # Install pip packages individually, track failures
+    # Function to safely process requirements file
+    process_requirements() {
+        local req_file="$1"
+        echo "Processing requirements from: $req_file"
+        while IFS= read -r requirement || [ -n "$requirement" ]; do
+            if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
+                # Skip local directory references
+                if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
+                    echo "Skipping local directory reference: $requirement"
+                    continue
+                fi
+                try_install "$requirement"
+            fi
+        done < "$req_file"
+    }
+
+    # Function to verify DepthFlow installation
+    verify_depthflow() {
+        echo "Verifying DepthFlow installation..."
+        if python3 -c "import DepthFlow.Motion; import DepthFlow.Resources" 2>/dev/null; then
+            echo "DepthFlow modules verified successfully"
+            return 0
+        else
+            echo "DepthFlow verification failed, attempting reinstallation..."
+            pip uninstall -y depthflow 2>/dev/null || true
+            try_install "depthflow --no-cache-dir"
+            
+            # Verify again after reinstall
+            if python3 -c "import DepthFlow.Motion; import DepthFlow.Resources" 2>/dev/null; then
+                echo "DepthFlow reinstallation successful"
+                return 0
+            else
+                echo "DepthFlow installation failed. Adding to failed installations."
+                failed_installations+=("depthflow (modules missing: Motion, Resources)")
+                return 1
+            fi
+        fi
+    }
+
+    # Install base requirements first
     try_install "pip==24.0"
     try_install "--upgrade wheel setuptools"
+    try_install "numpy"  # Install numpy first as it's a common dependency
     
     cd $REPO_DIR
     try_install "xformers"
     try_install "torchvision torchaudio --no-deps"
     
-    # Read and install requirements line by line
-    while IFS= read -r requirement || [ -n "$requirement" ]; do
-        if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
-            try_install "$requirement"
-        fi
-    done < requirements.txt
+    # Install and verify DepthFlow
+    try_install "depthflow"
+    verify_depthflow
     
-    while IFS= read -r requirement || [ -n "$requirement" ]; do
-        if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
-            try_install "$requirement"
-        fi
-    done < "/notebooks/sd_comfy/additional_requirements.txt"
+    # Handle tensorflow version compatibility
+    if ! pip install "tensorflow==2.6.2" 2>/dev/null; then
+        echo "Attempting to install compatible tensorflow version..."
+        try_install "tensorflow>=2.8.0,<2.19.0"
+    fi
+    
+    # Handle imgui-bundle with specific build requirements
+    export CMAKE_ARGS="-DUSE_X11=ON"
+    try_install "imgui-bundle --no-cache-dir"
+    
+    # Process requirements files
+    process_requirements "requirements.txt"
+    
+    # Install custom nodes requirements
+    echo "Installing DepthFlow node requirements..."
+    if [ -f "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt" ]; then
+        process_requirements "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt"
+    fi
+    
+    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
     # Display failed installations if any
     if [ ${#failed_installations[@]} -ne 0 ]; then
