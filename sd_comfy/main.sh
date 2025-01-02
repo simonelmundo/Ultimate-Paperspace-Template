@@ -1,6 +1,5 @@
 #!/bin/bash
-# Remove or comment out set -e to prevent script from stopping on errors
-# set -e
+set -e
 
 current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
@@ -34,8 +33,10 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     )
     prepare_link "${symlinks[@]}"
     rm -rf $VENV_DIR/sd_comfy-env
-
+    
+    
     python3.10 -m venv $VENV_DIR/sd_comfy-env
+    
     source $VENV_DIR/sd_comfy-env/bin/activate
 
     # Install required system packages
@@ -67,12 +68,11 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     try_install() {
         local package="$1"
         echo "Installing: $package"
-        if ! pip install $package 2>&1 | tee /tmp/pip_install.log || true; then
+        if ! pip install $package 2>&1 | tee /tmp/pip_install.log; then
             failed_installations+=("$package")
             echo "Failed to install: $package"
-            echo "See /tmp/pip_install.log for details"
+            return 0
         fi
-        # Always return true to continue script
         return 0
     }
 
@@ -80,44 +80,39 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     process_requirements() {
         local req_file="$1"
         echo "Processing requirements from: $req_file"
-        
-        # Initialize local pip args
-        local pip_args=""
-        
         while IFS= read -r requirement || [ -n "$requirement" ]; do
-            # Skip empty lines and comments
-            if [[ -z "$requirement" || "$requirement" =~ ^# ]]; then
-                continue
-            fi
-            
-            # Handle pip configuration options
-            if [[ "$requirement" =~ ^--.*$ ]]; then
-                pip_args="$pip_args $requirement"
-                continue
-            fi
-            
-            # Handle nested requirements files
-            if [[ "$requirement" =~ ^-r ]]; then
-                local nested_req_file=$(echo "$requirement" | cut -d' ' -f2)
-                echo "Processing nested requirements file: $nested_req_file"
-                process_requirements "$nested_req_file" || true
-                continue
-            fi
-            
-            # Skip local directory references
-            if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
-                echo "Skipping local directory reference: $requirement"
-                continue
-            fi
-            
-            # Install package with accumulated pip args
-            if [ ! -z "$pip_args" ]; then
-                try_install "$requirement $pip_args" || true
-            else
-                try_install "$requirement" || true
+            if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
+                # Skip local directory references
+                if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
+                    echo "Skipping local directory reference: $requirement"
+                    continue
+                fi
+                try_install "$requirement"
             fi
         done < "$req_file"
-        return 0
+    }
+
+    # Function to verify DepthFlow installation
+    verify_depthflow() {
+        echo "Verifying DepthFlow installation..."
+        if python3 -c "import DepthFlow.Motion; import DepthFlow.Resources" 2>/dev/null; then
+            echo "DepthFlow modules verified successfully"
+            return 0
+        else
+            echo "DepthFlow verification failed, attempting reinstallation..."
+            pip uninstall -y depthflow 2>/dev/null || true
+            try_install "depthflow --no-cache-dir"
+            
+            # Verify again after reinstall
+            if python3 -c "import DepthFlow.Motion; import DepthFlow.Resources" 2>/dev/null; then
+                echo "DepthFlow reinstallation successful"
+                return 0
+            else
+                echo "DepthFlow installation failed. Adding to failed installations."
+                failed_installations+=("depthflow (modules missing: Motion, Resources)")
+                return 1
+            fi
+        fi
     }
 
     # Install base requirements first
@@ -125,20 +120,13 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     try_install "--upgrade wheel setuptools"
     try_install "numpy"  # Install numpy first as it's a common dependency
     
-    # Install PyTorch with CUDA first
-    echo "Installing PyTorch with CUDA support..."
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-    
     cd $REPO_DIR
     try_install "xformers"
+    try_install "torchvision torchaudio --no-deps"
     
-    # Create answer file for DepthFlow's CUDA prompt
-    echo "cuda" > /tmp/depthflow_answer
-    
-    # Install DepthFlow with automated CUDA selection
-    echo "Installing DepthFlow..."
-    cat /tmp/depthflow_answer | try_install "depthflow[shaderflow]"
-    rm /tmp/depthflow_answer
+    # Install and verify DepthFlow
+    try_install "depthflow"
+    verify_depthflow
     
     # Handle tensorflow version compatibility
     if ! pip install "tensorflow==2.6.2" 2>/dev/null; then
@@ -154,6 +142,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     process_requirements "requirements.txt"
     
     # Install custom nodes requirements
+    echo "Installing DepthFlow node requirements..."
     if [ -f "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt" ]; then
         process_requirements "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt"
     fi
