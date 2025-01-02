@@ -46,6 +46,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     pip install xformers
     pip install torchvision torchaudio --no-deps
     pip install -r requirements.txt
+    pip install -r "$(dirname "$0")/additional_requirements.txt"
     
     touch /tmp/sd_comfy.prepared
 else
