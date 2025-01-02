@@ -39,14 +39,60 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     
     source $VENV_DIR/sd_comfy-env/bin/activate
 
-    pip install pip==24.0
-    pip install --upgrade wheel setuptools
+    # Install required system packages
+    echo "Installing system dependencies..."
+    apt-get update && apt-get install -y \
+        libx11-dev \
+        libxrandr-dev \
+        libxinerama-dev \
+        libxcursor-dev \
+        libxi-dev || true
+
+    # Initialize array for failed installations
+    failed_installations=()
+
+    # Function to attempt installation and track failures
+    try_install() {
+        local package="$1"
+        echo "Installing: $package"
+        if ! pip install $package 2>&1 | tee /tmp/pip_install.log; then
+            failed_installations+=("$package")
+            echo "Failed to install: $package"
+            return 0  # Return 0 to continue script execution
+        fi
+        return 0
+    }
+
+    # Install pip packages individually, track failures
+    try_install "pip==24.0"
+    try_install "--upgrade wheel setuptools"
     
     cd $REPO_DIR
-    pip install xformers
-    pip install torchvision torchaudio --no-deps
-    pip install -r requirements.txt
-    pip install -r "$(dirname "$0")/additional_requirements.txt"
+    try_install "xformers"
+    try_install "torchvision torchaudio --no-deps"
+    
+    # Read and install requirements line by line
+    while IFS= read -r requirement || [ -n "$requirement" ]; do
+        if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
+            try_install "$requirement"
+        fi
+    done < requirements.txt
+    
+    while IFS= read -r requirement || [ -n "$requirement" ]; do
+        if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
+            try_install "$requirement"
+        fi
+    done < "/notebooks/sd_comfy/additional_requirements.txt"
+
+    # Display failed installations if any
+    if [ ${#failed_installations[@]} -ne 0 ]; then
+        echo "### The following installations failed ###"
+        printf '%s\n' "${failed_installations[@]}"
+        echo "### End of failed installations ###"
+    else
+        echo "All packages installed successfully!"
+    fi
+
     
     touch /tmp/sd_comfy.prepared
 else
