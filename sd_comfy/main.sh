@@ -128,23 +128,39 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     try_install "xformers"
     try_install "shaderflow"
 
+    # Add before DepthFlow installation
+    export PYOPENGL_PLATFORM=egl  # Force OpenGL to use GPU
+    export FORCE_CUDA=1           # Force CUDA usage
+    export CUDA_VISIBLE_DEVICES=0 # Use first GPU
+
     # Install and setup DepthFlow with proper symlink
     echo "Installing and configuring DepthFlow..."
     # Suppress root warning during installation
     export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
 
+    # Clean up any existing installations first
+    pip uninstall -y depthflow shaderflow 2>/dev/null || true
+    cd /storage/stable-diffusion-comfy/custom_nodes
+    if [ -d "DepthFlow" ]; then
+        rm -rf DepthFlow
+    elif [ -L "DepthFlow" ]; then
+        rm -f DepthFlow
+    fi
+
+    # Install dependencies first
+    try_install "shaderflow"
+
     # Create answer file for DepthFlow's CUDA prompt
     echo "cuda" > /tmp/depthflow_answer
 
     # Install DepthFlow with shaderflow extras
-    cat /tmp/depthflow_answer | try_install "depthflow[shaderflow]"
+    FORCE_CUDA=1 cat /tmp/depthflow_answer | try_install "depthflow[shaderflow]==0.8.0.dev0"
     rm /tmp/depthflow_answer
 
     # Create clean symlink for DepthFlow
     if python3 -c "import DepthFlow" 2>/dev/null; then
         echo "Setting up DepthFlow symlink..."
         cd /storage/stable-diffusion-comfy/custom_nodes
-        rm -f DepthFlow  # Remove any existing symlink
         ln -sf "/tmp/sd_comfy-env/lib/python3.10/site-packages/DepthFlow" DepthFlow
         echo "DepthFlow symlink created successfully"
     else
@@ -162,12 +178,18 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     try_install "imgui-bundle --no-cache-dir"
     
     # Process requirements files
-    process_requirements "requirements.txt"
+    if [ -f "requirements.txt" ]; then
+        process_requirements "requirements.txt"
+    else
+        echo "No requirements.txt found, skipping..."
+    fi
     
     # Install custom nodes requirements
     echo "Installing DepthFlow node requirements..."
     if [ -f "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt" ]; then
         process_requirements "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt"
+    else
+        echo "No DepthFlow requirements.txt found, skipping..."
     fi
     
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
