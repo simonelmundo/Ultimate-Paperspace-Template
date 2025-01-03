@@ -61,6 +61,29 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         build-essential \
         || true
 
+    # Add this section - Set up NVIDIA EGL configuration
+    echo "Setting up NVIDIA EGL configuration..."
+    mkdir -p /usr/share/glvnd/egl_vendor.d
+    echo '{
+        "file_format_version": "1.0.0",
+        "ICD": {
+            "library_path": "/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0"
+        }
+    }' > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+
+    # Add these environment variables along with the existing ones
+    export NVIDIA_VISIBLE_DEVICES="all"
+    export NVIDIA_DRIVER_CAPABILITIES="all"
+    export WINDOW_BACKEND="headless"
+    export PYOPENGL_PLATFORM="egl"
+    export __GLX_VENDOR_LIBRARY_NAME="nvidia"
+    export __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+
+    # Your existing DepthFlow environment variables
+    export PYOPENGL_PLATFORM=egl  # Force OpenGL to use GPU
+    export FORCE_CUDA=1           # Force CUDA usage
+    export CUDA_VISIBLE_DEVICES=0 # Use first GPU
+
     # Initialize array for failed installations
     failed_installations=()
 
@@ -127,11 +150,6 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     cd $REPO_DIR
     try_install "xformers"
     try_install "shaderflow"
-
-    # Add before DepthFlow installation
-    export PYOPENGL_PLATFORM=egl  # Force OpenGL to use GPU
-    export FORCE_CUDA=1           # Force CUDA usage
-    export CUDA_VISIBLE_DEVICES=0 # Use first GPU
 
     # Install and setup DepthFlow with proper symlink
     echo "Installing and configuring DepthFlow..."
