@@ -8,7 +8,7 @@ verify_nvidia() {
     if ! nvidia-smi &>/dev/null; then
         echo "Installing NVIDIA drivers..."
         apt-get update
-        apt-get install -y nvidia-driver-525 libnvidia-gl-525
+        apt-get install -y nvidia-driver-535 libnvidia-gl-535
         if ! nvidia-smi &>/dev/null; then
             echo "NVIDIA driver installation failed"
             return 1
@@ -89,11 +89,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         build-essential \
         || true
     
-    # Install NVIDIA OpenGL libraries for DepthFlow GPU support
-    echo "Installing NVIDIA OpenGL libraries for DepthFlow..."
-    apt-get update && apt-get install -y \
-        nvidia-driver-525 \
-        libnvidia-gl-525 || true
+
 # Set up NVIDIA EGL configuration
 echo "Setting up NVIDIA EGL configuration..."
 if [ ! -f "/usr/share/glvnd/egl_vendor.d/10_nvidia.json" ]; then
@@ -177,27 +173,7 @@ fi
     # Install in correct order with specific versions
     pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
     pip install xformers==0.0.16  # Specific version compatible with torch 1.13.1
-
-    # Clean existing installations first
-    pip uninstall -y shaderflow depthflow || true
-    pip cache purge
-
-    # Install shaderflow with explicit error checking
-    echo "Installing shaderflow..."
-    if ! pip install shaderflow --no-cache-dir; then
-        echo "Failed to install shaderflow, trying alternative method..."
-        # Try installing from source
-        pip install git+https://github.com/MrLixm/shader-flow.git
-    fi
-
-    # Verify shaderflow installation
-    python3 -c "
-import shaderflow
-print(f'Shaderflow version: {shaderflow.__version__}')
-" || {
-        echo "Shaderflow verification failed"
-        failed_installations+=("shaderflow-verification")
-    }
+    pip install shaderflow
 
     # Verify PyTorch installation
     python3 -c "import torch; assert torch.__version__.startswith('1.13.1')" || {
@@ -228,20 +204,9 @@ export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
     # Create answer file for DepthFlow's CUDA prompt
     echo "cuda" > /tmp/depthflow_answer
 
-    # Install DepthFlow with shaderflow support
-    echo "Installing DepthFlow with shaderflow support..."
-    export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
-    FORCE_CUDA=1 pip install "depthflow[shaderflow]==0.8.0.dev0" --no-cache-dir
-
-    # Verify both installations
-    python3 -c "
-import shaderflow
-import DepthFlow
-print('Both packages imported successfully')
-" || {
-        echo "Package verification failed"
-        failed_installations+=("depthflow-shaderflow-verification")
-    }
+    # Install DepthFlow with shaderflow extras
+    FORCE_CUDA=1 cat /tmp/depthflow_answer | try_install "depthflow[shaderflow]==0.8.0.dev0"
+    rm /tmp/depthflow_answer
 
     # Create clean symlink for DepthFlow
     if python3 -c "import DepthFlow" 2>/dev/null; then
@@ -292,7 +257,7 @@ print('Both packages imported successfully')
     
     touch /tmp/sd_comfy.prepared
 else
-    setup_environment
+    
     source $VENV_DIR/sd_comfy-env/bin/activate
     
 fi
