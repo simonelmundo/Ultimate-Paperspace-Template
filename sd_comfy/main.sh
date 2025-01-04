@@ -5,30 +5,49 @@ current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
 source .env
 verify_nvidia() {
+    echo "Installing/Updating NVIDIA drivers and libraries..."
+    apt-get update
+    
+    # Always install/reinstall the full NVIDIA stack
+    apt-get install -y \
+        nvidia-driver-535 \
+        libnvidia-gl-535 \
+        libnvidia-egl-wayland1 \
+        libnvidia-compute-535
+
+    # Verify installation
     if ! nvidia-smi &>/dev/null; then
-        echo "Installing NVIDIA drivers..."
-        apt-get update
-        apt-get install -y nvidia-driver-535 libnvidia-gl-535
-        if ! nvidia-smi &>/dev/null; then
-            echo "NVIDIA driver installation failed"
-            return 1
-        fi
+        echo "NVIDIA driver installation failed"
+        return 1
     fi
+
+    # Verify GL libraries
+    if ! ldconfig -p | grep -q "libEGL_nvidia.so.0"; then
+        echo "NVIDIA GL libraries installation failed"
+        return 1
+    fi
+
+    echo "NVIDIA setup completed successfully"
     return 0
 }
 # 2. Set environment variables globally
 setup_environment() {
+    # Keep CUDA-related vars for other operations
     export CUDA_HOME=/usr/local/cuda-11.6
     export PATH=$CUDA_HOME/bin:$PATH
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-    export NVIDIA_VISIBLE_DEVICES="all"
-    export NVIDIA_DRIVER_CAPABILITIES="all"
-    export WINDOW_BACKEND="headless"
-    export PYOPENGL_PLATFORM="egl"
-    export __GLX_VENDOR_LIBRARY_NAME="nvidia"
-    export __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
     export FORCE_CUDA=1
     export CUDA_VISIBLE_DEVICES=0
+
+    # Change these for CPU rendering
+    export PYOPENGL_PLATFORM="osmesa"  # Change from "egl" to "osmesa"
+    export WINDOW_BACKEND="headless"
+    
+    # Remove these as they're GPU-specific
+    # export NVIDIA_VISIBLE_DEVICES="all"
+    # export NVIDIA_DRIVER_CAPABILITIES="all"
+    # export __GLX_VENDOR_LIBRARY_NAME="nvidia"
+    # export __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 }
 
 # Set up a trap to call the error_exit function on ERR signal
@@ -257,7 +276,7 @@ export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
     
     touch /tmp/sd_comfy.prepared
 else
-    
+    setup_environment
     source $VENV_DIR/sd_comfy-env/bin/activate
     
 fi
