@@ -1,85 +1,94 @@
 #!/bin/bash
 set -e
 
+# === 1. INITIALIZATION AND CONFIGURATION ===
 current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
 source .env
 
-# Set up a trap to call the error_exit function on ERR signal
-trap 'error_exit "### ERROR ###"' ERR
+# Error collection array
+declare -a ERROR_LOG=()
 
+# Error handling function
+log_error() {
+    local error_msg="$1"
+    local error_context="$2"
+    ERROR_LOG+=("[$error_context] $error_msg")
+    echo "⚠️ Error in $error_context: $error_msg"
+}
 
-echo "### Setting up Stable Diffusion Comfy ###"
-log "Setting up Stable Diffusion Comfy"
-if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
+# Replace error exit with error logging
+trap 'log_error "$(tail -n 1 /tmp/sd_comfy_error.log 2>/dev/null || echo "Unknown error")" "${BASH_SOURCE[0]}:${BASH_LINENO[0]}"' ERR
 
-    
-    TARGET_REPO_URL="https://github.com/comfyanonymous/ComfyUI.git" \
-    TARGET_REPO_DIR=$REPO_DIR \
-    UPDATE_REPO=$SD_COMFY_UPDATE_REPO \
-    UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT \
-    prepare_repo 
+# Safe execution wrapper
+safe_exec() {
+    local context="$1"
+    shift
+    if ! "$@" 2>/tmp/sd_comfy_error.log; then
+        log_error "$(cat /tmp/sd_comfy_error.log)" "$context"
+        return 0
+    fi
+}
 
-    symlinks=(
-      "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy"
-      "$MODEL_DIR:$WORKING_DIR/models"
-      "$MODEL_DIR/sd:$LINK_MODEL_TO"
-      "$MODEL_DIR/lora:$LINK_LORA_TO"
-      "$MODEL_DIR/vae:$LINK_VAE_TO"
-      "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO"
-      "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO"
-      "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO"
-      "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
-    )
-    prepare_link "${symlinks[@]}"
-    rm -rf $VENV_DIR/sd_comfy-env
-    
-    
-    python3.10 -m venv $VENV_DIR/sd_comfy-env
-    
-    source $VENV_DIR/sd_comfy-env/bin/activate
+# Directory Structure
+PERSISTENT_VENV_DIR="/storage/environments/sd_comfy-env"
+TEMP_DIR="/tmp/sd_comfy"
+MODEL_CACHE_DIR="/tmp/sd_comfy/model_cache"
+RUNTIME_DIR="/tmp/sd_comfy/runtime"
 
-    # Install required system packages
-    echo "Installing system dependencies..."
-    apt-get update && apt-get install -y \
-        libx11-dev \
-        libxrandr-dev \
-        libxinerama-dev \
-        libxcursor-dev \
-        libxi-dev \
-        libatlas-base-dev \
-        libblas-dev \
-        liblapack-dev \
-        libjpeg-dev \
-        libpng-dev \
-        libtiff-dev \
-        libbz2-dev \
-        libgl1-mesa-dev \
-        python2-dev \
-        libopenblas-dev \
-        cmake \
-        build-essential \
-        || true
+# Initialize tracking arrays
+declare -a failed_installations=()
+declare -a skipped_steps=()
 
-    # Install NVIDIA OpenGL libraries for DepthFlow GPU support
-    echo "Installing NVIDIA OpenGL libraries for DepthFlow..."
-    apt-get update && apt-get install -y \
-        nvidia-driver-525 \
-        libnvidia-gl-525 || true
-
-    # Set up NVIDIA EGL configuration
-    echo "Setting up NVIDIA EGL configuration..."
-    mkdir -p /usr/share/glvnd/egl_vendor.d
-    cat > /usr/share/glvnd/egl_vendor.d/10_nvidia.json << 'EOF'
-{
-    "file_format_version" : "1.0.0",
-    "ICD" : {
-        "library_path" : "libnvidia-egl-wayland.so.1"
+# === 2. UTILITY FUNCTIONS ===
+check_core_packages() {
+    python3 -c "
+import sys
+required = {'torch', 'DepthFlow', 'xformers', 'shaderflow'}
+installed = {pkg.key for pkg in __import__('pkg_resources').working_set}
+missing = required - installed
+if missing:
+    print('Missing packages:', missing)
+    sys.exit(1)
+sys.exit(0)
+" 2>/dev/null || {
+        log_error "Core package check failed" "Package Verification"
+        return 0
     }
 }
-EOF
 
-    # Set environment variables for GPU support
+try_install() {
+    local package="$1"
+    echo "Installing: $package"
+    if ! pip install $package --quiet 2>/tmp/pip_error.log | grep -v "Requirement already satisfied"; then
+        failed_installations+=("$package: $(cat /tmp/pip_error.log)")
+        echo "⚠️ Failed to install: $package"
+        return 0
+    fi
+}
+
+process_requirements() {
+    local req_file="$1"
+    if [ ! -f "$req_file" ]; then
+        echo "No $req_file found, skipping..."
+        return 0
+    fi
+    echo "Processing requirements from: $req_file"
+    while IFS= read -r requirement || [ -n "$requirement" ]; do
+        if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
+            if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
+                echo "Skipping local reference: $requirement"
+                continue
+            fi
+            try_install "$requirement"
+        fi
+    done < "$req_file"
+}
+
+setup_nvidia_environment() {
+    export CUDA_HOME=/usr/local/cuda-11.6
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
     export NVIDIA_VISIBLE_DEVICES="all"
     export NVIDIA_DRIVER_CAPABILITIES="all"
     export WINDOW_BACKEND="headless"
@@ -88,191 +97,151 @@ EOF
     export __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
     export FORCE_CUDA=1
     export CUDA_VISIBLE_DEVICES=0
-
-    # Initialize array for failed installations
-    failed_installations=()
-
-    # Function to attempt installation and track failures
-    try_install() {
-        local package="$1"
-        echo "Installing: $package"
-        if ! pip install $package 2>&1 | tee /tmp/pip_install.log; then
-            failed_installations+=("$package")
-            echo "Failed to install: $package"
-            return 0
-        fi
-        return 0
-    }
-
-    # Function to safely process requirements file
-    process_requirements() {
-        local req_file="$1"
-        echo "Processing requirements from: $req_file"
-        while IFS= read -r requirement || [ -n "$requirement" ]; do
-            if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
-                # Skip local directory references
-                if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
-                    echo "Skipping local directory reference: $requirement"
-                    continue
-                fi
-                try_install "$requirement"
-            fi
-        done < "$req_file"
-    }
-
-    # Function to verify DepthFlow installation
-    verify_depthflow() {
-        echo "Verifying DepthFlow installation..."
-        if python3 -c "import DepthFlow.Motion; import DepthFlow.Resources" 2>/dev/null; then
-            echo "DepthFlow modules verified successfully"
-            return 0
-        else
-            echo "DepthFlow verification failed, attempting reinstallation..."
-            pip uninstall -y depthflow 2>/dev/null || true
-            try_install "depthflow --no-cache-dir"
-            
-            # Verify again after reinstall
-            if python3 -c "import DepthFlow.Motion; import DepthFlow.Resources" 2>/dev/null; then
-                echo "DepthFlow reinstallation successful"
-                return 0
-            else
-                echo "DepthFlow installation failed. Adding to failed installations."
-                failed_installations+=("depthflow (modules missing: Motion, Resources)")
-                return 1
-            fi
-        fi
-    }
-
-    # Install base requirements first
-    try_install "pip==24.0"
-    try_install "--upgrade wheel setuptools"
-    try_install "numpy>=1.26.0,<2.3.0"
-
-    # Install PyTorch with CUDA first
-    echo "Installing PyTorch with CUDA support..."
-    pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu116
-
-    # Add PyOpenGL with acceleration
-    try_install "PyOpenGL"
-    try_install "PyOpenGL_accelerate"
-
-    cd $REPO_DIR
-    try_install "xformers"
-    try_install "shaderflow"
-
-    # Install and setup DepthFlow with proper symlink
-    echo "Installing and configuring DepthFlow..."
-    # Suppress root warning during installation
     export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
-
-    # Clean up any existing installations first
-    pip uninstall -y depthflow shaderflow 2>/dev/null || true
-    cd /storage/stable-diffusion-comfy/custom_nodes
-    if [ -d "DepthFlow" ]; then
-        rm -rf DepthFlow
-    elif [ -L "DepthFlow" ]; then
-        rm -f DepthFlow
-    fi
-
-    # Install dependencies first
-    try_install "shaderflow"
-
-    # Create answer file for DepthFlow's CUDA prompt
-    echo "cuda" > /tmp/depthflow_answer
-
-    # Install DepthFlow with shaderflow extras
-    FORCE_CUDA=1 cat /tmp/depthflow_answer | try_install "depthflow[shaderflow]==0.8.0.dev0"
-    rm /tmp/depthflow_answer
-
-    # Create clean symlink for DepthFlow
-    if python3 -c "import DepthFlow" 2>/dev/null; then
-        echo "Setting up DepthFlow symlink..."
-        cd /storage/stable-diffusion-comfy/custom_nodes
-        ln -sf "/tmp/sd_comfy-env/lib/python3.10/site-packages/DepthFlow" DepthFlow
-        echo "DepthFlow symlink created successfully"
-    else
-        echo "Warning: DepthFlow installation not found"
-    fi
-
-    # Handle tensorflow version compatibility
-    if ! pip install "tensorflow==2.6.2" 2>/dev/null; then
-        echo "Attempting to install compatible tensorflow version..."
-        try_install "tensorflow>=2.8.0,<2.19.0"
-    fi
-    
-    # Handle imgui-bundle with specific build requirements
     export CMAKE_ARGS="-DUSE_X11=ON"
-    try_install "imgui-bundle --no-cache-dir"
-    
-    # Process requirements files
-    if [ -f "requirements.txt" ]; then
+}
+
+# === 3. MAIN INSTALLATION FLOW ===
+echo "### Setting up Stable Diffusion Comfy ###"
+log "Setting up Stable Diffusion Comfy"
+
+# Create directories
+safe_exec "Directory Setup" mkdir -p "$PERSISTENT_VENV_DIR" "$TEMP_DIR" "$MODEL_CACHE_DIR" "$RUNTIME_DIR"
+
+if [[ "$REINSTALL_SD_COMFY" || ! -f "$PERSISTENT_VENV_DIR/sd_comfy.prepared" ]]; then
+    # Repository setup
+    safe_exec "Repository Setup" \
+    TARGET_REPO_URL="https://github.com/comfyanonymous/ComfyUI.git" \
+    TARGET_REPO_DIR=$REPO_DIR \
+    UPDATE_REPO=$SD_COMFY_UPDATE_REPO \
+    UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT \
+    prepare_repo
+
+    # Symlinks setup
+    symlinks=(
+        "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy"
+        "$MODEL_CACHE_DIR:$WORKING_DIR/models"
+        "$MODEL_CACHE_DIR/sd:$LINK_MODEL_TO"
+        "$MODEL_CACHE_DIR/lora:$LINK_LORA_TO"
+        "$MODEL_CACHE_DIR/vae:$LINK_VAE_TO"
+        "$MODEL_CACHE_DIR/upscaler:$LINK_UPSCALER_TO"
+        "$MODEL_CACHE_DIR/controlnet:$LINK_CONTROLNET_TO"
+        "$MODEL_CACHE_DIR/embedding:$LINK_EMBEDDING_TO"
+        "$MODEL_CACHE_DIR/llm_checkpoints:$LINK_LLM_TO"
+    )
+    safe_exec "Symlink Setup" prepare_link "${symlinks[@]}"
+
+    # Virtual environment setup
+    if [ ! -d "$PERSISTENT_VENV_DIR" ]; then
+        safe_exec "VEnv Setup" python3.10 -m venv "$PERSISTENT_VENV_DIR"
+    fi
+    source "$PERSISTENT_VENV_DIR/bin/activate" || log_error "Failed to activate virtual environment" "VEnv Activation"
+
+    # System dependencies
+    echo "Installing system dependencies..."
+    safe_exec "System Dependencies" apt-get update
+    safe_exec "System Dependencies" apt-get install -y \
+        libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+        libatlas-base-dev libblas-dev liblapack-dev \
+        libjpeg-dev libpng-dev libtiff-dev libbz2-dev \
+        libgl1-mesa-dev python2-dev libopenblas-dev \
+        cmake build-essential \
+        nvidia-driver-525 libnvidia-gl-525
+
+    # Setup NVIDIA environment
+    setup_nvidia_environment
+
+    # Install core packages if needed
+    if [[ "$REINSTALL_SD_COMFY" == "true" ]] || ! check_core_packages; then
+        safe_exec "Base Packages" try_install "pip==24.0"
+        safe_exec "Base Packages" try_install "--upgrade wheel setuptools"
+        safe_exec "Base Packages" try_install "numpy>=1.26.0,<2.3.0"
+
+        # PyTorch ecosystem
+        echo "Installing PyTorch with CUDA support..."
+        safe_exec "PyTorch" pip install --quiet torch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 \
+            --index-url https://download.pytorch.org/whl/cu116
+
+        # Core dependencies
+        try_install "PyOpenGL PyOpenGL_accelerate"
+        cd $REPO_DIR
+        try_install "xformers"
+
+        # DepthFlow setup
+        echo "Installing DepthFlow..."
+        pip uninstall -y depthflow shaderflow 2>/dev/null || true
+        try_install "shaderflow"
+        echo "cuda" > /tmp/depthflow_answer
+        FORCE_CUDA=1 cat /tmp/depthflow_answer | try_install "depthflow[shaderflow]==0.8.0.dev0"
+        rm -f /tmp/depthflow_answer
+
+        # Setup DepthFlow symlink
+        cd /storage/stable-diffusion-comfy/custom_nodes
+        if [ -d "DepthFlow" ] || [ -L "DepthFlow" ]; then
+            rm -rf DepthFlow
+        fi
+        if python3 -c "import DepthFlow" 2>/dev/null; then
+            ln -sf "$PERSISTENT_VENV_DIR/lib/python3.10/site-packages/DepthFlow" DepthFlow
+        fi
+
+        # Additional packages
+        try_install "tensorflow>=2.8.0,<2.19.0"
+        try_install "imgui-bundle --no-cache-dir"
+
+        # Process requirement files
         process_requirements "requirements.txt"
-    else
-        echo "No requirements.txt found, skipping..."
-    fi
-    
-    # Install custom nodes requirements
-    echo "Installing DepthFlow node requirements..."
-    if [ -f "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt" ]; then
         process_requirements "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt"
-    else
-        echo "No DepthFlow requirements.txt found, skipping..."
-    fi
-    
-    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
+        process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
-    # Display failed installations if any
-    if [ ${#failed_installations[@]} -ne 0 ]; then
-        echo "### The following installations failed ###"
-        printf '%s\n' "${failed_installations[@]}"
-        echo "### End of failed installations ###"
+        # Report failures
+        if [ ${#failed_installations[@]} -ne 0 ]; then
+            echo "### Failed installations ###"
+            printf '%s\n' "${failed_installations[@]}"
+        else
+            echo "✅ All packages installed successfully!"
+        fi
     else
-        echo "All packages installed successfully!"
+        echo "✅ Core packages already installed, skipping installation"
     fi
 
-    
-    touch /tmp/sd_comfy.prepared
+    touch "$PERSISTENT_VENV_DIR/sd_comfy.prepared"
 else
-    
-    source $VENV_DIR/sd_comfy-env/bin/activate
-    
+    source "$PERSISTENT_VENV_DIR/bin/activate"
 fi
+
 log "Finished Preparing Environment for Stable Diffusion Comfy"
 
-
+# === 4. MODEL DOWNLOAD ===
 if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
-  echo "### Downloading Model for Stable Diffusion Comfy ###"
-  log "Downloading Model for Stable Diffusion Comfy"
-  bash $current_dir/../utils/sd_model_download/main.sh
-  log "Finished Downloading Models for Stable Diffusion Comfy"
+    echo "### Downloading Model for Stable Diffusion Comfy ###"
+    log "Downloading Model for Stable Diffusion Comfy"
+    bash $current_dir/../utils/sd_model_download/main.sh
+    log "Finished Downloading Models for Stable Diffusion Comfy"
 else
-  log "Skipping Model Download for Stable Diffusion Comfy"
+    log "Skipping Model Download for Stable Diffusion Comfy"
 fi
 
-
-
-
+# === 5. SERVICE STARTUP ===
 if [[ -z "$INSTALL_ONLY" ]]; then
-  echo "### Starting Stable Diffusion Comfy ###"
-  log "Starting Stable Diffusion Comfy"
-  cd "$REPO_DIR"
-  PYTHONUNBUFFERED=1 service_loop "python main.py --dont-print-server --highvram --port $SD_COMFY_PORT ${EXTRA_SD_COMFY_ARGS}" > $LOG_DIR/sd_comfy.log 2>&1 &
-  echo $! > /tmp/sd_comfy.pid
+    safe_exec "Service Startup" cd "$REPO_DIR"
+    safe_exec "Service Startup" \
+        PYTHONUNBUFFERED=1 service_loop "python main.py --dont-print-server --highvram --port $SD_COMFY_PORT ${EXTRA_SD_COMFY_ARGS}" \
+        > "$RUNTIME_DIR/sd_comfy.log" 2>&1 &
+    echo $! > "$RUNTIME_DIR/sd_comfy.pid"
 fi
 
-
+# === 6. NOTIFICATIONS AND CLEANUP ===
 send_to_discord "Stable Diffusion Comfy Started"
 
 if env | grep -q "PAPERSPACE"; then
-  send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-comfy/"
+    send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-comfy/"
 fi
 
-
 if [[ -n "${CF_TOKEN}" ]]; then
-  if [[ "$RUN_SCRIPT" != *"sd_comfy"* ]]; then
-    export RUN_SCRIPT="$RUN_SCRIPT,sd_comfy"
-  fi
-  bash $current_dir/../cloudflare_reload.sh
+    if [[ "$RUN_SCRIPT" != *"sd_comfy"* ]]; then
+        export RUN_SCRIPT="$RUN_SCRIPT,sd_comfy"
+    fi
+    bash $current_dir/../cloudflare_reload.sh
 fi
 # =============================================================================
 # DepthFlow Environment Verification
@@ -288,30 +257,100 @@ echo "
 # 1. NVIDIA Driver and System Check
 # -----------------------------------------------------------------------------
 echo -e "\n[1/7] 🔍 Checking NVIDIA Driver and System..."
-if nvidia-smi > /tmp/nvidia_check 2>&1; then
+
+# Function to safely execute commands
+safe_exec() {
+    "$@" 2>/dev/null || true
+}
+
+# Function to extract version numbers
+get_version_number() {
+    echo "$1" | grep -oP '\d+\.\d+(\.\d+)?' 2>/dev/null || echo "unknown"
+}
+
+check_nvidia_versions() {
+    echo "Checking NVIDIA component versions..."
+    echo "----------------------------------------"
+    
+    # Get NVIDIA driver version from nvidia-smi
+    NVIDIA_SMI_VERSION=$(safe_exec nvidia-smi --query-gpu=driver_version --format=csv,noheader)
+    echo "NVIDIA Driver (nvidia-smi): ${NVIDIA_SMI_VERSION:-unknown}"
+    
+    # Get installed NVIDIA package versions
+    NVIDIA_DRIVER_PKG=$(safe_exec dpkg -l | grep nvidia-driver | awk '{print $2 " " $3}')
+    NVIDIA_LIB_VERSION=$(safe_exec ldconfig -p | grep libnvidia-ml.so | head -n1 | grep -oP '\d+\.\d+\.\d+')
+    echo "NVIDIA Driver Package : ${NVIDIA_DRIVER_PKG:-unknown}"
+    echo "NVIDIA Library       : ${NVIDIA_LIB_VERSION:-unknown}"
+    
+    # Check EGL/OpenGL libraries
+    echo -e "\nEGL/OpenGL Libraries:"
+    for lib in libEGL_nvidia.so libGLX_nvidia.so libGLESv2_nvidia.so; do
+        LIB_VERSION=$(safe_exec ldconfig -p | grep $lib | head -n1 | grep -oP '\d+\.\d+\.\d+')
+        echo "$lib: ${LIB_VERSION:-not found}"
+    done
+    
+    # Compare versions if available
+    if [[ -n "$NVIDIA_SMI_VERSION" && -n "$NVIDIA_LIB_VERSION" ]]; then
+        SMI_VER=$(get_version_number "$NVIDIA_SMI_VERSION")
+        LIB_VER=$(get_version_number "$NVIDIA_LIB_VERSION")
+        
+        if [[ "$SMI_VER" != "$LIB_VER" && "$SMI_VER" != "unknown" && "$LIB_VER" != "unknown" ]]; then
+            echo -e "\n⚠️  Version Mismatch Detected:"
+            echo "• Driver version (nvidia-smi): $SMI_VER"
+            echo "• Library version: $LIB_VER"
+            echo -e "\nPossible causes:"
+            echo "1. Multiple driver versions installed"
+            echo "2. Incomplete driver installation"
+            echo "3. System needs reboot after update"
+            
+            echo -e "\nInstalled NVIDIA packages:"
+            safe_exec dpkg -l | grep -E "nvidia-|cuda" | awk '{printf "%-20s: %s\n", $2, $3}'
+        fi
+    fi
+}
+
+# Main check logic
+if safe_exec nvidia-smi > /tmp/nvidia_check; then
     echo "Driver Information:"
     echo "----------------------------------------"
-    cat /tmp/nvidia_check
+    cat /tmp/nvidia_check 2>/dev/null || echo "No driver information available"
     echo "----------------------------------------"
     
     echo "GPU Memory Status (Per Device):"
     echo "----------------------------------------"
-    nvidia-smi --query-gpu=index,gpu_name,memory.total,memory.used,memory.free,temperature.gpu,utilization.gpu --format=csv,noheader | while IFS="," read -r id name total used free temp util; do
+    safe_exec nvidia-smi --query-gpu=index,gpu_name,memory.total,memory.used,memory.free,temperature.gpu,utilization.gpu --format=csv,noheader | while IFS="," read -r id name total used free temp util; do
         echo "GPU $id: $name"
         echo "  Memory  : $used/$total (Free: $free)"
         echo "  Temp    : $temp"
         echo "  Load    : $util"
     done
     
-    echo -e "\nDriver/Library Versions:"
-    echo "----------------------------------------"
-    dpkg -l | grep -E "nvidia-driver|nvidia-utils|cuda" | awk '{printf "%-20s: %s\n", $2, $3}'
+    # Add detailed version checks
+    check_nvidia_versions
     
-    echo "✅ NVIDIA drivers are working"
+    echo "✅ NVIDIA drivers are functional"
 else
     echo "⚠️  Warning: NVIDIA driver issue detected"
-    echo "Error: $(cat /tmp/nvidia_check)"
+    echo "Error: $(cat /tmp/nvidia_check 2>/dev/null || echo 'No error information available')"
+    
+    # Try to get more information about the failure
+    echo -e "\nTroubleshooting Information:"
+    echo "----------------------------------------"
+    echo "1. Checking driver status:"
+    safe_exec systemctl status nvidia-* || echo "No NVIDIA services found"
+    
+    echo -e "\n2. Checking loaded NVIDIA modules:"
+    safe_exec lsmod | grep nvidia || echo "No NVIDIA modules loaded"
+    
+    echo -e "\n3. Checking NVIDIA packages:"
+    safe_exec dpkg -l | grep -E "nvidia-|cuda" || echo "No NVIDIA packages found"
+    
+    echo -e "\n4. Checking GPU devices:"
+    safe_exec lspci | grep -i nvidia || echo "No NVIDIA devices found"
 fi
+
+# Clean up
+rm -f /tmp/nvidia_check 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
 # 2. CUDA Version and Compatibility Check
@@ -328,12 +367,19 @@ if CUDA_PATH=$(which nvcc 2>/dev/null); then
     echo "----------------------------------------"
     python3 -c "
 import torch
-pytorch_cuda = torch.version.cuda
-system_cuda = '$CUDA_VERSION'
+import re
+
+def normalize_version(version):
+    # Extract just major.minor version (e.g., '11.6' from '11.6.124')
+    match = re.match(r'(\d+\.\d+)', str(version))
+    return match.group(1) if match else version
+
+pytorch_cuda = normalize_version(torch.version.cuda)
+system_cuda = normalize_version('$CUDA_VERSION')
 
 print(f'PyTorch Version : {torch.__version__}')
 print(f'PyTorch CUDA   : {pytorch_cuda}')
-print(f'System CUDA    : {system_cuda}')
+print(f'System CUDA    : {system_cuda} (full: $CUDA_VERSION)')
 
 if pytorch_cuda != system_cuda:
     print(f'\n⚠️  Version Mismatch:')
@@ -342,6 +388,8 @@ if pytorch_cuda != system_cuda:
     print(f'\nSuggested fixes:')
     print(f'1. Install PyTorch for CUDA {system_cuda}')
     print(f'2. Or upgrade system CUDA to {pytorch_cuda}')
+else:
+    print(f'\n✅ CUDA versions are compatible')
 "
 else
     echo "⚠️  CUDA not found on system"
@@ -427,51 +475,92 @@ fi
 echo -e "\n[6/7] 🔍 Checking DepthFlow Setup..."
 export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
 
-echo "DepthFlow Dependencies:"
+echo "DepthFlow Dependencies and GPU Test:"
 echo "----------------------------------------"
-python3 -c "
-import pkg_resources
+python3 -c """
+import importlib
 import sys
 
-def check_package(package):
+def check_package(package_name):
     try:
-        dist = pkg_resources.get_distribution(package)
-        return {
-            'version': dist.version,
-            'location': dist.location,
-            'status': 'installed'
-        }
-    except pkg_resources.DistributionNotFound:
-        return {'status': 'missing'}
-    except Exception as e:
-        return {'status': 'error', 'error': str(e)}
+        module = importlib.import_module(package_name)
+        return True
+    except:
+        return False
 
-packages = {
-    'DepthFlow': {'required': True},
-    'torch': {'required': True, 'min_version': '2.0.0'},
-    'numpy': {'required': True},
-    'OpenGL': {'required': True},
-    'shaderflow': {'required': True}
-}
+# Basic package check
+packages = [
+    'DepthFlow',
+    'torch',
+    'numpy',
+    'moderngl',
+    'shaderflow'
+]
 
-try:
-    print('Package Status:')
-    for pkg, info in packages.items():
-        result = check_package(pkg)
-        if result['status'] == 'installed':
-            print(f'✅ {pkg:12}: v{result["version"]}')
-            print(f'   └─ Location: {result.get("location", "Unknown")}')
-        elif result['status'] == 'error':
-            print(f'⚠️  {pkg:12}: Error - {result.get("error", "Unknown error")}')
+print('Package Status:')
+for pkg_name in packages:
+    try:
+        if check_package(pkg_name):
+            print(f'✅ {pkg_name:<12} Installed')
         else:
-            print(f'⚠️  {pkg:12}: Not installed')
-except Exception as e:
-    print(f'⚠️  Error checking packages: {str(e)}')
-    sys.exit(0)  # Exit gracefully
-" || echo "⚠️  Failed to check DepthFlow dependencies"
+            print(f'⚠️  {pkg_name:<12} Not installed')
+    except:
+        print(f'⚠️  {pkg_name:<12} Check failed')
 
-# Continue with rest of script
-echo -e "\nVerifying DepthFlow GPU access..."
+# Test GPU functionality
+print('\nGPU Test:')
+try:
+    import torch
+    import DepthFlow
+    
+    # Check CUDA
+    if torch.cuda.is_available():
+        print(f'✅ GPU Found: {torch.cuda.get_device_name(0)}')
+        
+        # Test DepthFlow GPU
+        try:
+            model = DepthFlow.load_model('small')  # or 'base' or 'large'
+            model.to('cuda')
+            print('✅ DepthFlow loaded on GPU')
+            
+            # Optional: Test inference
+            try:
+                import numpy as np
+                test_input = np.zeros((1, 3, 384, 384))  # Example input
+                with torch.no_grad():
+                    _ = model(torch.from_numpy(test_input).cuda().float())
+                print('✅ DepthFlow GPU inference test passed')
+            except:
+                print('⚠️  Could not test inference')
+        except:
+            print('⚠️  Could not load DepthFlow model on GPU')
+    else:
+        print('⚠️  No GPU available')
+except Exception as e:
+    print(f'⚠️  GPU test failed: {str(e)}')
+
+# Check compatibility
+print('\nCompatibility Check:')
+try:
+    import torch
+    import numpy as np
+    
+    torch_version = torch.__version__.split('+')[0]
+    numpy_version = np.__version__
+    cuda_version = torch.version.cuda if torch.cuda.is_available() else 'N/A'
+    
+    print(f'PyTorch : {torch_version}')
+    print(f'CUDA    : {cuda_version}')
+    print(f'NumPy   : {numpy_version}')
+    
+    # Known good configurations
+    if torch_version.startswith('1.13'):
+        print('✅ PyTorch version compatible with DepthFlow')
+    else:
+        print('⚠️  Untested PyTorch version')
+except:
+    print('⚠️  Could not check version compatibility')
+"""
 
 # -----------------------------------------------------------------------------
 # 7. Compatibility Matrix Check
@@ -479,27 +568,44 @@ echo -e "\nVerifying DepthFlow GPU access..."
 echo -e "\n[7/7] 🔍 Checking Compatibility Matrix..."
 echo "Component Version Matrix:"
 echo "----------------------------------------"
-python3 -c "
-import torch
+python3 -c """
 import platform
-from subprocess import getoutput
+import sys
 
-def get_nvidia_driver_version():
-    return getoutput('nvidia-smi --query-gpu=driver_version --format=csv,noheader').strip()
+def get_version(package_name):
+    try:
+        if package_name == 'torch':
+            import torch
+            return {
+                'version': torch.__version__,
+                'cuda': torch.version.cuda if torch.cuda.is_available() else 'N/A',
+                'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'
+            }
+        elif package_name == 'system':
+            return {
+                'os': platform.system(),
+                'release': platform.release(),
+                'python': platform.python_version()
+            }
+        else:
+            return {'version': 'unknown'}
+    except:
+        return {'version': 'error checking'}
 
-matrix = {
-    'System': platform.system() + ' ' + platform.release(),
-    'Python': platform.python_version(),
-    'PyTorch': torch.__version__,
-    'CUDA (PyTorch)': torch.version.cuda,
-    'cuDNN': str(torch.backends.cudnn.version()),
-    'NVIDIA Driver': get_nvidia_driver_version()
-}
+# Get component versions
+system_info = get_version('system')
+torch_info = get_version('torch')
 
-max_key_length = max(len(k) for k in matrix.keys())
-for key, value in matrix.items():
-    print(f'{key:<{max_key_length}} : {value}')
-" 2>/dev/null
+# Print matrix
+try:
+    print(f'System      : {system_info["os"]} {system_info["release"]}')
+    print(f'Python      : {system_info["python"]}')
+    print(f'PyTorch     : {torch_info["version"]}')
+    print(f'CUDA        : {torch_info["cuda"]}')
+    print(f'GPU         : {torch_info["gpu"]}')
+except:
+    print('⚠️  Error displaying version matrix')
+"""
 
 # =============================================================================
 # Final Summary and Recommendations
@@ -553,3 +659,20 @@ fi
 
 echo -e "\nNote: ⚠️  warnings indicate potential issues that need attention"
 echo "### Verification Complete ###"
+# === 4. ERROR REPORTING ===
+if [ ${#ERROR_LOG[@]} -ne 0 ]; then
+    echo -e "\n=== 📝 Error Summary ==="
+    echo "The following errors occurred but did not stop execution:"
+    printf '%s\n' "${ERROR_LOG[@]}"
+fi
+
+if [ ${#failed_installations[@]} -ne 0 ]; then
+    echo -e "\n=== 📝 Failed Installations ==="
+    printf '%s\n' "${failed_installations[@]}"
+fi
+
+if [ ${#skipped_steps[@]} -ne 0 ]; then
+    echo -e "\n=== 📝 Skipped Steps ==="
+    printf '%s\n' "${skipped_steps[@]}"
+fi
+rm -f /tmp/sd_comfy_error.log /tmp/pip_error.log
