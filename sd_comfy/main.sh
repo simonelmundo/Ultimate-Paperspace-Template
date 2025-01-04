@@ -4,6 +4,32 @@ set -e
 current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
 source .env
+verify_nvidia() {
+    if ! nvidia-smi &>/dev/null; then
+        echo "Installing NVIDIA drivers..."
+        apt-get update
+        apt-get install -y nvidia-driver-525 libnvidia-gl-525
+        if ! nvidia-smi &>/dev/null; then
+            echo "NVIDIA driver installation failed"
+            return 1
+        fi
+    fi
+    return 0
+}
+# 2. Set environment variables globally
+setup_environment() {
+    export CUDA_HOME=/usr/local/cuda-11.6
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    export NVIDIA_VISIBLE_DEVICES="all"
+    export NVIDIA_DRIVER_CAPABILITIES="all"
+    export WINDOW_BACKEND="headless"
+    export PYOPENGL_PLATFORM="egl"
+    export __GLX_VENDOR_LIBRARY_NAME="nvidia"
+    export __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+    export FORCE_CUDA=1
+    export CUDA_VISIBLE_DEVICES=0
+}
 
 # Set up a trap to call the error_exit function on ERR signal
 trap 'error_exit "### ERROR ###"' ERR
@@ -12,8 +38,10 @@ trap 'error_exit "### ERROR ###"' ERR
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
 if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
+    # Verify NVIDIA and setup environment first
+    verify_nvidia || exit 1
+    setup_environment
 
-    
     TARGET_REPO_URL="https://github.com/comfyanonymous/ComfyUI.git" \
     TARGET_REPO_DIR=$REPO_DIR \
     UPDATE_REPO=$SD_COMFY_UPDATE_REPO \
@@ -60,7 +88,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         cmake \
         build-essential \
         || true
-
+    
     # Install NVIDIA OpenGL libraries for DepthFlow GPU support
     echo "Installing NVIDIA OpenGL libraries for DepthFlow..."
     apt-get update && apt-get install -y \
@@ -82,21 +110,6 @@ EOF
 else
     echo "EGL configuration already exists"
 fi
-    # Set up CUDA environment
-    export CUDA_HOME=/usr/local/cuda-11.6
-    export PATH=$CUDA_HOME/bin:$PATH
-    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-
-    # Set environment variables for GPU support
-    export NVIDIA_VISIBLE_DEVICES="all"
-    export NVIDIA_DRIVER_CAPABILITIES="all"
-    export WINDOW_BACKEND="headless"
-    export PYOPENGL_PLATFORM="egl"
-    export __GLX_VENDOR_LIBRARY_NAME="nvidia"
-    export __EGL_VENDOR_LIBRARY_FILENAMES="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
-    export FORCE_CUDA=1
-    export CUDA_VISIBLE_DEVICES=0
-
     # Initialize array for failed installations
     failed_installations=()
 
@@ -156,22 +169,49 @@ fi
     try_install "--upgrade wheel setuptools"
     try_install "numpy>=1.26.0,<2.3.0"
 
-    # Install PyTorch with CUDA first
-    echo "Installing PyTorch with CUDA support..."
-    pip install torch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 --index-url https://download.pytorch.org/whl/cu116
+    # Clean and install PyTorch ecosystem
+    echo "Installing PyTorch ecosystem..."
+    pip uninstall -y torch torchvision torchaudio xformers shaderflow depthflow
+    pip cache purge
 
-    # Add PyOpenGL with acceleration
+    # Install in correct order with specific versions
+    pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
+    pip install xformers==0.0.16  # Specific version compatible with torch 1.13.1
+
+    # Clean existing installations first
+    pip uninstall -y shaderflow depthflow || true
+    pip cache purge
+
+    # Install shaderflow with explicit error checking
+    echo "Installing shaderflow..."
+    if ! pip install shaderflow --no-cache-dir; then
+        echo "Failed to install shaderflow, trying alternative method..."
+        # Try installing from source
+        pip install git+https://github.com/MrLixm/shader-flow.git
+    fi
+
+    # Verify shaderflow installation
+    python3 -c "
+import shaderflow
+print(f'Shaderflow version: {shaderflow.__version__}')
+" || {
+        echo "Shaderflow verification failed"
+        failed_installations+=("shaderflow-verification")
+    }
+
+    # Verify PyTorch installation
+    python3 -c "import torch; assert torch.__version__.startswith('1.13.1')" || {
+        echo "PyTorch installation verification failed"
+        failed_installations+=("pytorch-verification")
+    }
+
+    # Install OpenGL dependencies
     try_install "PyOpenGL"
     try_install "PyOpenGL_accelerate"
 
-    cd $REPO_DIR
-    try_install "xformers"
-    try_install "shaderflow"
-
-    # Install and setup DepthFlow with proper symlink
+    # Setup DepthFlow
     echo "Installing and configuring DepthFlow..."
-    # Suppress root warning during installation
-    export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
+export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
 
     # Clean up any existing installations first
     pip uninstall -y depthflow shaderflow 2>/dev/null || true
@@ -188,9 +228,20 @@ fi
     # Create answer file for DepthFlow's CUDA prompt
     echo "cuda" > /tmp/depthflow_answer
 
-    # Install DepthFlow with shaderflow extras
-    FORCE_CUDA=1 cat /tmp/depthflow_answer | try_install "depthflow[shaderflow]==0.8.0.dev0"
-    rm /tmp/depthflow_answer
+    # Install DepthFlow with shaderflow support
+    echo "Installing DepthFlow with shaderflow support..."
+    export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
+    FORCE_CUDA=1 pip install "depthflow[shaderflow]==0.8.0.dev0" --no-cache-dir
+
+    # Verify both installations
+    python3 -c "
+import shaderflow
+import DepthFlow
+print('Both packages imported successfully')
+" || {
+        echo "Package verification failed"
+        failed_installations+=("depthflow-shaderflow-verification")
+    }
 
     # Create clean symlink for DepthFlow
     if python3 -c "import DepthFlow" 2>/dev/null; then
@@ -241,7 +292,7 @@ fi
     
     touch /tmp/sd_comfy.prepared
 else
-    
+    setup_environment
     source $VENV_DIR/sd_comfy-env/bin/activate
     
 fi
