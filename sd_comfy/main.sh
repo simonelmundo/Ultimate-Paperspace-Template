@@ -5,15 +5,26 @@ current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
 source .env
 verify_nvidia() {
+    local needs_install=0
+    
+    # Check NVIDIA driver
     if ! nvidia-smi &>/dev/null; then
-        echo "Installing NVIDIA drivers..."
-        apt-get update
-        apt-get install -y nvidia-driver-535 libnvidia-gl-535
-        if ! nvidia-smi &>/dev/null; then
-            echo "NVIDIA driver installation failed"
-            return 1
-        fi
+        echo "NVIDIA drivers not found"
+        needs_install=1
     fi
+    
+    # Check GL libraries
+    if ! ldconfig -p | grep -q "libEGL_nvidia.so.0"; then
+        echo "NVIDIA GL libraries not found"
+        needs_install=1
+    fi
+    
+    if [ $needs_install -eq 1 ]; then
+        echo "Installing NVIDIA drivers and libraries..."
+        apt-get update
+        apt-get install -y nvidia-driver-535 libnvidia-gl-535 libnvidia-egl-wayland1
+    fi
+    
     return 0
 }
 # 2. Set environment variables globally
