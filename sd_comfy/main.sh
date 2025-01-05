@@ -121,7 +121,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         echo "DepthFlow installation failed"
     fi
 
-    # Function to safely process requirements file with persistent storage
+    # Function to safely process requirements file
     process_requirements() {
         local req_file="$1"
         local indent="${2:-}"  # Indentation for nested requirements
@@ -134,10 +134,6 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             echo "${indent}Skipping: File not found - $req_file"
             return 0
         fi
-        
-        # Create a persistent pip cache directory in storage
-        export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
-        mkdir -p "$PIP_CACHE_DIR"
         
         echo "${indent}Processing: $req_file"
         while IFS= read -r requirement || [ -n "$requirement" ]; do
@@ -162,17 +158,15 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                 process_requirements "$included_file" "${indent}  "
             else
                 echo "${indent}  Installing: $requirement"
-                if ! pip install --cache-dir="$PIP_CACHE_DIR" "$requirement"; then
+                if ! pip install "$requirement"; then
                     echo "${indent}  Warning: Failed to install $requirement"
                 fi
             fi
         done < "$req_file"
     }
 
-    # Install TensorFlow with persistent cache
-    export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
-    mkdir -p "$PIP_CACHE_DIR"
-    pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
+    # Install TensorFlow
+    pip install "tensorflow>=2.8.0,<2.19.0"
 
     # Process main requirements file
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
@@ -307,7 +301,7 @@ echo -e "\n[3/3] 🔍 Checking DepthFlow Setup..."
 export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
 
 echo "DepthFlow Dependencies and GPU Test:"
-echo "---------------------------------------"
+echo "----------------------------------------"
 python3 -c """
 import importlib
 import sys
