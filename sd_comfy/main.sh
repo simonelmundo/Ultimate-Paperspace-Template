@@ -43,26 +43,36 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     python3.10 -m venv $VENV_DIR/sd_comfy-env
     source $VENV_DIR/sd_comfy-env/bin/activate
 
-    # Install required system packages
+    # Install system dependencies
     echo "Installing system dependencies..."
     apt-get update && apt-get install -y \
-        # Keep these for numerical computations
         libatlas-base-dev \
         libblas-dev \
         liblapack-dev \
-        
-        # Keep these for image processing
         libjpeg-dev \
         libpng-dev \
         libtiff-dev \
         libbz2-dev \
-
         python2-dev \
         libopenblas-dev \
         cmake \
         build-essential \
-        || true
-    
+        libx11-dev \
+        libxrandr-dev \
+        libxinerama-dev \
+        libxcursor-dev \
+        libxi-dev \
+        libgl1-mesa-dev \
+        libglu1-mesa-dev \
+        libglew-dev \
+        libglfw3-dev \
+        mesa-common-dev
+
+    # Verify installation
+    if [ $? -ne 0 ]; then
+        echo "Warning: Some packages failed to install"
+        # But continue anyway since we want the script to keep running
+    fi
 
     # Clean and install PyTorch ecosystem
     echo "Installing PyTorch ecosystem..."
@@ -73,27 +83,17 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
     pip install xformers==0.0.16  # Specific version compatible with torch 1.13.1
 
-    # Function to safely process requirements file
-    process_requirements() {
-        local req_file="$1"
-        echo "Processing requirements from: $req_file"
-        while IFS= read -r requirement || [ -n "$requirement" ]; do
-            if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
-                # Skip local directory references
-                if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
-                    echo "Skipping local directory reference: $requirement"
-                    continue
-                fi
-                try_install "$requirement"
-            fi
-        done < "$req_file"
-    }
+ 
 
+    # Update pip first
+    pip install pip==24.0
 
-    # Install base requirements first
-    try_install "pip==24.0"
-    try_install "--upgrade wheel setuptools"
-    try_install "numpy>=1.26.0,<2.3.0"
+    # Update wheel and setuptools separately
+    pip install --upgrade wheel
+    pip install --upgrade setuptools
+
+    # Continue with other installations
+    pip install "numpy>=1.26.0,<2.3.0"
 
     # Clean and install PyTorch ecosystem
     echo "Installing PyTorch ecosystem..."
@@ -121,16 +121,39 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         echo "DepthFlow installation failed"
     fi
 
-    # Install TensorFlow
-    try_install "tensorflow>=2.8.0,<2.19.0"
-# Install custom nodes requirements
-    echo "Installing DepthFlow node requirements..."
-    if [ -f "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt" ]; then
-        process_requirements "/storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt"
-    else
-        echo "No DepthFlow requirements.txt found, skipping..."
-    fi
+    # Function to safely process requirements file with persistent storage
+    process_requirements() {
+        local req_file="$1"
+        if [ ! -f "$req_file" ]; then
+            echo "Skipping: Requirements file not found: $req_file"
+            return 0
+        fi
+        
+        # Create a persistent pip cache directory in storage
+        export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
+        mkdir -p "$PIP_CACHE_DIR"
+        
+        echo "Processing requirements from: $req_file"
+        while IFS= read -r requirement || [ -n "$requirement" ]; do
+            if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
+                # Skip local directory references
+                if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
+                    echo "Skipping local directory reference: $requirement"
+                    continue
+                fi
+                # Install packages with --cache-dir pointing to storage
+                pip install --cache-dir="$PIP_CACHE_DIR" "$requirement"
+            fi
+        done < "$req_file"
+    }
+
+    # Install TensorFlow with persistent cache
+    export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
+    mkdir -p "$PIP_CACHE_DIR"
+    pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
+
     process_requirements "requirements.txt"
+    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
     touch /tmp/sd_comfy.prepared
 else
