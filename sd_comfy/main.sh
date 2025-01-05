@@ -58,7 +58,6 @@ echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
 if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # Verify NVIDIA and setup environment first
-    verify_nvidia || exit 1
     setup_environment
 
     TARGET_REPO_URL="https://github.com/comfyanonymous/ComfyUI.git" \
