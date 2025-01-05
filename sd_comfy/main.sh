@@ -307,7 +307,7 @@ echo -e "\n[3/3] 🔍 Checking DepthFlow Setup..."
 export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
 
 echo "DepthFlow Dependencies and GPU Test:"
-echo "----------------------------------------"
+echo "---------------------------------------"
 python3 -c """
 import importlib
 import sys
