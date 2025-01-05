@@ -124,8 +124,14 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # Function to safely process requirements file with persistent storage
     process_requirements() {
         local req_file="$1"
+        local indent="${2:-}"  # Indentation for nested requirements
+        
+        # Clean the path
+        req_file="$(echo "$req_file" | tr -d ' ')"
+        
+        # Check if file exists
         if [ ! -f "$req_file" ]; then
-            echo "Skipping: Requirements file not found: $req_file"
+            echo "${indent}Skipping: File not found - $req_file"
             return 0
         fi
         
@@ -133,16 +139,32 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
         mkdir -p "$PIP_CACHE_DIR"
         
-        echo "Processing requirements from: $req_file"
+        echo "${indent}Processing: $req_file"
         while IFS= read -r requirement || [ -n "$requirement" ]; do
-            if [[ ! -z "$requirement" && ! "$requirement" =~ ^# ]]; then
-                # Skip local directory references
-                if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
-                    echo "Skipping local directory reference: $requirement"
-                    continue
+            # Skip empty lines and comments
+            if [[ -z "$requirement" || "$requirement" =~ ^[[:space:]]*# ]]; then
+                continue
+            fi
+            
+            # Clean the requirement string
+            requirement="$(echo "$requirement" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            
+            # Skip local directory references
+            if [[ "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
+                echo "${indent}  Skipping local reference: $requirement"
+                continue
+            fi
+            
+            # If requirement is a -r reference, process that file
+            if [[ "$requirement" =~ ^-r ]]; then
+                local included_file="${requirement#-r}"
+                included_file="$(echo "$included_file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                process_requirements "$included_file" "${indent}  "
+            else
+                echo "${indent}  Installing: $requirement"
+                if ! pip install --cache-dir="$PIP_CACHE_DIR" "$requirement"; then
+                    echo "${indent}  Warning: Failed to install $requirement"
                 fi
-                # Install packages with --cache-dir pointing to storage
-                pip install --cache-dir="$PIP_CACHE_DIR" "$requirement"
             fi
         done < "$req_file"
     }
@@ -152,7 +174,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     mkdir -p "$PIP_CACHE_DIR"
     pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
 
-    process_requirements "requirements.txt"
+    # Process main requirements file
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
     touch /tmp/sd_comfy.prepared
