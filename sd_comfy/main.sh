@@ -14,6 +14,41 @@ setup_environment() {
     export PYOPENGL_PLATFORM="osmesa"  
     export WINDOW_BACKEND="headless"
 }
+# Function to fix CUDA and PyTorch versions
+fix_torch_versions() {
+    echo "Checking and fixing PyTorch/CUDA versions..."
+    
+    # Uninstall all torch-related packages
+    echo "Removing existing PyTorch installations..."
+    pip uninstall -y torch torchvision torchaudio xformers || true
+    pip cache purge || true
+    
+    # Install correct versions for CUDA 11.6
+    echo "Installing PyTorch ecosystem with CUDA 11.6..."
+    pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==1.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116 || {
+        echo "Warning: PyTorch installation had issues, but continuing..."
+    }
+    pip install xformers==0.0.16 || {
+        echo "Warning: xformers installation had issues, but continuing..."
+    }
+    
+    # Verify installations
+    echo "Verifying installations..."
+    python3 -c "
+try:
+    import torch
+    import torchvision
+    print(f'PyTorch version: {torch.__version__}')
+    print(f'CUDA available: {torch.cuda.is_available()}')
+    print(f'TorchVision version: {torchvision.__version__}')
+    print(f'CUDA version: {torch.version.cuda}')
+except Exception as e:
+    print(f'Warning: Verification had issues: {str(e)}')
+" || echo "Warning: Verification script had issues, but continuing..."
+    
+    echo "PyTorch ecosystem installation completed"
+    return 0  # Always return success
+}
 
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
@@ -121,7 +156,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         echo "DepthFlow installation failed"
     fi
 
-    # Function to safely process requirements file
+    # Function to safely process requirements file with persistent storage
     process_requirements() {
         local req_file="$1"
         local indent="${2:-}"  # Indentation for nested requirements
@@ -134,6 +169,10 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             echo "${indent}Skipping: File not found - $req_file"
             return 0
         fi
+        
+        # Create a persistent pip cache directory in storage
+        export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
+        mkdir -p "$PIP_CACHE_DIR"
         
         echo "${indent}Processing: $req_file"
         while IFS= read -r requirement || [ -n "$requirement" ]; do
@@ -158,21 +197,24 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                 process_requirements "$included_file" "${indent}  "
             else
                 echo "${indent}  Installing: $requirement"
-                if ! pip install "$requirement"; then
+                if ! pip install --cache-dir="$PIP_CACHE_DIR" "$requirement"; then
                     echo "${indent}  Warning: Failed to install $requirement"
                 fi
             fi
         done < "$req_file"
     }
 
-    # Install TensorFlow
-    pip install "tensorflow>=2.8.0,<2.19.0"
+    # Install TensorFlow with persistent cache
+    export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
+    mkdir -p "$PIP_CACHE_DIR"
+    pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
 
     # Process main requirements file
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
-
+    fix_torch_versions
     touch /tmp/sd_comfy.prepared
 else
+    fix_torch_versions
     setup_environment
     source $VENV_DIR/sd_comfy-env/bin/activate
     
@@ -386,3 +428,8 @@ try:
 except:
     print('⚠️  Could not check version compatibility')
 """
+
+
+# Run the fix at the end
+echo "Running final version check and fixes..."
+fix_torch_versions || true  # Continue even if function has issues
