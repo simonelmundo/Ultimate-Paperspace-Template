@@ -8,15 +8,14 @@ kornia
 urllib3==1.21
 depthflow
 diffusers
-requests==2.32.3
+requests==2.31.0
 fastapi==0.103.2
-gradio_client==1.3.0
+gradio_client==0.6.0
 peewee==3.16.3
 psutil==5.9.5
 uvicorn==0.23.2
 pynvml==11.5.0
-python-multipart==0.0.9
-
+python-multipart==0.0.6
 # Requirements files to include
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Manager/requirements.txt
 -r /storage/stable-diffusion-comfy/requirements.txt
