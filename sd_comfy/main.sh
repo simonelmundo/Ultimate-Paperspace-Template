@@ -145,6 +145,14 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     TARGET_REPO_DIR=$REPO_DIR \
     UPDATE_REPO=$SD_COMFY_UPDATE_REPO \
     UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT \
+
+    # Ensure requirements.txt is not blocking the update
+    cd $REPO_DIR
+    if [[ -n "$(git status --porcelain requirements.txt)" ]]; then
+        echo "Local changes detected in requirements.txt. Discarding changes..."
+        git checkout -- requirements.txt
+    fi
+
     prepare_repo 
 
     symlinks=(
@@ -197,6 +205,8 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # Install numpy with version constraint
     pip install "numpy>=1.26.0,<2.3.0"
 
+    fix_torch_versions
+
     # Install and setup DepthFlow
     echo "Setting up DepthFlow..."
     export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
@@ -204,13 +214,21 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # Clean and install DepthFlow
     cd /storage/stable-diffusion-comfy/custom_nodes
     rm -rf DepthFlow  # Remove existing installation
-    FORCE_CUDA=1 pip install --no-cache-dir "depthflow==0.8.0.dev0"
 
-    # Create symlink and verify
-    if python3 -c "import DepthFlow; print(f'DepthFlow {DepthFlow.__version__} installed')" 2>/dev/null; then
-        ln -sf "/tmp/sd_comfy-env/lib/python3.10/site-packages/DepthFlow" DepthFlow
+    # Ensure wheel cache directory exists
+    WHEEL_CACHE_DIR="/storage/wheel_cache"
+    mkdir -p "$WHEEL_CACHE_DIR"
+
+    # Install DepthFlow with wheel caching
+    if FORCE_CUDA=1 pip install --cache-dir="$WHEEL_CACHE_DIR" "git+https://github.com/BrokenSource/DepthFlow.git@v0.8.0"; then
+        # Create symlink and verify
+        if python3 -c "import DepthFlow; print(f'DepthFlow {DepthFlow.__version__} installed')" 2>/dev/null; then
+            ln -sf "/tmp/sd_comfy-env/lib/python3.10/site-packages/DepthFlow" DepthFlow
+        else
+            echo "DepthFlow installation verification failed, but continuing..."
+        fi
     else
-        echo "DepthFlow installation failed"
+        echo "DepthFlow installation failed, but continuing..."
     fi
 
     # Function to safely process requirements file with persistent storage
@@ -294,6 +312,12 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   echo "### Starting Stable Diffusion Comfy ###"
   log "Starting Stable Diffusion Comfy"
   cd "$REPO_DIR"
+  
+  # Delete the previous log file if it exists
+  if [[ -f "$LOG_DIR/sd_comfy.log" ]]; then
+    rm "$LOG_DIR/sd_comfy.log"
+  fi
+  
   PYTHONUNBUFFERED=1 service_loop "python main.py --dont-print-server --highvram --port $SD_COMFY_PORT ${EXTRA_SD_COMFY_ARGS}" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
 fi
@@ -311,184 +335,3 @@ if [[ -n "${CF_TOKEN}" ]]; then
   fi
   bash $current_dir/../cloudflare_reload.sh
 fi
-# =============================================================================
-# DepthFlow Environment Verification
-# Comprehensive diagnostics for DepthFlow GPU acceleration
-# =============================================================================
-
-echo "
-╔════════════════════════════════════════╗
-║   DepthFlow Environment Verification   ║
-╚════════════════════════════════════════╝"
-
-# -----------------------------------------------------------------------------
-# 1. NVIDIA Driver and System Check
-# -----------------------------------------------------------------------------
-echo -e "\n[1/3] 🔍 Checking NVIDIA Driver and System..."
-if nvidia-smi > /tmp/nvidia_check 2>&1; then
-    echo "Driver Information:"
-    echo "----------------------------------------"
-    cat /tmp/nvidia_check
-    echo "----------------------------------------"
-    
-    echo "GPU Memory Status (Per Device):"
-    echo "----------------------------------------"
-    nvidia-smi --query-gpu=index,gpu_name,memory.total,memory.used,memory.free,temperature.gpu,utilization.gpu --format=csv,noheader | while IFS="," read -r id name total used free temp util; do
-        echo "GPU $id: $name"
-        echo "  Memory  : $used/$total (Free: $free)"
-        echo "  Temp    : $temp"
-        echo "  Load    : $util"
-    done
-    
-    echo -e "\nDriver/Library Versions:"
-    echo "----------------------------------------"
-    dpkg -l | grep -E "nvidia-driver|nvidia-utils|cuda" | awk '{printf "%-20s: %s\n", $2, $3}'
-    
-    echo "✅ NVIDIA drivers are working"
-else
-    echo "⚠️  Warning: NVIDIA driver issue detected"
-    echo "Error: $(cat /tmp/nvidia_check)"
-fi
-
-# -----------------------------------------------------------------------------
-# 2. CUDA Version and Compatibility Check
-# -----------------------------------------------------------------------------
-echo -e "\n[2/3] 🔍 Checking CUDA Environment..."
-
-# Check System CUDA
-if CUDA_PATH=$(which nvcc 2>/dev/null); then
-    CUDA_VERSION=$(nvcc --version | grep "release" | awk '{print $6}' | cut -c2-)
-    echo "System CUDA Version: $CUDA_VERSION"
-    
-    # Check PyTorch CUDA
-    echo -e "\nPyTorch CUDA Compatibility:"
-    echo "----------------------------------------"
-    python3 -c "
-import torch
-import re
-
-def normalize_version(version):
-    # Extract just major.minor version (e.g., '11.6' from '11.6.124')
-    match = re.match(r'(\d+\.\d+)', str(version))
-    return match.group(1) if match else version
-
-pytorch_cuda = normalize_version(torch.version.cuda)
-system_cuda = normalize_version('$CUDA_VERSION')
-
-print(f'PyTorch Version : {torch.__version__}')
-print(f'PyTorch CUDA   : {pytorch_cuda}')
-print(f'System CUDA    : {system_cuda} (full: $CUDA_VERSION)')
-
-if pytorch_cuda != system_cuda:
-    print(f'\n⚠️  Version Mismatch:')
-    print(f'• System CUDA ({system_cuda}) does not match PyTorch CUDA ({pytorch_cuda})')
-    print(f'• This may cause GPU acceleration issues')
-    print(f'\nSuggested fixes:')
-    print(f'1. Install PyTorch for CUDA {system_cuda}')
-    print(f'2. Or upgrade system CUDA to {pytorch_cuda}')
-else:
-    print(f'\n✅ CUDA versions are compatible')
-"
-else
-    echo "⚠️  CUDA not found on system"
-fi
-
-
-# -----------------------------------------------------------------------------
-# 6. DepthFlow Installation Check
-# -----------------------------------------------------------------------------
-echo -e "\n[3/3] 🔍 Checking DepthFlow Setup..."
-export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
-
-echo "DepthFlow Dependencies and GPU Test:"
-echo "----------------------------------------"
-python3 -c """
-import importlib
-import sys
-
-def check_package(package_name):
-    try:
-        module = importlib.import_module(package_name)
-        return True
-    except:
-        return False
-
-# Basic package check
-packages = [
-    'DepthFlow',
-    'torch',
-    'numpy',
-    'moderngl',
-    'shaderflow'
-]
-
-print('Package Status:')
-for pkg_name in packages:
-    try:
-        if check_package(pkg_name):
-            print(f'✅ {pkg_name:<12} Installed')
-        else:
-            print(f'⚠️  {pkg_name:<12} Not installed')
-    except:
-        print(f'⚠️  {pkg_name:<12} Check failed')
-
-# Test GPU functionality
-print('\nGPU Test:')
-try:
-    import torch
-    import DepthFlow
-    
-    # Check CUDA
-    if torch.cuda.is_available():
-        print(f'✅ GPU Found: {torch.cuda.get_device_name(0)}')
-        
-        # Test DepthFlow GPU
-        try:
-            model = DepthFlow.load_model('small')  # or 'base' or 'large'
-            model.to('cuda')
-            print('✅ DepthFlow loaded on GPU')
-            
-            # Optional: Test inference
-            try:
-                import numpy as np
-                test_input = np.zeros((1, 3, 384, 384))  # Example input
-                with torch.no_grad():
-                    _ = model(torch.from_numpy(test_input).cuda().float())
-                print('✅ DepthFlow GPU inference test passed')
-            except:
-                print('⚠️  Could not test inference')
-        except:
-            print('⚠️  Could not load DepthFlow model on GPU')
-    else:
-        print('⚠️  No GPU available')
-except Exception as e:
-    print(f'⚠️  GPU test failed: {str(e)}')
-
-# Check compatibility
-print('\nCompatibility Check:')
-try:
-    import torch
-    import numpy as np
-    
-    torch_version = torch.__version__.split('+')[0]
-    numpy_version = np.__version__
-    cuda_version = torch.version.cuda if torch.cuda.is_available() else 'N/A'
-    
-    print(f'PyTorch : {torch_version}')
-    print(f'CUDA    : {cuda_version}')
-    print(f'NumPy   : {numpy_version}')
-    
-    # Known good configurations
-    if torch_version.startswith('1.13'):
-        print('✅ PyTorch version compatible with DepthFlow')
-    else:
-        print('⚠️  Untested PyTorch version')
-except:
-    print('⚠️  Could not check version compatibility')
-"""
-
-
-# Run the fix at the end
-echo "Running final version check and fixes..."
-
-echo "Finished main.sh operations"
