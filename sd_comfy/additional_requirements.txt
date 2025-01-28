@@ -21,6 +21,7 @@ python-multipart==0.0.6
 -r /storage/stable-diffusion-comfy/requirements.txt
 -r /storage/stable-diffusion-comfy/tests-unit/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI_essentials/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Crystools/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-fastblend/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui_controlnet_aux/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-scene-composer/requirements.txt
