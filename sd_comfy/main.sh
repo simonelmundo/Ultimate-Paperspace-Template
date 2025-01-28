@@ -4,7 +4,66 @@ set -e
 current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
 source .env
+
+# Ensure LOG_DIR is set and create it if it doesn't exist
+LOG_DIR="/tmp/log"
+mkdir -p "$LOG_DIR" || { echo "Failed to create log directory: $LOG_DIR"; exit 1; }
+
+# Define log file paths
+MAIN_LOG="$LOG_DIR/main_operations.log"
+RUN_LOG="$LOG_DIR/run.log"
+
+# Ensure log files are created and writable
+touch "$MAIN_LOG" "$RUN_LOG" || { echo "Failed to create log files"; exit 1; }
+
+# Function to add timestamps to log lines
+add_timestamp() {
+    while IFS= read -r line; do
+        timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$timestamp] $line"
+    done
+}
+
+# Export the function so it's available in subshells
+export -f add_timestamp
+
+# Redirect all output to both logs with timestamps
+exec > >(add_timestamp | tee -a "$MAIN_LOG" "$RUN_LOG") 2>&1
+
+# Ensure all subprocesses inherit the redirection
+export BASH_ENV="$LOG_DIR/bash_env"
+cat << 'EOF' > "$BASH_ENV"
+add_timestamp() {
+    while IFS= read -r line; do
+        timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$timestamp] $line"
+    done
+}
+exec > >(add_timestamp | tee -a "$MAIN_LOG" "$RUN_LOG") 2>&1
+EOF
+
+# Function to log errors (already includes timestamp)
+log_error() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] ERROR: $1" | tee -a "$MAIN_LOG" "$RUN_LOG" >&2
+}
+
+# Trap errors
+trap 'log_error "Script exited with error"; exit 1' ERR
+
+# Now all output will be logged to both files
+echo "Starting main.sh operations at $(date)"
+
 setup_environment() {
+    # Check system CUDA version
+    local cuda_version=$(nvcc --version | grep 'release' | awk '{print $6}' || echo "unknown")
+    echo "System CUDA Version: $cuda_version"
+    
+    # Add version-specific installation logic
+    if [[ "$cuda_version" != "11.6" ]]; then
+        echo "Warning: Mismatched CUDA version - Expected 11.6, found $cuda_version"
+    fi
+    
     # Keep CUDA-related vars for other operations
     export CUDA_HOME=/usr/local/cuda-11.6
     export PATH=$CUDA_HOME/bin:$PATH
@@ -14,40 +73,66 @@ setup_environment() {
     export PYOPENGL_PLATFORM="osmesa"  
     export WINDOW_BACKEND="headless"
 }
+
 # Function to fix CUDA and PyTorch versions
 fix_torch_versions() {
     echo "Checking and fixing PyTorch/CUDA versions..."
     
-    # Uninstall all torch-related packages
+    # Clean up existing installations
     echo "Removing existing PyTorch installations..."
     pip uninstall -y torch torchvision torchaudio xformers || true
     pip cache purge || true
     
-    # Install correct versions for CUDA 11.6
+    # Install specific versions for CUDA 11.6 with proper index URLs
     echo "Installing PyTorch ecosystem with CUDA 11.6..."
-    pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==1.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116 || {
-        echo "Warning: PyTorch installation had issues, but continuing..."
-    }
-    pip install xformers==0.0.16 || {
+    local torch_index="https://download.pytorch.org/whl/cu116"
+    
+    # Install PyTorch core packages first
+    pip install \
+        torch==1.13.1+cu116 \
+        torchvision==0.14.1+cu116 \
+        torchaudio==0.13.1+cu116 \
+        --extra-index-url "$torch_index" || {
+            echo "Warning: PyTorch core packages installation had issues, but continuing..."
+        }
+    
+    # Install xformers separately to prevent version conflicts
+    echo "Installing xformers..."
+    pip install xformers==0.0.16 --no-deps || {
         echo "Warning: xformers installation had issues, but continuing..."
     }
     
-    # Verify installations
+    # Verify installations with comprehensive checks
     echo "Verifying installations..."
     python3 -c "
 try:
     import torch
     import torchvision
-    print(f'PyTorch version: {torch.__version__}')
-    print(f'CUDA available: {torch.cuda.is_available()}')
-    print(f'TorchVision version: {torchvision.__version__}')
-    print(f'CUDA version: {torch.version.cuda}')
+    import torchaudio
+    
+    cuda_available = torch.cuda.is_available()
+    cuda_version = torch.version.cuda if cuda_available else 'N/A'
+    
+    print(f'PyTorch: {torch.__version__}')
+    print(f'TorchVision: {torchvision.__version__}') 
+    print(f'TorchAudio: {torchaudio.__version__}')
+    print(f'CUDA Available: {cuda_available}')
+    print(f'CUDA Version: {cuda_version}')
+    
+    if not cuda_available:
+        print('Warning: CUDA not available after installation')
+        
+    if torch.__version__ != '1.13.1+cu116':
+        print('Warning: Unexpected PyTorch version installed')
+        
+except ImportError as e:
+    print(f'Warning: Missing package - {str(e)}')
 except Exception as e:
     print(f'Warning: Verification had issues: {str(e)}')
 " || echo "Warning: Verification script had issues, but continuing..."
     
     echo "PyTorch ecosystem installation completed"
-    return 0  # Always return success
+    return 0
 }
 
 echo "### Setting up Stable Diffusion Comfy ###"
@@ -101,44 +186,16 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         libglu1-mesa-dev \
         libglew-dev \
         libglfw3-dev \
-        mesa-common-dev
-
-    # Verify installation
-    if [ $? -ne 0 ]; then
+        mesa-common-dev || {
         echo "Warning: Some packages failed to install"
-        # But continue anyway since we want the script to keep running
-    fi
+    }
 
-    # Clean and install PyTorch ecosystem
-    echo "Installing PyTorch ecosystem..."
-    pip uninstall -y torch torchvision torchaudio xformers depthflow
-    pip cache purge
-
-    # Install in correct order with specific versions
-    pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
-    pip install xformers==0.0.16  # Specific version compatible with torch 1.13.1
-
- 
-
-    # Update pip first
+    # Update pip and dependencies
     pip install pip==24.0
+    pip install --upgrade wheel setuptools
 
-    # Update wheel and setuptools separately
-    pip install --upgrade wheel
-    pip install --upgrade setuptools
-
-    # Continue with other installations
+    # Install numpy with version constraint
     pip install "numpy>=1.26.0,<2.3.0"
-
-    # Clean and install PyTorch ecosystem
-    echo "Installing PyTorch ecosystem..."
-    pip uninstall -y torch torchvision torchaudio xformers shaderflow depthflow
-    pip cache purge
-
-    # Install in correct order with specific versions
-    pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
-    pip install xformers==0.0.16  # Specific version compatible with torch 1.13.1
-    pip install shaderflow
 
     # Install and setup DepthFlow
     echo "Setting up DepthFlow..."
@@ -214,6 +271,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     fix_torch_versions
     touch /tmp/sd_comfy.prepared
 else
+    # Just ensure PyTorch versions are correct
     fix_torch_versions
     setup_environment
     source $VENV_DIR/sd_comfy-env/bin/activate
@@ -432,4 +490,5 @@ except:
 
 # Run the fix at the end
 echo "Running final version check and fixes..."
-fix_torch_versions || true  # Continue even if function has issues
+
+echo "Finished main.sh operations"
