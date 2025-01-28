@@ -6,7 +6,7 @@ aiohttp
 spandrel
 kornia
 urllib3==1.21
-depthflow
+
 diffusers
 requests==2.31.0
 fastapi==0.103.2
