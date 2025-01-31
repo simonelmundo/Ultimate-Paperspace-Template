@@ -5,6 +5,12 @@ current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
 source .env
 
+# Upgrade Git to latest version
+echo "Upgrading Git to latest version..."
+add-apt-repository -y ppa:git-core/ppa
+apt-get update
+apt-get install -y git
+
 # Ensure LOG_DIR is set and create it if it doesn't exist
 LOG_DIR="/tmp/log"
 mkdir -p "$LOG_DIR" || { echo "Failed to create log directory: $LOG_DIR"; exit 1; }
