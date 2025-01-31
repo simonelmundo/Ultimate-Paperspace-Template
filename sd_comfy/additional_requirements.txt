@@ -41,3 +41,13 @@ python-multipart==0.0.6
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-DepthAnythingV2/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/was-node-suite-comfyui/requirements.txt
+
+
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI_LayerStyle/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/comfy_mtb/extern/frame_interpolation/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/comfy_mtb/extern/GFPGAN/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Florence2/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Image-Filters/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/comfyui-tensorops/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-HunyuanVideoWrapper/requirements.txt
+
