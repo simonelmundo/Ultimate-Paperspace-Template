@@ -16,6 +16,7 @@ psutil==5.9.5
 uvicorn==0.23.2
 pynvml==11.5.0
 python-multipart==0.0.6
+
 # Requirements files to include
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Manager/requirements.txt
 -r /storage/stable-diffusion-comfy/requirements.txt
@@ -42,12 +43,12 @@ python-multipart==0.0.6
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Depthflow-Nodes/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/was-node-suite-comfyui/requirements.txt
 
-
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI_LayerStyle/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfy_mtb/extern/frame_interpolation/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfy_mtb/extern/GFPGAN/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Florence2/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Image-Filters/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-tensorops/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-HunyuanVideoWrapper/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-LTXVideo/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-CogVideoXWrapper/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/Comfy-WaveSpeed/requirements.txt
 
