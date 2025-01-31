@@ -83,22 +83,22 @@ fix_torch_versions() {
     pip uninstall -y torch torchvision torchaudio xformers || true
     pip cache purge || true
     
-    # Install specific versions for CUDA 11.6 with proper index URLs
-    echo "Installing PyTorch ecosystem with CUDA 11.6..."
-    local torch_index="https://download.pytorch.org/whl/cu116"
+    # Install specific versions for CUDA 11.6/12.x compatibility
+    echo "Installing PyTorch ecosystem with CUDA 11.6/12.x compatibility..."
+    local torch_index="https://download.pytorch.org/whl/cu121"
     
     # Install PyTorch core packages first
     pip install \
-        torch==1.13.1+cu116 \
-        torchvision==0.14.1+cu116 \
-        torchaudio==0.13.1+cu116 \
+        torch==2.4.1+cu121 \
+        torchvision==0.19.1+cu121 \
+        torchaudio==2.4.1+cu121 \
         --extra-index-url "$torch_index" || {
             echo "Warning: PyTorch core packages installation had issues, but continuing..."
         }
     
-    # Install xformers separately to prevent version conflicts
+    # Install xformers with CUDA 12.1 compatibility
     echo "Installing xformers..."
-    pip install xformers==0.0.16 --no-deps || {
+    pip install xformers==0.0.25.post1 --no-deps || {
         echo "Warning: xformers installation had issues, but continuing..."
     }
     
@@ -122,7 +122,7 @@ try:
     if not cuda_available:
         print('Warning: CUDA not available after installation')
         
-    if torch.__version__ != '1.13.1+cu116':
+    if torch.__version__ != '2.4.1+cu121':
         print('Warning: Unexpected PyTorch version installed')
         
 except ImportError as e:
