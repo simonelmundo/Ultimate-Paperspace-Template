@@ -5,11 +5,7 @@ current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
 source .env
 
-# Upgrade Git to latest version
-echo "Upgrading Git to latest version..."
-add-apt-repository -y ppa:git-core/ppa
-apt-get update
-apt-get install -y git
+
 
 # Ensure LOG_DIR is set and create it if it doesn't exist
 LOG_DIR="/tmp/log"
@@ -89,8 +85,8 @@ fix_torch_versions() {
     pip uninstall -y torch torchvision torchaudio xformers || true
     pip cache purge || true
     
-    # Install specific versions for CUDA 11.6/12.x compatibility
-    echo "Installing PyTorch ecosystem with CUDA 11.6/12.x compatibility..."
+    # Install specific versions for CUDA 12.1 compatibility
+    echo "Installing PyTorch ecosystem with CUDA 12.1 compatibility..."
     local torch_index="https://download.pytorch.org/whl/cu121"
     
     # Install PyTorch core packages first
@@ -104,7 +100,7 @@ fix_torch_versions() {
     
     # Install xformers with CUDA 12.1 compatibility
     echo "Installing xformers..."
-    pip install xformers==0.0.25.post1 --no-deps || {
+    pip install xformers==0.0.28.post1 || {
         echo "Warning: xformers installation had issues, but continuing..."
     }
     
@@ -144,7 +140,14 @@ except Exception as e:
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
 if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
+    # Upgrade Git to latest version
+    echo "Upgrading Git to latest version..."
+    add-apt-repository -y ppa:git-core/ppa
+    apt-get update
+    apt-get install -y git
+    
     # Verify NVIDIA and setup environment first
+
     setup_environment
 
     TARGET_REPO_URL="https://github.com/comfyanonymous/ComfyUI.git" \
