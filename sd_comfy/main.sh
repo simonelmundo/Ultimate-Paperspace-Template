@@ -6,7 +6,6 @@ cd $current_dir
 source .env
 
 
-
 # Ensure LOG_DIR is set and create it if it doesn't exist
 LOG_DIR="/tmp/log"
 mkdir -p "$LOG_DIR" || { echo "Failed to create log directory: $LOG_DIR"; exit 1; }
@@ -56,18 +55,62 @@ trap 'log_error "Script exited with error"; exit 1' ERR
 # Now all output will be logged to both files
 echo "Starting main.sh operations at $(date)"
 
+# Function to install CUDA 12.1
+install_cuda_12() {
+    echo "Installing CUDA 12.1..."
+    
+    # Remove existing CUDA installations if needed
+    if dpkg -l | grep -q "cuda-11"; then
+        echo "Removing existing CUDA 11.x installations..."
+        apt-get --purge remove -y cuda-11-* || echo "No CUDA 11.x found to remove"
+    fi
+    
+    # Add CUDA repository and install CUDA 12.1
+    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
+    dpkg -i cuda-keyring_1.1-1_all.deb
+    apt-get update -qq
+    apt-get install -y cuda-toolkit-12-1
+    rm -f cuda-keyring_1.1-1_all.deb
+    
+    # Set up environment variables for CUDA 12.1
+    echo "Setting up CUDA 12.1 environment variables..."
+    export CUDA_HOME=/usr/local/cuda-12.1
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    export FORCE_CUDA=1
+    export CUDA_VISIBLE_DEVICES=0
+    export PYOPENGL_PLATFORM="osmesa"  
+    export WINDOW_BACKEND="headless"
+    
+    # Add to bashrc for persistence
+    cat > /etc/profile.d/cuda12.sh << 'EOL'
+export CUDA_HOME=/usr/local/cuda-12.1
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export FORCE_CUDA=1
+EOL
+    chmod +x /etc/profile.d/cuda12.sh
+    
+    # Verify installation
+    echo "Verifying CUDA 12.1 installation..."
+    nvcc --version
+}
+
 setup_environment() {
     # Check system CUDA version
     local cuda_version=$(nvcc --version | grep 'release' | awk '{print $6}' || echo "unknown")
     echo "System CUDA Version: $cuda_version"
     
-    # Add version-specific installation logic
-    if [[ "$cuda_version" != "11.6" ]]; then
-        echo "Warning: Mismatched CUDA version - Expected 11.6, found $cuda_version"
+    # Install CUDA 12.1 if not already installed
+    if [[ "$cuda_version" != "12.1" ]]; then
+        echo "CUDA 12.1 not found. Installing CUDA 12.1..."
+        install_cuda_12
+    else
+        echo "CUDA 12.1 already installed."
     fi
     
-    # Keep CUDA-related vars for other operations
-    export CUDA_HOME=/usr/local/cuda-11.6
+    # Set CUDA-related vars for other operations
+    export CUDA_HOME=/usr/local/cuda-12.1
     export PATH=$CUDA_HOME/bin:$PATH
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
     export FORCE_CUDA=1
@@ -111,6 +154,7 @@ try:
     import torch
     import torchvision
     import torchaudio
+    import xformers
     
     cuda_available = torch.cuda.is_available()
     cuda_version = torch.version.cuda if cuda_available else 'N/A'
@@ -118,6 +162,7 @@ try:
     print(f'PyTorch: {torch.__version__}')
     print(f'TorchVision: {torchvision.__version__}') 
     print(f'TorchAudio: {torchaudio.__version__}')
+    print(f'Xformers: {xformers.__version__}')
     print(f'CUDA Available: {cuda_available}')
     print(f'CUDA Version: {cuda_version}')
     
@@ -130,7 +175,7 @@ try:
 except ImportError as e:
     print(f'Warning: Missing package - {str(e)}')
 except Exception as e:
-    print(f'Warning: Verification had issues: {str(e)}')
+    print(f'Warning: Verification script had issues: {str(e)}')
 " || echo "Warning: Verification script had issues, but continuing..."
     
     echo "PyTorch ecosystem installation completed"
@@ -140,14 +185,9 @@ except Exception as e:
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
 if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
-    # Upgrade Git to latest version
-    echo "Upgrading Git to latest version..."
-    add-apt-repository -y ppa:git-core/ppa
-    apt-get update
-    apt-get install -y git
-    
-    # Verify NVIDIA and setup environment first
 
+
+    # Install CUDA 12.1 and setup environment
     setup_environment
 
     TARGET_REPO_URL="https://github.com/comfyanonymous/ComfyUI.git" \
@@ -174,7 +214,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
       "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO"
       "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO"
       "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
-        )
+    )
     prepare_link "${symlinks[@]}"
     rm -rf $VENV_DIR/sd_comfy-env
     python3.10 -m venv $VENV_DIR/sd_comfy-env
@@ -287,6 +327,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             fi
         done < "$req_file"
     }
+    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
     # Install TensorFlow with persistent cache
     export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
@@ -294,7 +335,41 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
 
     # Process main requirements file
-    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
+    
+    # Install SageAttention for HunyuanVideo support
+    echo "Installing SageAttention for HunyuanVideo support..."
+    export CUDA_HOME=/usr/local/cuda-12.1
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    export FORCE_CUDA=1
+    
+    # Install required dependencies for SageAttention
+    pip install --cache-dir="$PIP_CACHE_DIR" "ninja>=1.11.0"
+    pip install --cache-dir="$PIP_CACHE_DIR" "triton>=3.0.0"
+    pip install --cache-dir="$PIP_CACHE_DIR" "accelerate>=1.1.1"
+    pip install --cache-dir="$PIP_CACHE_DIR" "diffusers>=0.31.0"
+    pip install --cache-dir="$PIP_CACHE_DIR" "transformers>=4.39.3"
+    
+    # Clone and install SageAttention
+    cd "$ROOT_REPO_DIR"
+    if [ ! -d "SageAttention" ]; then
+        git clone https://github.com/thu-ml/SageAttention.git
+    fi
+    cd SageAttention
+    
+    # Set max jobs for faster compilation
+    export MAX_JOBS=4
+    python setup.py install
+    
+    # Return to root directory and clean up
+    cd "$ROOT_REPO_DIR"
+    
+    # Create symlink in custom_nodes directory
+    mkdir -p "/storage/stable-diffusion-comfy/custom_nodes/sage_attention"
+    ln -sf "$VENV_DIR/sd_comfy-env/lib/python3.10/site-packages/sage_attention" "/storage/stable-diffusion-comfy/custom_nodes/sage_attention"
+    
+    echo "Successfully installed SageAttention"
+    
     fix_torch_versions
     touch /tmp/sd_comfy.prepared
 else
