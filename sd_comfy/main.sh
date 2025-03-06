@@ -185,7 +185,8 @@ except Exception as e:
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
 if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
-
+    
+    export PIP_QUIET=1
 
     # Install CUDA 12.1 and setup environment
     setup_environment
@@ -321,7 +322,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                 process_requirements "$included_file" "${indent}  "
             else
                 echo "${indent}  Installing: $requirement"
-                if ! pip install --cache-dir="$PIP_CACHE_DIR" "$requirement"; then
+                if ! pip install --quiet --cache-dir="$PIP_CACHE_DIR" "$requirement"; then
                     echo "${indent}  Warning: Failed to install $requirement"
                 fi
             fi
@@ -333,34 +334,42 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
     mkdir -p "$PIP_CACHE_DIR"
     pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
-
-    # Process main requirements file
+    # Install SageAttention for wanVideo support with optimized build settings
+    echo "Installing SageAttention for wanVideo support..."
     
-    # Install SageAttention for HunyuanVideo support
-    echo "Installing SageAttention for HunyuanVideo support..."
+    # Configure CUDA environment
     export CUDA_HOME=/usr/local/cuda-12.1
     export PATH=$CUDA_HOME/bin:$PATH
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
     export FORCE_CUDA=1
     
-    # Install required dependencies for SageAttention
-    pip install --cache-dir="$PIP_CACHE_DIR" "ninja>=1.11.0"
-    pip install --cache-dir="$PIP_CACHE_DIR" "triton>=3.0.0"
-    pip install --cache-dir="$PIP_CACHE_DIR" "accelerate>=1.1.1"
-    pip install --cache-dir="$PIP_CACHE_DIR" "diffusers>=0.31.0"
-    pip install --cache-dir="$PIP_CACHE_DIR" "transformers>=4.39.3"
+    # Install core dependencies in single pip command
+    pip install --cache-dir="$PIP_CACHE_DIR" \
+        "ninja>=1.11.0" \
+        "triton>=3.0.0" \
+        "accelerate>=1.1.1" \
+        "diffusers>=0.31.0" \
+        "transformers>=4.39.3"
+    
+    # Optimize build environment
+    export TORCH_CUDA_ARCH_LIST="8.6"  # Specific for A4000 (Ampere architecture)
+    export MAX_JOBS=$(nproc)  # Use all available CPU cores
+    export USE_NINJA=1
+    
+    # Configure build cache
+    export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions"
+    mkdir -p "$TORCH_EXTENSIONS_DIR"
+    
+    # Enable ccache if available
+    if command -v ccache &> /dev/null; then
+        export CMAKE_C_COMPILER_LAUNCHER=ccache
+        export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+    fi
     
     # Clone and install SageAttention
     cd "$ROOT_REPO_DIR"
-    if [ ! -d "SageAttention" ]; then
-        git clone https://github.com/thu-ml/SageAttention.git
-    fi
-    cd SageAttention
-    
-    # Set max jobs for faster compilation
-    export MAX_JOBS=4
-    python setup.py install
-    
+    [ -d "SageAttention" ] || git clone https://github.com/thu-ml/SageAttention.git
+    cd SageAttention && python setup.py install
     # Return to root directory and clean up
     cd "$ROOT_REPO_DIR"
     
