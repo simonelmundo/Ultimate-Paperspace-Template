@@ -67,7 +67,15 @@ setup_cuda_env() {
 }
 
 install_cuda_12() {
-    echo "Installing CUDA 12.1..."
+    echo "Installing CUDA 12.1 (minimal installation)..."
+    
+    # Create marker file to avoid reinstallation
+    CUDA_MARKER="/storage/.cuda_12.1_installed"
+    if [ -f "$CUDA_MARKER" ]; then
+        echo "CUDA 12.1 already installed (marker file exists)."
+        setup_cuda_env
+        return 0
+    fi
     
     # Clean up existing CUDA 11.x if present
     if dpkg -l | grep -q "cuda-11"; then
@@ -75,11 +83,24 @@ install_cuda_12() {
         apt-get --purge remove -y cuda-11-* || echo "No CUDA 11.x found to remove"
     fi
     
-    # Install CUDA 12.1
+    # Install only essential CUDA components
     wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
     dpkg -i cuda-keyring_1.1-1_all.deb
     apt-get update -qq
-    apt-get install -y cuda-toolkit-12-1
+    
+    # Install only the minimal required packages instead of the full toolkit
+    echo "Installing minimal CUDA components..."
+    apt-get install -y --no-install-recommends \
+        cuda-cudart-12-1 \
+        cuda-nvcc-12-1 \
+        cuda-cupti-12-1 \
+        libcublas-12-1 \
+        libcufft-12-1 \
+        libcurand-12-1 \
+        libcusolver-12-1 \
+        libcusparse-12-1 \
+        libnpp-12-1
+    
     rm -f cuda-keyring_1.1-1_all.deb
     
     # Configure environment
@@ -94,22 +115,30 @@ export FORCE_CUDA=1
 EOL
     chmod +x /etc/profile.d/cuda12.sh
     
+    # Create marker file
+    touch "$CUDA_MARKER"
+    
     # Verify installation
     echo "Verifying CUDA 12.1 installation..."
     nvcc --version || { echo "CUDA installation verification failed"; return 1; }
 }
 
 setup_environment() {
-    # Check current CUDA version
-    local cuda_version=$(nvcc --version 2>/dev/null | grep 'release' | awk '{print $6}' || echo "unknown")
-    echo "System CUDA Version: $cuda_version"
-    
-    # Install CUDA 12.1 if needed
-    if [[ "$cuda_version" != "12.1" ]]; then
-        install_cuda_12
+    # Check if NVCC is available
+    if command -v nvcc &>/dev/null; then
+        local cuda_version=$(nvcc --version | grep 'release' | awk '{print $6}' || echo "unknown")
+        echo "System CUDA Version: $cuda_version"
+        
+        # Install CUDA 12.1 if needed
+        if [[ "$cuda_version" != "12.1" ]]; then
+            install_cuda_12
+        else
+            echo "CUDA 12.1 already installed."
+            setup_cuda_env
+        fi
     else
-        echo "CUDA 12.1 already installed."
-        setup_cuda_env
+        echo "NVCC not found, installing CUDA 12.1..."
+        install_cuda_12
     fi
 }
 
@@ -241,14 +270,12 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     source $VENV_DIR/sd_comfy-env/bin/activate
 
     # System dependencies
-    echo "Installing system dependencies..."
+    echo "Installing essential system dependencies..."
     apt-get update && apt-get install -y \
         libatlas-base-dev libblas-dev liblapack-dev \
-        libjpeg-dev libpng-dev libtiff-dev libbz2-dev \
-        python2-dev libopenblas-dev cmake build-essential \
-        libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
-        libxi-dev libgl1-mesa-dev libglu1-mesa-dev \
-        libglew-dev libglfw3-dev mesa-common-dev || {
+        libjpeg-dev libpng-dev \
+        python3-dev build-essential \
+        libgl1-mesa-dev || {
         echo "Warning: Some packages failed to install"
     }
 
@@ -256,126 +283,411 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     pip install pip==24.0
     pip install --upgrade wheel setuptools
     pip install "numpy>=1.26.0,<2.3.0"
-    fix_torch_versions
 
-    # DepthFlow installation
-    echo "Setting up DepthFlow..."
-    export DEPTHFLOW_SUPPRESS_ROOT_WARNING=1
-    WHEEL_CACHE_DIR="/storage/wheel_cache"
-    mkdir -p "$WHEEL_CACHE_DIR"
-    
-    cd /storage/stable-diffusion-comfy/custom_nodes
-    rm -rf DepthFlow
-    if FORCE_CUDA=1 pip install --cache-dir="$WHEEL_CACHE_DIR" "git+https://github.com/BrokenSource/DepthFlow.git@v0.8.0"; then
-        python3 -c "import DepthFlow; print(f'DepthFlow {DepthFlow.__version__} installed')" 2>/dev/null && \
-            ln -sf "/tmp/sd_comfy-env/lib/python3.10/site-packages/DepthFlow" DepthFlow || \
-            echo "DepthFlow installation verification failed, but continuing..."
-    else
-        echo "DepthFlow installation failed, but continuing..."
-    fi
-
-    # Process requirements files
+    # Optimized requirements processing with dependency caching
     process_requirements() {
         local req_file="$1"
         local indent="${2:-}"
+        local cache_dir="/storage/.pip_cache"
+        local combined_reqs="/tmp/combined_requirements.txt"
+        local verify_script="/tmp/verify_imports.py"
         
+        # Clean input file path
         req_file="$(echo "$req_file" | tr -d ' ')"
         [[ ! -f "$req_file" ]] && {
             echo "${indent}Skipping: File not found - $req_file"
             return 0
         }
 
-        export PIP_CACHE_DIR="$ROOT_REPO_DIR/.pip_cache"
-        mkdir -p "$PIP_CACHE_DIR"
-        
         echo "${indent}Processing: $req_file"
-        while IFS= read -r requirement || [ -n "$requirement" ]; do
-            [[ -z "$requirement" || "$requirement" =~ ^[[:space:]]*# ]] && continue
-            requirement="$(echo "$requirement" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        
+        # Set up cache directory
+        mkdir -p "$cache_dir"
+        
+        # Create a single combined requirements file
+        echo -n > "$combined_reqs"
+        
+        # Collect all requirements recursively
+        function collect_reqs() {
+            local file="$1"
+            local ind="$2"
             
-            if [[ "$requirement" =~ ^-r ]]; then
-                local included_file="${requirement#-r}"
-                included_file="$(echo "$included_file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-                process_requirements "$included_file" "${indent}  "
-            elif [[ ! "$requirement" =~ ^file:///storage/stable-diffusion-comfy ]]; then
-                echo "${indent}  Installing: $requirement"
-                pip install --quiet --cache-dir="$PIP_CACHE_DIR" "$requirement" || \
-                    echo "${indent}  Warning: Failed to install $requirement"
-            fi
-        done < "$req_file"
+            [[ ! -f "$file" ]] && return 0
+            
+            # Add requirements from this file
+            grep -v "^-r\|^#\|^$" "$file" >> "$combined_reqs"
+            
+            # Process included requirements files
+            grep "^-r" "$file" | sed 's/^-r\s*//' | while read -r included_file; do
+                # Resolve relative paths
+                if [[ "$included_file" != /* ]]; then
+                    included_file="$(dirname "$file")/$included_file"
+                fi
+                
+                if [[ -f "$included_file" ]]; then
+                    echo "${ind}Including: $included_file"
+                    collect_reqs "$included_file" "$ind  "
+                else
+                    echo "${ind}Warning: Included file not found - $included_file"
+                fi
+            done
+        }
+        
+        collect_reqs "$req_file" "$indent"
+        
+        # Deduplicate and normalize requirements
+        echo "${indent}Deduplicating and resolving conflicts..."
+        
+        # Create a Python script to handle version conflicts
+        cat > "/tmp/resolve_conflicts.py" << 'EOF'
+import re
+import sys
+from collections import defaultdict
+
+def parse_requirement(req):
+    # Extract package name and version specifier
+    match = re.match(r'^([a-zA-Z0-9_\-\.]+)(.*)$', req)
+    if not match:
+        return req, ""
+    
+    name, version_spec = match.groups()
+    return name.lower(), version_spec
+
+# Read requirements
+with open(sys.argv[1], 'r') as f:
+    requirements = [line.strip() for line in f if line.strip() and not line.startswith(('git+', 'http'))]
+
+# Group by package name
+package_versions = defaultdict(list)
+for req in requirements:
+    name, version_spec = parse_requirement(req)
+    if name and version_spec:
+        package_versions[name].append(version_spec)
+
+# Resolve conflicts by using the most permissive version
+resolved = []
+for req in requirements:
+    name, version_spec = parse_requirement(req)
+    
+    # Skip git/http requirements
+    if req.startswith(('git+', 'http')):
+        resolved.append(req)
+        continue
+        
+    # If this package has multiple version specs, use the most permissive one
+    if name in package_versions and len(package_versions[name]) > 1:
+        # For simplicity, we'll use the shortest version spec as a heuristic
+        # This isn't perfect but helps with common cases
+        if version_spec == min(package_versions[name], key=len):
+            resolved.append(req)
+    else:
+        resolved.append(req)
+
+# Write resolved requirements
+with open(sys.argv[2], 'w') as f:
+    for req in sorted(set(resolved)):
+        f.write(f"{req}\n")
+EOF
+
+        # Run the conflict resolution script
+        python "/tmp/resolve_conflicts.py" "$combined_reqs" "/tmp/resolved_requirements.txt"
+        mv "/tmp/resolved_requirements.txt" "$combined_reqs"
+        
+        # Create verification script
+        cat > "$verify_script" << 'EOF'
+import sys
+import importlib.util
+import re
+
+def normalize_package_name(name):
+    # Extract base package name (remove version specifiers, etc.)
+    base_name = re.sub(r'[<>=!~;].*$', '', name).strip()
+    
+    # Handle special cases
+    mapping = {
+        'opencv-contrib-python': 'cv2',
+        'opencv-contrib-python-headless': 'cv2',
+        'opencv-python': 'cv2',
+        'opencv-python-headless': 'cv2',
+        'scikit-image': 'skimage',
+        'scikit-learn': 'sklearn',
+        'scikit_image': 'skimage',
+        'scikit_learn': 'sklearn',
+        'pytorch': 'torch',
+        'pillow': 'PIL',
+        'Pillow': 'PIL',
     }
+    
+    return mapping.get(base_name, base_name)
+
+def is_package_importable(package_name):
+    try:
+        module_name = normalize_package_name(package_name)
+        spec = importlib.util.find_spec(module_name)
+        return spec is not None
+    except (ImportError, ValueError, AttributeError):
+        return False
+
+# Get list of packages to check
+with open(sys.argv[1], 'r') as f:
+    packages = [line.strip() for line in f if line.strip() and not line.startswith(('git+', 'http'))]
+
+# Check which packages are missing
+missing_packages = []
+for pkg in packages:
+    if not is_package_importable(pkg):
+        missing_packages.append(pkg)
+
+# Write missing packages to output file
+with open(sys.argv[2], 'w') as f:
+    for pkg in missing_packages:
+        f.write(f"{pkg}\n")
+EOF
+        
+        # Verify which packages are actually missing
+        echo "${indent}Verifying package imports..."
+        python "$verify_script" "$combined_reqs" "/tmp/missing_packages.txt"
+        
+        # Install packages in smaller batches to avoid dependency conflicts
+        if [[ -s "/tmp/missing_packages.txt" ]]; then
+            echo "${indent}Installing missing packages in batches..."
+            
+            # Split into smaller batches of 10 packages each
+            split -l 10 "/tmp/missing_packages.txt" "/tmp/pkg_batch_"
+            
+            # Install each batch separately
+            for batch in /tmp/pkg_batch_*; do
+                echo "${indent}Installing batch $(basename "$batch")..."
+                if ! pip install --no-cache-dir -r "$batch"; then
+                    echo "${indent}Batch installation failed, falling back to individual installation..."
+                    while read -r pkg; do
+                        echo "${indent}  Installing: $pkg"
+                        pip install --no-cache-dir "$pkg" || echo "${indent}  Failed to install: $pkg (continuing)"
+                    done < "$batch"
+                fi
+            done
+        else
+            echo "${indent}All requirements already satisfied"
+        fi
+        
+        # Handle GitHub repositories separately
+        echo "${indent}Installing GitHub repositories..."
+        grep -E "git\+https?://" "$combined_reqs" | while read -r repo; do
+            echo "${indent}  Installing: $repo"
+            pip install --no-cache-dir "$repo" || echo "${indent}  Failed to install: $repo (continuing)"
+        done
+        
+        # Clean up
+        rm -f "$combined_reqs" "$verify_script" "/tmp/missing_packages.txt" "/tmp/resolve_conflicts.py" /tmp/pkg_batch_*
+    }
+
+    # Call the function with the requirements file
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
     # TensorFlow installation
     pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
-
-    # SageAttention installation
-    echo "Installing SageAttention for wanVideo support..."
-    export CUDA_HOME=/usr/local/cuda-12.1
-    export PATH=$CUDA_HOME/bin:$PATH
-    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-    export FORCE_CUDA=1
-    export TORCH_CUDA_ARCH_LIST="8.6"
-    export MAX_JOBS=$(nproc)
-    export USE_NINJA=1
-
-    # Create persistent cache directories
-    export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions"
-    export SAGEATTENTION_CACHE_DIR="/storage/.sageattention_cache"
-    mkdir -p "$TORCH_EXTENSIONS_DIR" "$SAGEATTENTION_CACHE_DIR"
-
-    # Enable ccache with larger cache size
-    command -v ccache &> /dev/null && {
-        export CMAKE_C_COMPILER_LAUNCHER=ccache
-        export CMAKE_CXX_COMPILER_LAUNCHER=ccache
-        ccache --max-size=3G
-        ccache -z  # Clear stats
+    # SageAttention Installation Process
+    install_sageattention() {
+        # Initialize environment
+        echo "Starting SageAttention installation for HunyuanVideo support..."
+        setup_environment
+        create_directories
+        setup_ccache
+        
+        # Check for cached installation
+        if check_and_install_cached_wheel; then
+            return 0
+        fi
+        
+        # Proceed with full installation
+        install_dependencies
+        clone_or_update_repo
+        build_and_install
     }
 
-    # Check if SageAttention is already installed and cached
-    SAGE_VERSION="2.1.1"  # Update this to match the version you need
-    SAGE_CACHE_MARKER="$SAGEATTENTION_CACHE_DIR/sage_${SAGE_VERSION}_$(uname -m)_cuda$(nvcc --version | grep release | awk '{print $6}' | cut -c2-).installed"
+    # Environment Setup
+    setup_environment() {
+        export CUDA_HOME=/usr/local/cuda-12.1
+        export PATH=$CUDA_HOME/bin:$PATH
+        export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+        export FORCE_CUDA=1
+        export TORCH_CUDA_ARCH_LIST="8.6"
+        export MAX_JOBS=$(nproc)
+        export USE_NINJA=1
+        export TORCH_NVCC_FLAGS="-Xptxas --disable-warnings"
+        export NVCC_FLAGS="-Xptxas --disable-warnings"
+    }
 
-    if [ -f "$SAGE_CACHE_MARKER" ]; then
-        echo "Using cached SageAttention build..."
-        # Just link the existing installation
-        mkdir -p "/storage/stable-diffusion-comfy/custom_nodes/sage_attention"
-        ln -sf "$VENV_DIR/sd_comfy-env/lib/python3.10/site-packages/sage_attention" \
-            "/storage/stable-diffusion-comfy/custom_nodes/sage_attention"
-    else
-        # Install dependencies first
+    # Directory Management
+    create_directories() {
+        export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions"
+        export SAGEATTENTION_CACHE_DIR="/storage/.sageattention_cache"
+        export WHEEL_CACHE_DIR="/storage/.wheel_cache"
+        mkdir -p "$TORCH_EXTENSIONS_DIR" "$SAGEATTENTION_CACHE_DIR" "$WHEEL_CACHE_DIR"
+        echo "Created cache directories"
+    }
+
+    # Ccache Configuration
+    setup_ccache() {
+        if command -v ccache &> /dev/null; then
+            export CMAKE_C_COMPILER_LAUNCHER=ccache
+            export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+            ccache --max-size=3G
+            ccache -z
+        fi
+    }
+
+    # Cached Wheel Handling
+    check_and_install_cached_wheel() {
+        SAGE_VERSION="2.1.1"
+        CUDA_VERSION=$(nvcc --version | grep release | awk '{print $6}' | cut -c2-)
+        ARCH=$(uname -m)
+        SAGE_CACHE_MARKER="$SAGEATTENTION_CACHE_DIR/sage_${SAGE_VERSION}_${ARCH}_cuda${CUDA_VERSION}.installed"
+        SAGE_WHEEL="$WHEEL_CACHE_DIR/sageattention-${SAGE_VERSION}-py3.10-${ARCH}-linux-gnu.whl"
+
+        if [ -f "$SAGE_WHEEL" ]; then
+            echo "Found cached wheel at $SAGE_WHEEL"
+            if pip install --no-index --find-links="$WHEEL_CACHE_DIR" sageattention==$SAGE_VERSION; then
+                handle_successful_installation
+                return 0
+            fi
+        fi
+        return 1
+    }
+
+    # Installation Success Handling
+    handle_successful_installation() {
+        SAGE_MODULE_PATH=$(python -c "import sageattention; print(sageattention.__path__[0])")
+        create_compatibility_symlink "$SAGE_MODULE_PATH"
+        touch "$SAGE_CACHE_MARKER"
+        echo "✅ SageAttention setup complete using cached wheel"
+    }
+
+    # Symlink Creation
+    create_compatibility_symlink() {
+        local module_path=$1
+        SITE_PACKAGES_DIR=$(python -c "import site; print(site.getsitepackages()[0])")
+        if [ -d "$SITE_PACKAGES_DIR" ]; then
+            cd "$SITE_PACKAGES_DIR"
+            [ ! -d "sage_attention" ] && ln -sf "$module_path" "sage_attention"
+            echo "Created compatibility symlink in $SITE_PACKAGES_DIR"
+        else
+            echo "Warning: Could not find site-packages directory for compatibility symlink"
+        fi
+    }
+
+    # Dependency Installation
+    install_dependencies() {
+        echo "Installing SageAttention dependencies..."
         pip install --cache-dir="$PIP_CACHE_DIR" \
             "ninja>=1.11.0" \
             "triton>=3.0.0" \
             "accelerate>=1.1.1" \
             "diffusers>=0.31.0" \
             "transformers>=4.39.3"
+    }
 
-        cd "$ROOT_REPO_DIR"
-        [ -d "SageAttention" ] || git clone https://github.com/thu-ml/SageAttention.git
-        cd SageAttention
+    # Repository Management
+    clone_or_update_repo() {
+        SAGE_BUILD_DIR="/storage/SageAttention"
+        if [ -d "$SAGE_BUILD_DIR" ]; then
+            cd "$SAGE_BUILD_DIR"
+            git pull
+        else
+            git clone https://github.com/thu-ml/SageAttention.git "$SAGE_BUILD_DIR"
+            cd "$SAGE_BUILD_DIR"
+        fi
+    }
+
+    # Build and Installation
+    build_and_install() {
+        echo "Building SageAttention wheel..."
+        if [ -f "csrc/fused/fused_attention.cu" ]; then
+            optimized_build
+        else
+            standard_build
+        fi
         
-        # Optimize build with parallel compilation and caching
-        python setup.py build_ext --inplace -j$(nproc)
-        python setup.py install
+        BUILT_WHEEL=$(find dist -name "*.whl" | head -1)
+        if [ -n "$BUILT_WHEEL" ]; then
+            handle_built_wheel "$BUILT_WHEEL"
+        else
+            echo "❌ Failed to build SageAttention wheel"
+            exit 1
+        fi
+    }
+
+    # Optimized Build Process
+    optimized_build() {
+        echo "Using custom optimized build..."
+        cat > setup_optimized.py << 'EOF'
+import os
+import sys
+from setuptools import setup, find_packages
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+# Optimize build process
+os.environ['TORCH_CUDA_ARCH_LIST'] = '8.6'
+os.environ['MAX_JOBS'] = os.environ.get('MAX_JOBS', str(os.cpu_count()))
+os.environ['NVCC_FLAGS'] = os.environ.get('NVCC_FLAGS', '') + ' -Xfatbin -compress-all'
+
+cuda_sources = ['csrc/fused/fused_attention.cu']
+cpp_sources = ['csrc/fused/pybind.cpp']
+
+setup(
+    name='sageattention',
+    version='2.1.1',
+    packages=find_packages(),
+    ext_modules=[
+        CUDAExtension(
+            name='sageattention._fused',
+            sources=cpp_sources + cuda_sources,
+            extra_compile_args={
+                'cxx': ['-O3', '-fopenmp', '-lgomp', '-std=c++17', '-DENABLE_BF16', '-D_GLIBCXX_USE_CXX11_ABI=0'],
+                'nvcc': [
+                    '-O3', '--use_fast_math', '-std=c++17',
+                    '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__',
+                    '-U__CUDA_NO_HALF2_OPERATORS__', '-DENABLE_BF16',
+                    '--threads', '4', '-D_GLIBCXX_USE_CXX11_ABI=0'
+                ]
+            }
+        )
+    ],
+    cmdclass={'build_ext': BuildExtension}
+)
+EOF
+        echo "Starting optimized build with progress reporting..."
+        python setup_optimized.py bdist_wheel 2>&1 | grep -v "ptxas info\|bytes stack frame\|bytes spill" | grep --line-buffered "" | sed 's/^/[BUILD] /'
+    }
+
+    # Standard Build Process
+    standard_build() {
+        echo "Using standard build process..."
+        python setup.py bdist_wheel 2>&1 | grep -v "ptxas info\|bytes stack frame\|bytes spill" | grep --line-buffered "" | sed 's/^/[BUILD] /'
+    }
+
+    # Built Wheel Handling
+    handle_built_wheel() {
+        local wheel_path=$1
+        cp "$wheel_path" "$WHEEL_CACHE_DIR/"
+        echo "Cached wheel at $WHEEL_CACHE_DIR/$(basename $wheel_path)"
         
-        # Create cache marker
-        touch "$SAGE_CACHE_MARKER"
+        pip install "$wheel_path"
         
-        cd "$ROOT_REPO_DIR"
-        
-        mkdir -p "/storage/stable-diffusion-comfy/custom_nodes/sage_attention"
-        ln -sf "$VENV_DIR/sd_comfy-env/lib/python3.10/site-packages/sage_attention" \
-            "/storage/stable-diffusion-comfy/custom_nodes/sage_attention"
-        
-        echo "Successfully installed SageAttention"
-        
-        # Show ccache stats
-        command -v ccache &> /dev/null && ccache -s
-    fi
+        if python -c "import sageattention; print('SageAttention installed successfully')" &>/dev/null; then
+            handle_successful_installation
+        else
+            echo "❌ SageAttention installation failed!"
+            exit 1
+        fi
+    }
+
+    # Execute installation
+    install_sageattention
 
     fix_torch_versions
     touch /tmp/sd_comfy.prepared
+    echo "Completed SageAttention installation and environment preparation"
 else
     # Just ensure PyTorch versions are correct
     fix_torch_versions
