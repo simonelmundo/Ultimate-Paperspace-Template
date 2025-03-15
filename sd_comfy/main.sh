@@ -64,6 +64,25 @@ setup_cuda_env() {
     export CUDA_VISIBLE_DEVICES=0
     export PYOPENGL_PLATFORM="osmesa"
     export WINDOW_BACKEND="headless"
+    
+    # A6000 optimization: Target Ampere architecture specifically
+    export TORCH_CUDA_ARCH_LIST="8.6"
+    
+    # Maximize VRAM usage for A6000 (48GB)
+    export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:8192,garbage_collection_threshold:0.9"
+    
+    # Aggressive CUDA performance settings
+    export CUDA_LAUNCH_BLOCKING=0
+    export CUDA_DEVICE_MAX_CONNECTIONS=32
+    export NCCL_P2P_LEVEL=NVL
+    
+    # A6000-specific optimization
+    export TORCH_CUDNN_V8_API_ENABLED=1
+    export CUDA_VISIBLE_DEVICES=0
+    
+    # Set environment variables to maximize VRAM usage
+    export COMFY_MAX_LOADED_MODELS=100
+    export COMFY_MAX_IMAGE_CACHE_SIZE=32
 }
 
 install_cuda_12() {
@@ -304,6 +323,9 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         # Set up cache directory
         mkdir -p "$cache_dir"
         
+        # Suppress pip upgrade notices by setting environment variable
+        export PIP_DISABLE_PIP_VERSION_CHECK=1
+        
         # Create a single combined requirements file
         echo -n > "$combined_reqs"
         
@@ -458,11 +480,11 @@ EOF
             # Install each batch separately
             for batch in /tmp/pkg_batch_*; do
                 echo "${indent}Installing batch $(basename "$batch")..."
-                if ! pip install --no-cache-dir -r "$batch"; then
+                if ! pip install --no-cache-dir --disable-pip-version-check -r "$batch" 2>/dev/null; then
                     echo "${indent}Batch installation failed, falling back to individual installation..."
                     while read -r pkg; do
                         echo "${indent}  Installing: $pkg"
-                        pip install --no-cache-dir "$pkg" || echo "${indent}  Failed to install: $pkg (continuing)"
+                        pip install --no-cache-dir --disable-pip-version-check "$pkg" 2>/dev/null || echo "${indent}  Failed to install: $pkg (continuing)"
                     done < "$batch"
                 fi
             done
@@ -474,7 +496,7 @@ EOF
         echo "${indent}Installing GitHub repositories..."
         grep -E "git\+https?://" "$combined_reqs" | while read -r repo; do
             echo "${indent}  Installing: $repo"
-            pip install --no-cache-dir "$repo" || echo "${indent}  Failed to install: $repo (continuing)"
+            pip install --no-cache-dir --disable-pip-version-check "$repo" 2>/dev/null || echo "${indent}  Failed to install: $repo (continuing)"
         done
         
         # Clean up
@@ -721,7 +743,22 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     rm "$LOG_DIR/sd_comfy.log"
   fi
   
-  PYTHONUNBUFFERED=1 service_loop "python main.py --dont-print-server --highvram --port $SD_COMFY_PORT ${EXTRA_SD_COMFY_ARGS}" > $LOG_DIR/sd_comfy.log 2>&1 &
+  # A6000-specific VRAM optimization settings
+  export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:8192,garbage_collection_threshold:0.9"
+  
+  # Launch ComfyUI with A6000-optimized parameters
+  PYTHONUNBUFFERED=1 service_loop "python main.py \
+    --dont-print-server \
+    --port $SD_COMFY_PORT \
+    --gpu-only \
+    --highvram \
+    --disable-smart-memory \
+    --cuda-malloc \
+    --use-pytorch-cross-attention \
+    --vram-fraction 0.97 \
+    --preview-method auto \
+    --bf16-vae \
+    ${EXTRA_SD_COMFY_ARGS}" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
 fi
 
