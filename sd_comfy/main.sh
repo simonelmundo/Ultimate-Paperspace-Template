@@ -171,6 +171,50 @@ readonly TORCHAUDIO_VERSION="2.4.1+cu121"
 readonly XFORMERS_VERSION="0.0.28.post1"
 readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
 
+# Function to check if PyTorch versions match requirements
+check_torch_versions() {
+    echo "Checking PyTorch versions..."
+    
+    # Check if packages are installed with correct versions
+    local TORCH_INSTALLED=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "not_installed")
+    local TORCHVISION_INSTALLED=$(python3 -c "import torchvision; print(torchvision.__version__)" 2>/dev/null || echo "not_installed")
+    local TORCHAUDIO_INSTALLED=$(python3 -c "import torchaudio; print(torchaudio.__version__)" 2>/dev/null || echo "not_installed")
+    local XFORMERS_INSTALLED=$(python3 -c "import xformers; print(xformers.__version__)" 2>/dev/null || echo "not_installed")
+    
+    # Extract base versions without CUDA suffix for comparison
+    local TORCH_BASE_VERSION=$(echo "${TORCH_VERSION}" | cut -d'+' -f1)
+    local TORCHVISION_BASE_VERSION=$(echo "${TORCHVISION_VERSION}" | cut -d'+' -f1)
+    local TORCHAUDIO_BASE_VERSION=$(echo "${TORCHAUDIO_VERSION}" | cut -d'+' -f1)
+    
+    # Extract installed base versions
+    local TORCH_INSTALLED_BASE=$(echo "${TORCH_INSTALLED}" | cut -d'+' -f1)
+    local TORCHVISION_INSTALLED_BASE=$(echo "${TORCHVISION_INSTALLED}" | cut -d'+' -f1)
+    local TORCHAUDIO_INSTALLED_BASE=$(echo "${TORCHAUDIO_INSTALLED}" | cut -d'+' -f1)
+    
+    # Check CUDA availability
+    local CUDA_AVAILABLE=$(python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
+    
+    echo "Current versions:"
+    echo "- torch: ${TORCH_INSTALLED} (required: ${TORCH_VERSION})"
+    echo "- torchvision: ${TORCHVISION_INSTALLED} (required: ${TORCHVISION_VERSION})"
+    echo "- torchaudio: ${TORCHAUDIO_INSTALLED} (required: ${TORCHAUDIO_VERSION})"
+    echo "- xformers: ${XFORMERS_INSTALLED} (required: ${XFORMERS_VERSION})"
+    echo "- CUDA available: ${CUDA_AVAILABLE}"
+    
+    # Check if any package needs reinstallation
+    if [[ "${TORCH_INSTALLED_BASE}" != "${TORCH_BASE_VERSION}" || 
+          "${TORCHVISION_INSTALLED_BASE}" != "${TORCHVISION_BASE_VERSION}" || 
+          "${TORCHAUDIO_INSTALLED_BASE}" != "${TORCHAUDIO_BASE_VERSION}" || 
+          "${XFORMERS_INSTALLED}" != "${XFORMERS_VERSION}" || 
+          "${CUDA_AVAILABLE}" != "True" ]]; then
+        echo "PyTorch ecosystem needs reinstallation"
+        return 1  # Needs reinstallation
+    else
+        echo "PyTorch ecosystem is already at the correct versions"
+        return 0  # No reinstallation needed
+    fi
+}
+
 # Function to clean up existing installations
 clean_torch_installations() {
     echo "Removing existing PyTorch installations..."
@@ -225,7 +269,7 @@ try:
     if not cuda_available:
         print('Warning: CUDA not available after installation')
         
-    if torch.__version__ != '${TORCH_VERSION}':
+    if torch.__version__.split('+')[0] != '${TORCH_VERSION}'.split('+')[0]:
         print('Warning: Unexpected PyTorch version installed')
         
 except ImportError as e:
@@ -237,14 +281,20 @@ except Exception as e:
 
 # Main function to fix torch versions
 fix_torch_versions() {
-    echo "Checking and fixing PyTorch/CUDA versions..."
+    echo "Checking PyTorch/CUDA versions..."
     
-    clean_torch_installations
-    install_torch_core
-    install_xformers
-    verify_installations
+    # Only reinstall if versions don't match
+    if ! check_torch_versions; then
+        echo "Installing required PyTorch versions..."
+        clean_torch_installations
+        install_torch_core
+        install_xformers
+        verify_installations
+    else
+        echo "PyTorch ecosystem already at correct versions, skipping reinstallation"
+    fi
     
-    echo "PyTorch ecosystem installation completed"
+    echo "PyTorch ecosystem setup completed"
     return 0
 }
 
@@ -711,6 +761,7 @@ EOF
     touch /tmp/sd_comfy.prepared
     echo "Completed SageAttention installation and environment preparation"
 else
+
     # Just ensure PyTorch versions are correct
     fix_torch_versions
     setup_environment
@@ -750,14 +801,18 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   PYTHONUNBUFFERED=1 service_loop "python main.py \
     --dont-print-server \
     --port $SD_COMFY_PORT \
-    --gpu-only \
     --highvram \
     --disable-smart-memory \
     --cuda-malloc \
     --use-pytorch-cross-attention \
-    --vram-fraction 0.97 \
     --preview-method auto \
     --bf16-vae \
+    --fp16-unet \
+    --cache-lru 10 \
+    --force-channels-last \
+    --reserve-vram 1.0 \
+    --fast \
+    --enable-compress-response-body \
     ${EXTRA_SD_COMFY_ARGS}" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
 fi
