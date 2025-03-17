@@ -797,14 +797,14 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # A6000-specific VRAM optimization settings
   export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:8192,garbage_collection_threshold:0.9"
   
-  # Launch ComfyUI with A6000-optimized parameters
+  # Launch ComfyUI with A6000-optimized parameters using SageAttention
   PYTHONUNBUFFERED=1 service_loop "python main.py \
     --dont-print-server \
     --port $SD_COMFY_PORT \
     --highvram \
     --disable-smart-memory \
     --cuda-malloc \
-    --use-pytorch-cross-attention \
+    --use-sage-attention \
     --preview-method auto \
     --bf16-vae \
     --fp16-unet \
