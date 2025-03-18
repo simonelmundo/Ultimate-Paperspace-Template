@@ -321,7 +321,21 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         echo "Local changes detected in requirements.txt. Discarding changes..."
         git checkout -- requirements.txt
     }
-    prepare_repo
+    
+   # Ensure we're on a branch before updating
+    if [[ -d ".git" ]]; then
+        # Check if we're in detached HEAD state
+        if git symbolic-ref -q HEAD >/dev/null; then
+            echo "On branch $(git branch --show-current)"
+        else
+            echo "Detected detached HEAD state, checking out main branch..."
+            git checkout main || git checkout master || {
+                echo "Creating and checking out main branch..."
+                git checkout -b main
+            }
+        fi
+    fi 
+    
 
     # Create directory symlinks
     prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy" \
