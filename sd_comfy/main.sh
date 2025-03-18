@@ -314,6 +314,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
            UPDATE_REPO=$SD_COMFY_UPDATE_REPO \
            UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT
 
+ 
     # Prepare repository
     cd $REPO_DIR
     [[ -n "$(git status --porcelain requirements.txt)" ]] && {
@@ -761,7 +762,7 @@ EOF
     touch /tmp/sd_comfy.prepared
     echo "Completed SageAttention installation and environment preparation"
 else
-
+   
     # Just ensure PyTorch versions are correct
     fix_torch_versions
     setup_environment
@@ -809,7 +810,6 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     --bf16-vae \
     --fp16-unet \
     --cache-lru 10 \
-    --force-channels-last \
     --reserve-vram 1.0 \
     --fast \
     --enable-compress-response-body \
