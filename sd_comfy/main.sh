@@ -65,24 +65,24 @@ setup_cuda_env() {
     export PYOPENGL_PLATFORM="osmesa"
     export WINDOW_BACKEND="headless"
     
-    # A6000 optimization: Target Ampere architecture specifically
+    # A4000 optimization: Target Ampere architecture specifically (same as A6000)
     export TORCH_CUDA_ARCH_LIST="8.6"
     
-    # Maximize VRAM usage for A6000 (48GB)
-    export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:8192,garbage_collection_threshold:0.9"
+    # Adjust VRAM usage for A4000 (16GB) - More conservative allocation
+    export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
     
-    # Aggressive CUDA performance settings
+    # Aggressive CUDA performance settings (likely still okay)
     export CUDA_LAUNCH_BLOCKING=0
     export CUDA_DEVICE_MAX_CONNECTIONS=32
-    export NCCL_P2P_LEVEL=NVL
+    export NCCL_P2P_LEVEL=NVL # Relevant if using NVLink
     
-    # A6000-specific optimization
+    # A4000-specific optimization (CuDNN V8 API should be fine)
     export TORCH_CUDNN_V8_API_ENABLED=1
-    export CUDA_VISIBLE_DEVICES=0
+    export CUDA_VISIBLE_DEVICES=0 # Redundant, already set above
     
-    # Set environment variables to maximize VRAM usage
-    export COMFY_MAX_LOADED_MODELS=100
-    export COMFY_MAX_IMAGE_CACHE_SIZE=32
+    # Set environment variables to moderate VRAM usage for 16GB
+    export COMFY_MAX_LOADED_MODELS=5 # Reduced from 100
+    export COMFY_MAX_IMAGE_CACHE_SIZE=8 # Reduced from 32
 }
 
 install_cuda_12() {
@@ -809,22 +809,20 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     rm "$LOG_DIR/sd_comfy.log"
   fi
   
-  # A6000-specific VRAM optimization settings
-  export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:8192,garbage_collection_threshold:0.9"
+  # A4000-specific VRAM optimization settings (16GB)
+  export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
   
-  # Launch ComfyUI with A6000-optimized parameters using SageAttention
+  # Launch ComfyUI with A4000-optimized parameters using SageAttention
   PYTHONUNBUFFERED=1 service_loop "python main.py \
     --dont-print-server \
     --port $SD_COMFY_PORT \
-    --highvram \
-    --disable-smart-memory \
     --cuda-malloc \
     --use-sage-attention \
     --preview-method auto \
     --bf16-vae \
     --fp16-unet \
-    --cache-lru 10 \
-    --reserve-vram 1.0 \
+    --cache-lru 5 \
+    --reserve-vram 0.5 \
     --fast \
     --enable-compress-response-body \
     ${EXTRA_SD_COMFY_ARGS}" > $LOG_DIR/sd_comfy.log 2>&1 &
