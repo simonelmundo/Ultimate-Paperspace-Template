@@ -689,18 +689,21 @@ EOF
     # Build and Installation
     build_and_install() {
         echo "Building SageAttention wheel..."
-        if [ -f "csrc/fused/fused_attention.cu" ]; then
+        # Determine build type (optimized or standard)
+        if [[ -f "csrc/fused/fused_attention.cu" ]]; then
             optimized_build
         else
             standard_build
         fi
-        
+
+        # Check if a wheel was built
         BUILT_WHEEL=$(find dist -name "*.whl" | head -1)
-        if [ -n "$BUILT_WHEEL" ]; then
+        if [[ -n "$BUILT_WHEEL" ]]; then
             handle_built_wheel "$BUILT_WHEEL"
         else
-            echo "❌ Failed to build SageAttention wheel"
-            exit 1
+            # Log failure instead of exiting
+            log "❌ Failed to build SageAttention wheel. No wheel file found in dist/. Continuing script..."
+            # Do not exit, allow the script to continue
         fi
     }
 
@@ -757,24 +760,32 @@ EOF
     handle_built_wheel() {
         local wheel_path=$1
         cp "$wheel_path" "$WHEEL_CACHE_DIR/"
-        echo "Cached wheel at $WHEEL_CACHE_DIR/$(basename $wheel_path)"
-        
-        pip install "$wheel_path"
-        
-        if python -c "import sageattention; print('SageAttention installed successfully')" &>/dev/null; then
-            handle_successful_installation
+        log "Cached wheel at $WHEEL_CACHE_DIR/$(basename $wheel_path)"
+
+        # Attempt to install the built wheel
+        if pip install "$wheel_path"; then
+            # Verify installation via import
+            if python -c "import sageattention; print('SageAttention installed successfully')" &>/dev/null; then
+                handle_successful_installation
+            else
+                # Log failure instead of exiting
+                log "❌ SageAttention installed but failed import check. Continuing script..."
+                # Do not exit, allow the script to continue
+            fi
         else
-            echo "❌ SageAttention installation failed!"
-            exit 1
+            # Log failure instead of exiting
+            log "❌ Failed to install SageAttention wheel from $wheel_path. Continuing script..."
+            # Do not exit, allow the script to continue
         fi
     }
 
-    # Execute installation
+    # Execute installation (will now continue even on failure)
     install_sageattention
 
+    # Fix torch versions (will run regardless of SageAttention status)
     fix_torch_versions
     touch /tmp/sd_comfy.prepared
-    echo "Completed SageAttention installation and environment preparation"
+    log "Completed SageAttention installation attempt and environment preparation"
 else
    
     # Just ensure PyTorch versions are correct
