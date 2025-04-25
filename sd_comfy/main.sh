@@ -545,8 +545,9 @@ EOF
             # Install each batch separately
             for batch in /tmp/pkg_batch_*; do
                 echo "${indent}Installing batch $(basename "$batch")..."
-                if ! pip install --no-cache-dir --disable-pip-version-check -r "$batch" 2>/dev/null; then
-                    echo "${indent}Batch installation failed, falling back to individual installation..."
+                # Add timeout of 60 seconds (1 minute) to pip batch installation
+                if ! timeout 60s pip install --no-cache-dir --disable-pip-version-check -r "$batch" 2>/dev/null; then
+                    echo "${indent}Batch installation failed or timed out after 1 minute, falling back to individual installation..."
                     while read -r pkg; do
                         echo "${indent}  Installing: $pkg"
                         pip install --no-cache-dir --disable-pip-version-check "$pkg" 2>/dev/null || echo "${indent}  Failed to install: $pkg (continuing)"
