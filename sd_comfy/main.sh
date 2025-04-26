@@ -1063,10 +1063,10 @@ EOF
     }
 
     # Execute installation
-    install_sageattention
+    
     process_requirements "$REPO_DIR/requirements.txt"
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
-
+    install_sageattention
 
     # Final checks and marker file
     touch /tmp/sd_comfy.prepared
@@ -1124,8 +1124,7 @@ if [[ -z "$INSTALL_ONLY" ]]; then
       exit 1
   fi
 
-  # --- REMOVED REDUNDANT SAGEATTENTION INSTALLATION ---
-  # install_sageattention || { log_error "Failed during install_sageattention"; exit 1; } # REMOVED THIS LINE
+
 
   # Launch ComfyUI with A4000-optimized parameters using SageAttention
   PYTHONUNBUFFERED=1 service_loop "python main.py \
