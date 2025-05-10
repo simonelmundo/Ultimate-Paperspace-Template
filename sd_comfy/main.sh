@@ -701,69 +701,30 @@ EOF
     pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
     # SageAttention Installation Process
     install_sageattention() {
-        # Determine the target directory for SageAttention
-        # This usually depends on your APP_DIR variable, e.g., "${APP_DIR}/SageAttention"
-        # Please verify APP_DIR in your script. Assuming it's defined.
-        local sage_attention_dir="${APP_DIR}/SageAttention" # Adjust if your script uses a different variable or path structure
-
-        # Force re-clone and build for v2.1.1 to ensure the fix is applied
-        echo_proxy "Ensuring SageAttention v2.1.1 is installed..."
-        if [ -d "${sage_attention_dir}" ]; then
-            echo_proxy "Removing existing SageAttention directory to switch to v2.1.1 tag: ${sage_attention_dir}"
-            rm -rf "${sage_attention_dir}"
+        # Initialize environment
+        echo "Starting SageAttention installation for HunyuanVideo support..."
+        setup_environment
+        create_directories
+        setup_ccache
+        
+        # Check for cached installation
+        local current_cuda_version
+        current_cuda_version=$(nvcc --version | grep release | awk '{print $6}' | cut -c2- || echo "unknown")
+        echo "Verifying cache against detected CUDA version: $current_cuda_version"
+        if check_and_install_cached_wheel "$current_cuda_version"; then
+            log "SageAttention already installed and cached for CUDA $current_cuda_version."
+            return 0
         fi
+        log "No suitable cached wheel found or installation failed. Proceeding with full build."
         
-        setup_cuda_env # Ensure TORCH_CUDA_ARCH_LIST is set for the build
-
-        echo_proxy "Cloning SageAttention v2.1.1 tag..."
-        # Clone the specific v2.1.1 tag
-        if ! git_clone_timed "--depth 1 --branch v2.1.1 https://github.com/woct0rdho/SageAttention" "${sage_attention_dir}"; then
-            log_error "Failed to clone SageAttention v2.1.1. Exiting."
-            return 1
+        # Proceed with full installation
+        install_dependencies
+        if clone_or_update_repo; then
+             build_and_install
+        else
+             log_error "Failed to clone or update SageAttention repository. Skipping build."
+             # Allow script to continue based on original logic
         fi
-        
-        cd "${sage_attention_dir}" || { log_error "Failed to cd to ${sage_attention_dir}. Exiting."; return 1; }
-        
-        # Clean previous build artifacts, just in case
-        echo_proxy "Cleaning previous build artifacts in ${sage_attention_dir}..."
-        rm -rf build dist *.egg-info
-        
-        echo_proxy "Building SageAttention v2.1.1 wheel..."
-        # Ensure PYTHON_PATH is correctly pointing to your venv python
-        if ! "${PYTHON_PATH}" setup.py bdist_wheel; then
-            log_error "SageAttention v2.1.1 wheel build failed."
-            # Consider adding: cat setup.log # if setup.py outputs to a log
-            cd "${ROOT_DIR}" || true # Attempt to return to ROOT_DIR
-            return 1 # Exit if build fails
-        fi
-        
-        echo_proxy "Installing SageAttention v2.1.1 wheel..."
-        local sage_wheel
-        sage_wheel=$(find dist/ -name "sageattention*.whl" | head -n 1)
-        
-        if [ -z "$sage_wheel" ]; then
-            log_error "Could not find built SageAttention wheel in ${sage_attention_dir}/dist/ directory."
-            cd "${ROOT_DIR}" || true
-            return 1
-        fi
-        
-        echo_proxy "Found wheel: $sage_wheel"
-        if ! "${PYTHON_PATH}" -m pip install "$sage_wheel" --force-reinstall --no-cache-dir --no-deps; then
-            log_error "SageAttention v2.1.1 pip install failed."
-            cd "${ROOT_DIR}" || true
-            return 1
-        fi
-        
-        cd "${ROOT_DIR}" || { log_error "Failed to cd back to ROOT_DIR: ${ROOT_DIR}"; return 1; } # Return to original directory
-
-        # Verify import and check TORCH_CUDA_ARCH_LIST effect (optional advanced check)
-        # echo_proxy "Verifying SageAttention installation and CUDA arch awareness (Python check)..."
-        # "${PYTHON_PATH}" -c "import sageattention; import torch; print(f'SageAttention imported. Torch CUDA arch list during potential SageAttention import/build: {torch.cuda.get_arch_list()}')"
-
-
-        echo_proxy "SageAttention v2.1.1 installed successfully."
-        # Mark successful installation of this specific version if you use markers
-        # touch "${SAGEATTENTION_MARKER_V2_1_1}" 
     }
 
     # Environment Setup
