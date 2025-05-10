@@ -330,61 +330,133 @@ install_torch_core() {
 
 # Function to install xformers
 install_xformers() {
-    echo "Installing xformers..."
-    local install_cmd="pip install xformers==${XFORMERS_VERSION}"
-    log "Running install command: $install_cmd"
-    # Execute and capture output/status
-    local output
-    output=$($install_cmd 2>&1)
-    local status=$?
-    log "Pip install output:\n$output"
-     if [[ $status -ne 0 ]]; then
-        log_error "xformers installation failed with status $status."
-        # return 1 # Option to fail fast
-    else
-        log "xformers installation command finished."
-        # Add immediate import check
-        log "Verifying xformers import immediately after install..."
-        python -c "import xformers; print(f'xformers {xformers.__version__} imported successfully from {xformers.__file__}')" || log_error "Failed to import xformers immediately after install."
+    echo "Building xformers from source..."
+    # Note: Ensure git is installed
+    if ! command -v git &> /dev/null; then
+        log_error "git command not found, cannot clone xformers. Please install git."
+        return 1
     fi
-    return $status # Return original status
+
+    echo "Cloning xformers repository..."
+    git clone https://github.com/facebookresearch/xformers.git /tmp/xformers
+    if [ $? -ne 0 ]; then
+        log_error "Failed to clone xformers repository."
+        return 1
+    fi
+
+    echo "Building xformers..."
+    cd /tmp/xformers
+    python setup.py build
+    if [ $? -ne 0 ]; then
+        log_error "xformers build failed."
+        return 1
+    fi
+
+    echo "Installing xformers..."
+    python setup.py install
+    if [ $? -ne 0 ]; then
+        log_error "xformers installation failed."
+        return 1
+    fi
+
+    echo "Verifying xformers installation..."
+    python -c "import xformers; print(f'xformers {xformers.__version__} imported successfully from {xformers.__file__}')" || log_error "Failed to import xformers immediately after install."
+    return 0
 }
 
 # Function to verify installations
 verify_installations() {
-    echo "Verifying installations..."
-    python3 -c "
+    log "Verifying PyTorch ecosystem installations..."
+    # Use the venv python if available
+    local python_executable="python3"
+    if [[ -n "$VENV_DIR" && -x "$VENV_DIR/sd_comfy-env/bin/python" ]]; then
+        python_executable="$VENV_DIR/sd_comfy-env/bin/python"
+    fi
+
+    "$python_executable" -c "
+import sys
 import torch
 import torchvision
 import torchaudio
-import xformers
+import xformers # Assuming xformers is also a target for verification
 
-def print_version(package, version):
-    print(f'{package.__name__.capitalize()}: {version}')
+# Define required versions from environment or script constants if available
+# For demonstration, using the constants defined earlier in the bash script
+# In a real script, you might pass these as arguments or read from env
+# These are illustrative; ensure they match your script's actual constants
+REQUIRED_TORCH_VERSION = '${TORCH_VERSION}'
+REQUIRED_TORCHVISION_VERSION = '${TORCHVISION_VERSION}'
+REQUIRED_TORCHAUDIO_VERSION = '${TORCHAUDIO_VERSION}'
+REQUIRED_XFORMERS_VERSION = '${XFORMERS_VERSION}'
+EXPECTED_CUDA_ARCH = 'sm_89' # For Ada
+
+install_ok = True
+print('--- PyTorch Ecosystem Verification ---')
+
+def print_version_check(package_name, installed_version, required_version_base):
+    global install_ok
+    installed_base = installed_version.split('+')[0]
+    print(f'{package_name}: Installed {installed_version}, Required base: {required_version_base}')
+    if installed_base != required_version_base:
+        print(f'ERROR: {package_name} version mismatch. Got {installed_base}, expected {required_version_base}')
+        install_ok = False
 
 try:
-    print_version(torch, torch.__version__)
-    print_version(torchvision, torchvision.__version__)
-    print_version(torchaudio, torchaudio.__version__)
-    print_version(xformers, xformers.__version__)
+    torch_version_installed = torch.__version__
+    torchvision_version_installed = torchvision.__version__
+    torchaudio_version_installed = torchaudio.__version__
+    xformers_version_installed = xformers.__version__
+
+    print_version_check('Torch', torch_version_installed, REQUIRED_TORCH_VERSION.split('+')[0])
+    print_version_check('Torchvision', torchvision_version_installed, REQUIRED_TORCHVISION_VERSION.split('+')[0])
+    print_version_check('Torchaudio', torchaudio_version_installed, REQUIRED_TORCHAUDIO_VERSION.split('+')[0])
     
+    print(f'XFormers: Installed {xformers_version_installed}, Required: {REQUIRED_XFORMERS_VERSION}')
+    if xformers_version_installed != REQUIRED_XFORMERS_VERSION:
+        print(f'ERROR: XFormers version mismatch. Got {xformers_version_installed}, expected {REQUIRED_XFORMERS_VERSION}')
+        install_ok = False
+
     cuda_available = torch.cuda.is_available()
-    cuda_version = torch.version.cuda if cuda_available else 'N/A'
-    
     print(f'CUDA Available: {cuda_available}')
-    print(f'CUDA Version: {cuda_version}')
-    
     if not cuda_available:
-        print('Warning: CUDA not available after installation')
+        print('ERROR: CUDA is not available according to PyTorch.')
+        install_ok = False
+    else:
+        cuda_version_pytorch = torch.version.cuda
+        print(f'PyTorch CUDA Version: {cuda_version_pytorch}')
         
-    if torch.__version__.split('+')[0] != '${TORCH_VERSION}'.split('+')[0]:
-        print('Warning: Unexpected PyTorch version installed')
-        
+        arch_list = torch.cuda.get_arch_list()
+        print(f'Compiled CUDA Architectures: {arch_list}')
+        if EXPECTED_CUDA_ARCH not in arch_list:
+            print(f'ERROR: Expected CUDA architecture {EXPECTED_CUDA_ARCH} not found in compiled list: {arch_list}')
+            install_ok = False
+        else:
+            print(f'SUCCESS: Expected CUDA architecture {EXPECTED_CUDA_ARCH} is present.')
+            
+        current_device = torch.cuda.current_device()
+        print(f'Current CUDA Device: {current_device}')
+        print(f'Device Name: {torch.cuda.get_device_name(current_device)}')
+        cap = torch.cuda.get_device_capability(current_device)
+        print(f'Device Compute Capability: {cap[0]}.{cap[1]} (sm_{cap[0]}{cap[1]})')
+        if f'sm_{cap[0]}{cap[1]}' < EXPECTED_CUDA_ARCH.replace('sm_','sm'): # Simple string comparison might be tricky for versions
+             print(f'WARNING: Device capability sm_{cap[0]}{cap[1]} is less than target build arch {EXPECTED_CUDA_ARCH}. Ensure this is intended.')
+
+
 except ImportError as e:
-    print(f'Warning: Missing package - {str(e)}')
+    print(f'ERROR: Missing package during verification - {str(e)}')
+    install_ok = False
 except Exception as e:
-    print(f'Warning: Verification script had issues: {str(e)}')
-" || echo "Warning: Verification script had issues, but continuing..."
+    print(f'ERROR: Verification script encountered an issue: {str(e)}')
+    install_ok = False
+
+if not install_ok:
+    print('--- PyTorch Ecosystem Verification FAILED ---')
+    sys.exit(1)
+else:
+    print('--- PyTorch Ecosystem Verification SUCCESSFUL ---')
+    sys.exit(0)
+"
+    return $? # Return the exit status of the python script
 }
 
 # Main function to fix torch versions
@@ -768,69 +840,159 @@ EOF
 
     # Cached Wheel Handling
     check_and_install_cached_wheel() {
-        local cuda_version_detected="$1" # Pass detected version
-        local sage_version="2.1.1" # Hardcoded version from original script
+        local cuda_version_detected="$1"
+        local sage_version="2.1.1"
         local arch=$(uname -m)
-        # Ensure SAGEATTENTION_CACHE_DIR is set (should be by create_directories)
-        if [[ -z "$SAGEATTENTION_CACHE_DIR" ]]; then
-            log_error "SAGEATTENTION_CACHE_DIR is not set in check_and_install_cached_wheel!"
-            return 1
-        fi
         local sage_cache_marker="$SAGEATTENTION_CACHE_DIR/sage_${sage_version}_${arch}_cuda${cuda_version_detected}.installed"
+        local python_executable
+        if [[ -n "$VENV_DIR" && -x "$VENV_DIR/sd_comfy-env/bin/python" ]]; then
+            python_executable="$VENV_DIR/sd_comfy-env/bin/python"
+        else
+            log_error "[DEBUG] VENV Python executable not found or VENV_DIR not set! Falling back to 'python'."
+            python_executable="python"
+        fi
         local sage_wheel
-        # Ensure WHEEL_CACHE_DIR is set
-        if [[ -z "$WHEEL_CACHE_DIR" ]]; then
-            log_error "WHEEL_CACHE_DIR is not set in check_and_install_cached_wheel!"
-            return 1
-        fi
-        # Find wheel matching version, cuda (dots removed), and arch
-        sage_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -name "sageattention-${sage_version}*cp*-cp*-*linux_${arch}.whl" -print -quit)
-        # Further filter by CUDA version if found (handle potential variations in filename)
-        if [[ -n "$sage_wheel" ]] && ! [[ "$(basename "$sage_wheel")" == *cuda${cuda_version_detected//.}* ]]; then
-             log "Found wheel $sage_wheel, but does not match CUDA $cuda_version_detected. Searching specifically..."
-             sage_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -name "sageattention-${sage_version}*cuda${cuda_version_detected//.}*${arch}*.whl" -print -quit)
-        fi
-
 
         # Check marker file first
         if [ -f "$sage_cache_marker" ]; then
             log "Found installation marker: $sage_cache_marker"
-            log "Verifying import from existing installation..."
-            pushd /tmp > /dev/null # Change to neutral directory
+            log "Verifying import from existing installation using: $python_executable"
+
+            # --- BEGIN ENHANCED PYTHON DEBUG COMMAND ---
+            local python_debug_script=$(cat <<EOF
+import sys, os, site, pprint, traceback
+
+print(f"--- Python Debug Info ---")
+print(f"sys.executable: {sys.executable}")
+print(f"sys.version: {sys.version}")
+print(f"sys.prefix: {sys.prefix}")
+print(f"sys.path:")
+pprint.pprint(sys.path)
+print(f"site.getsitepackages(): {site.getsitepackages()}")
+
+# Check environment variables from Python's perspective
+print(f"os.environ['PATH']: {os.environ.get('PATH', 'Not Set')}")
+print(f"os.environ['LD_LIBRARY_PATH']: {os.environ.get('LD_LIBRARY_PATH', 'Not Set')}")
+print(f"os.environ['PYTHONPATH']: {os.environ.get('PYTHONPATH', 'Not Set')}")
+print(f"os.getcwd(): {os.getcwd()}") # Print current working directory from Python's perspective
+
+# List contents of site-packages
+site_packages_dirs = site.getsitepackages()
+if not site_packages_dirs: # Handle cases like system python where getsitepackages might be empty
+    site_packages_dirs = [os.path.join(sys.prefix, 'lib', f'python{sys.version_info.major}.{sys.version_info.minor}', 'site-packages')]
+
+for sp_dir in site_packages_dirs:
+    print(f"--- Contents of site-packages dir '{sp_dir}': ---")
+    try:
+        if os.path.isdir(sp_dir):
+            contents = os.listdir(sp_dir)
+            pprint.pprint(sorted(contents)) # Sort for easier reading
+        else:
+            print(f"  Warning: Path '{sp_dir}' is not a directory.")
+    except FileNotFoundError:
+        print(f"  Error: Directory '{sp_dir}' not found.")
+    except Exception as e:
+        print(f"  Error listing contents of '{sp_dir}': {e}")
+    print(f"--- End Contents of '{sp_dir}' ---")
+
+
+print(f"--- Attempting Import ---")
+import_successful = False
+try:
+    import sageattention
+    print(f"Successfully imported sageattention")
+    print(f"Location: {getattr(sageattention, '__file__', 'N/A')}")
+    print(f"Version: {getattr(sageattention, '__version__', 'N/A')}")
+    import_successful = True
+except ImportError as e:
+    print(f"ImportError occurred: {e}")
+    print(f"Error type: {type(e)}")
+    # traceback.print_exc() # Uncomment for full traceback if needed
+except ModuleNotFoundError as e:
+    print(f"ModuleNotFoundError occurred: {e}")
+    print(f"Error type: {type(e)}")
+    # traceback.print_exc() # Uncomment for full traceback if needed
+except Exception as e:
+    print(f"An unexpected error occurred during import: {e}")
+    print(f"Error type: {type(e)}")
+    traceback.print_exc()
+
+print(f"--- End Python Debug Info ---")
+# Exit with 0 if import was successful, 1 otherwise
+sys.exit(0 if import_successful else 1)
+EOF
+            )
+            # --- END ENHANCED PYTHON DEBUG COMMAND ---
+
+
+            # Execute the detailed Python debug script
+            log "[DEBUG] --- Executing Python Debug Script ---"
             local import_output
             local import_status
-            import_output=$(python -c "import sageattention; print('SageAttention imported successfully')" 2>&1)
+            # Change to a neutral directory before running the check
+            pushd /tmp > /dev/null
+            # Run the script using the determined python executable
+            import_output=$("$python_executable" -c "$python_debug_script" 2>&1)
             import_status=$?
-            popd > /dev/null # Return to original directory
+            popd > /dev/null
+            log "[DEBUG] --- Python Debug Script Finished (Exit Status: $import_status) ---"
 
+            # Log the full output from the Python script
+            log "[DEBUG] --- Python Script Output ---"
+            echo "$import_output" | while IFS= read -r line; do log "[DEBUG] Python: $line"; done
+            log "[DEBUG] --- End Python Script Output ---"
+
+
+            # Check the exit status from the Python script
             if [ $import_status -eq 0 ]; then
-               log "✅ SageAttention import verified from existing installation."
+               log "✅ SageAttention import verified from existing installation (via Python script)."
                return 0 # Success - marker valid, installation works
             else
-               log_error "⚠️ Found marker but import failed. Removing marker and proceeding."
-               log_error "Python import error output:"
-               log_error "-----------------------------------------"
-               echo "$import_output" | while IFS= read -r line; do log_error "$line"; done
-               log_error "-----------------------------------------"
+               log_error "⚠️ Found marker but import failed (Python script exit status: $import_status). Removing marker and proceeding."
+               # The detailed error is already logged above within the Python script output
                rm -f "$sage_cache_marker" # Remove invalid marker
                # Continue to check for wheel below
             fi
         fi
 
         # If marker not found OR import failed, check for wheel
+
+        # Determine Python version tag (e.g., cp310) for wheel searching
+        local py_version_short # e.g., 310
+        py_version_short=$("$python_executable" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+        local python_version_tag="cp${py_version_short}" # e.g., cp310
+
+        if [[ -z "$py_version_short" ]]; then
+            log_error "Could not determine Python version for wheel search. Proceeding to build."
+        else
+            log "Searching for cached wheel with Python tag: ${python_version_tag}, sage_version: ${sage_version}, arch: ${arch} in ${WHEEL_CACHE_DIR}"
+            # PEP 425: {python tag}-{abi tag}-{platform tag}. e.g., sageattention-2.1.1-cp310-cp310-linux_x86_64.whl
+            # Search for a wheel matching the current Python version tag and architecture.
+            sage_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sageattention-${sage_version}-${python_version_tag}-*-linux_${arch}.whl" -print -quit)
+
+            if [[ -z "$sage_wheel" ]]; then
+                log "Specific Python tag search failed. Trying broader search for ${python_version_tag}..."
+                # Broader search: sageattention-VERSION*{python_version_tag}*{arch}.whl
+                sage_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sageattention-${sage_version}*${python_version_tag}*${arch}*.whl" -print -quit)
+            fi
+        fi
+        
         if [[ -f "$sage_wheel" ]]; then
-            log "Found cached wheel matching CUDA $cuda_version_detected: $sage_wheel"
+            log "Found compatible cached wheel: $sage_wheel (CUDA version $cuda_version_detected context)"
             # Use --force-reinstall in case a broken version exists
-            if pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$sage_wheel"; then
+            # Use the venv's pip explicitly
+            if "$python_executable" -m pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$sage_wheel"; then
                 log "Verifying installation from cached wheel via import..."
                 pushd /tmp > /dev/null # Change to neutral directory
                 local wheel_import_output
                 local wheel_import_status
-                wheel_import_output=$(python -c "import sageattention; print('SageAttention imported successfully')" 2>&1)
+                # Use the venv's python explicitly
+                wheel_import_output=$("$python_executable" -c "import sageattention; print('SageAttention imported successfully from cached wheel.')" 2>&1)
                 wheel_import_status=$?
                 popd > /dev/null # Return to original directory
 
                 if [ $wheel_import_status -eq 0 ]; then
+                    log "$wheel_import_output" # Print success message from python
                     # Installation from wheel succeeded, create marker etc.
                     handle_successful_installation "$cuda_version_detected"
                     log "✅ Cached wheel installed and import verified."
@@ -847,7 +1009,7 @@ EOF
                 log_error "⚠️ Failed to install cached wheel: $sage_wheel. Proceeding to build."
             fi
         else
-             log "No suitable installation marker or cached wheel found in $WHEEL_CACHE_DIR for CUDA $cuda_version_detected."
+             log "No suitable installation marker or compatible cached wheel found in $WHEEL_CACHE_DIR for Python ${python_version_tag} / CUDA ${cuda_version_detected} context."
         fi
         log "Proceeding to build SageAttention."
         return 1 # Failure - need to build
