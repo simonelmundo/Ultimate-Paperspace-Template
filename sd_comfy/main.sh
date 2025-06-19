@@ -57,7 +57,7 @@ echo "Starting main.sh operations at $(date)"
 
 # Common environment variables for CUDA
 setup_cuda_env() {
-    export CUDA_HOME=/usr/local/cuda-12.1
+    export CUDA_HOME=/usr/local/cuda-12.6
     # Prepend CUDA bin and lib paths to ensure they are found first
     export PATH=$CUDA_HOME/bin:$PATH
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
@@ -88,17 +88,17 @@ setup_cuda_env() {
 }
 
 install_cuda_12() {
-    echo "Installing CUDA 12.1 and essential build tools..."
-    local CUDA_MARKER="/storage/.cuda_12.1_installed"
+    echo "Installing CUDA 12.6 and essential build tools..."
+    local CUDA_MARKER="/storage/.cuda_12.6_installed"
     local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log" # Log file for apt output
 
     # Check marker and verify existing installation (logic from previous step)
     if [ -f "$CUDA_MARKER" ]; then
-        echo "CUDA 12.1 marker file exists. Verifying installation..."
+        echo "CUDA 12.6 marker file exists. Verifying installation..."
         setup_cuda_env
         hash -r
-        if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.1"* ]]; then
-             echo "CUDA 12.1 already installed and verified."
+        if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.6"* ]]; then
+             echo "CUDA 12.6 already installed and verified."
              return 0
         else
              echo "Marker file exists, but verification failed. Proceeding with installation..."
@@ -138,23 +138,23 @@ install_cuda_12() {
         libjpeg-dev \
         libpng-dev \
         libgl1-mesa-dev \
-        cuda-cudart-12-1 \
-        cuda-cudart-dev-12-1 \
-        cuda-nvcc-12-1 \
-        cuda-cupti-12-1 \
-        cuda-cupti-dev-12-1 \
-        libcublas-12-1 \
-        libcublas-dev-12-1 \
-        libcufft-12-1 \
-        libcufft-dev-12-1 \
-        libcurand-12-1 \
-        libcurand-dev-12-1 \
-        libcusolver-12-1 \
-        libcusolver-dev-12-1 \
-        libcusparse-12-1 \
-        libcusparse-dev-12-1 \
-        libnpp-12-1 \
-        libnpp-dev-12-1 >> "$APT_INSTALL_LOG" 2>&1
+        cuda-cudart-12-6 \
+        cuda-cudart-dev-12-6 \
+        cuda-nvcc-12-6 \
+        cuda-cupti-12-6 \
+        cuda-cupti-dev-12-6 \
+        libcublas-12-6 \
+        libcublas-dev-12-6 \
+        libcufft-12-6 \
+        libcufft-dev-12-6 \
+        libcurand-12-6 \
+        libcurand-dev-12-6 \
+        libcusolver-12-6 \
+        libcusolver-dev-12-6 \
+        libcusparse-12-6 \
+        libcusparse-dev-12-6 \
+        libnpp-12-6 \
+        libnpp-dev-12-6 >> "$APT_INSTALL_LOG" 2>&1
     local apt_exit_code=$? # Capture exit code immediately
 
     echo "apt-get install finished with exit code: $apt_exit_code"
@@ -164,7 +164,7 @@ install_cuda_12() {
     echo "--- End APT Install Log ---"
 
     if [ $apt_exit_code -ne 0 ]; then
-        log_error "apt-get install failed for CUDA 12.1 and build tools. Exit code: $apt_exit_code. See log above."
+        log_error "apt-get install failed for CUDA 12.6 and build tools. Exit code: $apt_exit_code. See log above."
         return 1 # Exit if install fails
     fi
 
@@ -174,7 +174,7 @@ install_cuda_12() {
 
     # Make environment persistent
     cat > /etc/profile.d/cuda12.sh << 'EOL'
-export CUDA_HOME=/usr/local/cuda-12.1
+export CUDA_HOME=/usr/local/cuda-12.6
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export FORCE_CUDA=1
@@ -182,31 +182,31 @@ EOL
     chmod +x /etc/profile.d/cuda12.sh
 
     # Verify installation *before* creating marker
-    echo "Verifying CUDA 12.1 installation..."
+    echo "Verifying CUDA 12.6 installation..."
     if command -v nvcc &>/dev/null; then
         local installed_version
         installed_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
-        if [[ "$installed_version" == "12.1"* ]]; then
-            echo "CUDA 12.1 installation verified successfully (Version: $installed_version)."
+        if [[ "$installed_version" == "12.6"* ]]; then
+            echo "CUDA 12.6 installation verified successfully (Version: $installed_version)."
             touch "$CUDA_MARKER"
             echo "Installation marker created: $CUDA_MARKER"
             return 0
         else
-            log_error "CUDA 12.1 installation verification failed. Found nvcc, but version is '$installed_version'."
+            log_error "CUDA 12.6 installation verification failed. Found nvcc, but version is '$installed_version'."
             log_error "Which nvcc: $(which nvcc)"
             log_error "PATH: $PATH"
             return 1
         fi
     else
-        log_error "CUDA 12.1 installation verification failed. NVCC command not found after installation attempt."
-        log_error "Check /usr/local/cuda-12.1/bin exists and contains nvcc."
-        ls -l /usr/local/cuda-12.1/bin/nvcc || true
+        log_error "CUDA 12.6 installation verification failed. NVCC command not found after installation attempt."
+        log_error "Check /usr/local/cuda-12.6/bin exists and contains nvcc."
+        ls -l /usr/local/cuda-12.6/bin/nvcc || true
         return 1
     fi
 }
 
 setup_environment() {
-    echo "Attempting to set up CUDA 12.1 environment..."
+    echo "Attempting to set up CUDA 12.6 environment..."
     # Set the desired environment variables FIRST
     setup_cuda_env
 
@@ -225,19 +225,19 @@ setup_environment() {
 
         echo "Detected CUDA Version (after setting env and clearing hash): $cuda_version"
 
-        # Verify if the detected version is the target 12.1
-        if [[ "$cuda_version" == "12.1"* ]]; then
-            echo "CUDA 12.1 environment appears correctly configured."
+        # Verify if the detected version is the target 12.6
+        if [[ "$cuda_version" == "12.6"* ]]; then
+            echo "CUDA 12.6 environment appears correctly configured."
             # Environment is already set by setup_cuda_env above
         else
-            echo "Found nvcc, but version is '$cuda_version', not 12.1. Attempting installation/reconfiguration..."
+            echo "Found nvcc, but version is '$cuda_version', not 12.6. Attempting installation/reconfiguration..."
             install_cuda_12
             # Re-clear hash after potential installation changes PATH again
             hash -r
         fi
     else
         # If nvcc is NOT found even after setting the PATH and clearing hash
-        echo "NVCC not found after setting environment variables and clearing hash. Installing CUDA 12.1..."
+        echo "NVCC not found after setting environment variables and clearing hash. Installing CUDA 12.6..."
         install_cuda_12
         # Re-clear hash after potential installation changes PATH again
         hash -r
@@ -248,11 +248,11 @@ setup_environment() {
 # STEP 3: PYTORCH VERSION MANAGEMENT
 #######################################
 # Define package versions and URLs as constants
-readonly TORCH_VERSION="2.4.1+cu121"
-readonly TORCHVISION_VERSION="0.19.1+cu121"
-readonly TORCHAUDIO_VERSION="2.4.1+cu121"
+readonly TORCH_VERSION="2.7.1+cu126"
+readonly TORCHVISION_VERSION="0.22.1+cu126"
+readonly TORCHAUDIO_VERSION="2.7.1+cu126"
 readonly XFORMERS_VERSION="0.0.28.post1"
-readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
+readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
 
 # Function to check if PyTorch versions match requirements
 check_torch_versions() {
@@ -284,16 +284,31 @@ check_torch_versions() {
     echo "- xformers: ${XFORMERS_INSTALLED} (required: ${XFORMERS_VERSION})"
     echo "- CUDA available: ${CUDA_AVAILABLE}"
     
-    # Check if any package needs reinstallation
+    # Check if core PyTorch packages need reinstallation (these are critical)
+    local core_packages_need_reinstall=false
     if [[ "${TORCH_INSTALLED_BASE}" != "${TORCH_BASE_VERSION}" || 
           "${TORCHVISION_INSTALLED_BASE}" != "${TORCHVISION_BASE_VERSION}" || 
           "${TORCHAUDIO_INSTALLED_BASE}" != "${TORCHAUDIO_BASE_VERSION}" || 
-          "${XFORMERS_INSTALLED}" != "${XFORMERS_VERSION}" || 
           "${CUDA_AVAILABLE}" != "True" ]]; then
-        echo "PyTorch ecosystem needs reinstallation"
+        core_packages_need_reinstall=true
+    fi
+    
+    # Check if xformers needs installation (this is optional but recommended)
+    local xformers_needs_install=false
+    if [[ "${XFORMERS_INSTALLED}" == "not_installed" ]]; then
+        xformers_needs_install=true
+    fi
+    
+    # Determine if reinstallation is needed
+    if [[ "$core_packages_need_reinstall" == "true" ]]; then
+        echo "PyTorch core packages need reinstallation"
         return 1  # Needs reinstallation
+    elif [[ "$xformers_needs_install" == "true" ]]; then
+        echo "PyTorch core packages are correct, but xformers is missing"
+        echo "Will install xformers separately without reinstalling core packages"
+        return 2  # Needs xformers installation only
     else
-        echo "PyTorch ecosystem is already at the correct versions"
+        echo "PyTorch ecosystem already at the correct versions"
         return 0  # No reinstallation needed
     fi
 }
@@ -391,20 +406,38 @@ except Exception as e:
 fix_torch_versions() {
     echo "Checking PyTorch/CUDA versions..."
     
-    # Only reinstall if versions don't match
-    if ! check_torch_versions; then
-        echo "Installing required PyTorch versions..."
-        clean_torch_installations
-        # Use || true for now to prevent exit on warning/failure within install functions
-        install_torch_core || true 
-        install_xformers || true
-        verify_installations # This already prints versions
-    else
-        echo "PyTorch ecosystem already at correct versions, skipping reinstallation"
-        # Even if skipping, run a quick verification
-        log "Running verification even though versions seem correct..."
-        verify_installations
-    fi
+    # Check what needs to be done
+    local check_result
+    check_torch_versions
+    check_result=$?
+    
+    case $check_result in
+        0)
+            echo "PyTorch ecosystem already at correct versions, skipping reinstallation"
+            # Even if skipping, run a quick verification
+            log "Running verification even though versions seem correct..."
+            verify_installations
+            ;;
+        1)
+            echo "Installing required PyTorch versions..."
+            clean_torch_installations
+            # Use || true for now to prevent exit on warning/failure within install functions
+            install_torch_core || true 
+            install_xformers || true
+            verify_installations # This already prints versions
+            ;;
+        2)
+            echo "PyTorch core packages are correct, installing xformers only..."
+            # Install xformers without touching core packages
+            install_xformers || true
+            verify_installations # This already prints versions
+            ;;
+        *)
+            echo "Unexpected return code from check_torch_versions: $check_result"
+            log_error "PyTorch version check failed with unexpected status"
+            return 1
+            ;;
+    esac
     
     log "PyTorch ecosystem setup completed"
     return 0 # Always return 0 for now, rely on logs for errors
@@ -729,7 +762,7 @@ EOF
 
     # Environment Setup
     setup_environment() {
-        export CUDA_HOME=/usr/local/cuda-12.1
+        export CUDA_HOME=/usr/local/cuda-12.6
         export PATH=$CUDA_HOME/bin:$PATH
         export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
         export FORCE_CUDA=1
@@ -945,7 +978,7 @@ EOF
 
     # Installation Success Handling
     handle_successful_installation() {
-        local cuda_version_installed="$1" # Expecting version like 12.1
+        local cuda_version_installed="$1" # Expecting version like 12.6
         local sage_version="2.1.1"
         local arch=$(uname -m)
         # Ensure SAGEATTENTION_CACHE_DIR is set
@@ -1109,7 +1142,7 @@ EOF
     # Built Wheel Handling
     handle_built_wheel() {
         local wheel_path="$1"
-        local cuda_version_built_with="$2" # Expecting version like 12.1
+        local cuda_version_built_with="$2" # Expecting version like 12.6
         log "Found built wheel: $wheel_path"
         # Ensure WHEEL_CACHE_DIR is set
         if [[ -z "$WHEEL_CACHE_DIR" ]]; then
@@ -1158,6 +1191,245 @@ EOF
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
     install_sageattention
 
+    # --- NUNCHAKU INSTALLATION ---
+    install_nunchaku() {
+        echo "Installing Nunchaku for enhanced machine learning capabilities..."
+        log "Starting Nunchaku installation process"
+        
+        # Setup Nunchaku cache directories
+        local nunchaku_cache_base="/storage/.nunchaku_cache"
+        local nunchaku_version="0.2.0"
+        local python_version
+        python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+        local arch=$(uname -m)
+        local torch_version
+        torch_version=$(python -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || echo "unknown")
+        
+        # Create cache directory structure
+        export NUNCHAKU_CACHE_DIR="${nunchaku_cache_base}/v${nunchaku_version}_cp${python_version}_torch${torch_version}_${arch}"
+        mkdir -p "$NUNCHAKU_CACHE_DIR" "$WHEEL_CACHE_DIR"
+        
+        log "Nunchaku cache directory: $NUNCHAKU_CACHE_DIR"
+        log "Wheel cache directory: $WHEEL_CACHE_DIR"
+        
+        # Check if Nunchaku is already installed and working
+        local nunchaku_check_script="
+import sys
+try:
+    import nunchaku
+    print(f'Nunchaku {nunchaku.__version__} already installed and working')
+    sys.exit(0)
+except ImportError:
+    print('Nunchaku not found, proceeding with installation')
+    sys.exit(1)
+except Exception as e:
+    print(f'Nunchaku import error: {e}')
+    sys.exit(1)
+"
+        
+        if python -c "$nunchaku_check_script" 2>/dev/null; then
+            log "Nunchaku already installed and working, skipping installation"
+            return 0
+        fi
+        
+        # Check PyTorch version to ensure compatibility
+        local torch_version_check="
+import torch
+version = torch.__version__.split('+')[0]
+major, minor = map(int, version.split('.')[:2])
+if major > 2 or (major == 2 and minor >= 5):
+    print(f'PyTorch {version} meets Nunchaku requirements (>=2.5)')
+    sys.exit(0)
+else:
+    print(f'PyTorch {version} below Nunchaku requirements (>=2.5)')
+    sys.exit(1)
+"
+        
+        if ! python -c "$torch_version_check" 2>/dev/null; then
+            log_error "PyTorch version incompatible with Nunchaku. Nunchaku requires PyTorch >=2.5"
+            log_error "Current PyTorch version may need upgrade. Skipping Nunchaku installation."
+            return 1
+        fi
+        
+        if [[ -z "$python_version" ]]; then
+            log_error "Could not determine Python version for Nunchaku wheel selection"
+            return 1
+        fi
+        
+        log "Detected Python version: $python_version"
+        log "Detected PyTorch version: $torch_version"
+        
+        # Check for cached wheel first
+        local nunchaku_wheel_name="nunchaku-${nunchaku_version}+torch2.6-cp${python_version}-cp${python_version}-linux_${arch}.whl"
+        local cached_wheel="$WHEEL_CACHE_DIR/$nunchaku_wheel_name"
+        local nunchaku_marker="$NUNCHAKU_CACHE_DIR/nunchaku_${nunchaku_version}_cp${python_version}_torch${torch_version}_${arch}.installed"
+        
+        # Check if we have a cached installation marker
+        if [ -f "$nunchaku_marker" ]; then
+            log "Found Nunchaku installation marker: $nunchaku_marker"
+            log "Verifying cached installation..."
+            
+            local marker_verification_script="
+import sys
+try:
+    import nunchaku
+    print(f'✅ Cached Nunchaku {nunchaku.__version__} installation verified')
+    print(f'Location: {nunchaku.__file__}')
+    sys.exit(0)
+except ImportError as e:
+    print(f'❌ Cached Nunchaku import failed: {e}')
+    sys.exit(1)
+except Exception as e:
+    print(f'❌ Cached Nunchaku verification error: {e}')
+    sys.exit(1)
+"
+            
+            if python -c "$marker_verification_script" 2>/dev/null; then
+                log "✅ Cached Nunchaku installation verified successfully"
+                return 0
+            else
+                log_error "⚠️ Cached installation marker exists but verification failed. Removing marker."
+                rm -f "$nunchaku_marker"
+            fi
+        fi
+        
+        # Check for cached wheel file
+        if [ -f "$cached_wheel" ]; then
+            log "Found cached Nunchaku wheel: $cached_wheel"
+            log "Installing from cached wheel..."
+            
+            if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel"; then
+                log "Nunchaku installation from cached wheel completed successfully"
+                
+                # Verify installation
+                local verification_script="
+import sys
+try:
+    import nunchaku
+    print(f'✅ Nunchaku {nunchaku.__version__} installed successfully from cached wheel')
+    print(f'Location: {nunchaku.__file__}')
+    
+    # Test basic functionality
+    if hasattr(nunchaku, '__version__'):
+        print(f'Version check: OK')
+    else:
+        print('Warning: Version attribute not found')
+    
+    sys.exit(0)
+except ImportError as e:
+    print(f'❌ Nunchaku import failed: {e}')
+    sys.exit(1)
+except Exception as e:
+    print(f'❌ Nunchaku verification error: {e}')
+    sys.exit(1)
+"
+                
+                if python -c "$verification_script" 2>/dev/null; then
+                    log "✅ Nunchaku installation from cached wheel verified successfully"
+                    touch "$nunchaku_marker"
+                    log "Created installation marker: $nunchaku_marker"
+                    return 0
+                else
+                    log_error "❌ Nunchaku installation from cached wheel verification failed"
+                    return 1
+                fi
+            else
+                log_error "❌ Failed to install Nunchaku from cached wheel"
+            fi
+        fi
+        
+        # Download and cache the wheel
+        local nunchaku_wheel_url="https://huggingface.co/mit-han-lab/nunchaku/resolve/main/$nunchaku_wheel_name"
+        
+        log "Downloading Nunchaku wheel from: $nunchaku_wheel_url"
+        log "Caching to: $cached_wheel"
+        
+        # Download the wheel file
+        if wget -q --show-progress -O "$cached_wheel" "$nunchaku_wheel_url"; then
+            log "✅ Nunchaku wheel downloaded and cached successfully"
+            
+            # Install from the downloaded wheel
+            if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel"; then
+                log "Nunchaku wheel installation completed successfully"
+                
+                # Verify installation
+                local verification_script="
+import sys
+try:
+    import nunchaku
+    print(f'✅ Nunchaku {nunchaku.__version__} installed successfully')
+    print(f'Location: {nunchaku.__file__}')
+    
+    # Test basic functionality
+    if hasattr(nunchaku, '__version__'):
+        print(f'Version check: OK')
+    else:
+        print('Warning: Version attribute not found')
+    
+    sys.exit(0)
+except ImportError as e:
+    print(f'❌ Nunchaku import failed: {e}')
+    sys.exit(1)
+except Exception as e:
+    print(f'❌ Nunchaku verification error: {e}')
+    sys.exit(1)
+"
+                
+                if python -c "$verification_script" 2>/dev/null; then
+                    log "✅ Nunchaku installation verified successfully"
+                    touch "$nunchaku_marker"
+                    log "Created installation marker: $nunchaku_marker"
+                    return 0
+                else
+                    log_error "❌ Nunchaku installation verification failed"
+                    return 1
+                fi
+            else
+                log_error "❌ Nunchaku wheel installation failed"
+                log_error "Attempting alternative installation methods..."
+                
+                # Try installing from PyPI as fallback
+                log "Attempting to install Nunchaku from PyPI..."
+                if pip install --no-cache-dir --disable-pip-version-check nunchaku; then
+                    log "✅ Nunchaku installed from PyPI successfully"
+                    touch "$nunchaku_marker"
+                    log "Created installation marker: $nunchaku_marker"
+                    return 0
+                else
+                    log_error "❌ All Nunchaku installation methods failed"
+                    log_error "Nunchaku will not be available. Consider manual installation."
+                    return 1
+                fi
+            fi
+        else
+            log_error "❌ Failed to download Nunchaku wheel from $nunchaku_wheel_url"
+            log_error "Attempting PyPI installation as fallback..."
+            
+            # Try installing from PyPI as fallback
+            if pip install --no-cache-dir --disable-pip-version-check nunchaku; then
+                log "✅ Nunchaku installed from PyPI successfully"
+                touch "$nunchaku_marker"
+                log "Created installation marker: $nunchaku_marker"
+                return 0
+            else
+                log_error "❌ All Nunchaku installation methods failed"
+                log_error "Nunchaku will not be available. Consider manual installation."
+                return 1
+            fi
+        fi
+    }
+    
+    # Execute Nunchaku installation
+    install_nunchaku
+    nunchaku_status=$?
+    if [[ $nunchaku_status -eq 0 ]]; then
+        log "✅ Nunchaku installation completed successfully"
+    else
+        log_error "⚠️ Nunchaku installation had issues (Status: $nunchaku_status)"
+        log_error "ComfyUI will continue without Nunchaku support"
+    fi
+    # --- END NUNCHAKU INSTALLATION ---
+
     # Final checks and marker file
     touch /tmp/sd_comfy.prepared
     echo "Stable Diffusion Comfy setup complete."
@@ -1195,8 +1467,15 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   log "Starting Stable Diffusion Comfy"
   cd "$REPO_DIR"
   
+  # Rotate ComfyUI log file instead of deleting it
   if [[ -f "$LOG_DIR/sd_comfy.log" ]]; then
-    rm "$LOG_DIR/sd_comfy.log"
+    # Create timestamp for old log
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    mv "$LOG_DIR/sd_comfy.log" "$LOG_DIR/sd_comfy_${timestamp}.log"
+    echo "Previous ComfyUI log archived as: sd_comfy_${timestamp}.log"
+    
+    # Keep only the last 5 rotated logs to save space
+    ls -t "$LOG_DIR"/sd_comfy_*.log 2>/dev/null | tail -n +6 | xargs -r rm
   fi
   
   # A4000-specific VRAM optimization settings (16GB)
