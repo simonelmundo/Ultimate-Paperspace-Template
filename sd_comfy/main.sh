@@ -5,8 +5,19 @@ set -e
 # STEP 1: INITIAL SETUP AND LOGGING
 #######################################
 # Initialize script environment
+echo "Initializing script environment..."
+echo "Script path (\$0): $0"
 current_dir=$(dirname "$(realpath "$0")")
-cd "$current_dir" || { echo "Failed to change directory"; exit 1; }
+echo "Resolved script directory: $current_dir"
+
+cd "$current_dir" || { echo "Failed to change directory to '$current_dir'"; exit 1; }
+echo "Successfully changed working directory to: $(pwd)"
+
+if [ ! -f ".env" ]; then
+    echo "ERROR: '.env' file not found in script directory ($(pwd))."
+    echo "Please ensure the .env file is located alongside the main.sh script."
+    exit 1
+fi
 source .env || { echo "Failed to source .env"; exit 1; }
 
 # Configure logging system
@@ -275,7 +286,7 @@ check_torch_versions() {
     if [[ "${TORCH_INSTALLED_BASE}" != "${TORCH_BASE_VERSION}" || 
           "${TORCHVISION_INSTALLED}" == "not_installed" || 
           "${TORCHAUDIO_INSTALLED}" == "not_installed" ||
-          "${XFORMERS_INSTALLED}" == "not_installed" ||
+          "${XFORMERS_INSTALLED}" != "${XFORMERS_VERSION}" ||
           ( "${TORCH_INSTALLED}" != "not_installed" && "${CUDA_AVAILABLE}" != "True" ) ]]; then
         echo "PyTorch ecosystem components are missing or have wrong versions. Reinstallation needed."
         return 1 # Needs reinstallation
@@ -337,45 +348,47 @@ install_torch_core() {
     fi
 }
 
-# Function to install xformers
-install_xformers() {
-    echo "Installing xformers..."
-    
-    # CRITICAL: Force specific torch versions during xformers installation to prevent downgrades
-    local install_cmd="pip install --no-cache-dir --ignore-installed xformers==${XFORMERS_VERSION} torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} --extra-index-url ${TORCH_INDEX_URL}"
-    
-    log "Running xformers install command with torch version constraints: $install_cmd"
-
-    if $install_cmd; then
-        log "xformers installation with version constraints completed."
-        # Quick verification
-        python -c "import xformers; print(f'xformers install OK: xformers {xformers.__version__} imported successfully.')" || {
-            log_error "xformers installed but import failed. This may indicate version conflicts."
-            return 1
-        }
-        return 0
-    else
-        local status=$?
-        log_error "xformers installation with constraints failed with status $status."
+    # Function to install xformers
+    install_xformers() {
+        echo "Installing xformers..."
         
-        # Try fallback: Install xformers alone, then force-reinstall correct torch versions
-        log "Attempting xformers fallback installation with post-correction..."
-        if pip install --no-cache-dir --ignore-installed xformers --extra-index-url ${TORCH_INDEX_URL}; then
-            log "xformers fallback installation succeeded. Now correcting PyTorch versions..."
-            # Force reinstall correct torch versions after xformers
-            pip install --force-reinstall --no-cache-dir torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} --extra-index-url ${TORCH_INDEX_URL}
-            
-            python -c "import xformers; print(f'xformers fallback OK: xformers {xformers.__version__} imported successfully.')" || {
-                log_error "xformers fallback installed but import failed."
+        # Try installing xformers with version constraints to maintain PyTorch versions
+        log "Installing xformers with torch version constraints to prevent downgrades..."
+        local constrained_cmd="pip install --no-cache-dir --ignore-installed xformers==${XFORMERS_VERSION} torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} --extra-index-url ${TORCH_INDEX_URL}"
+        
+        log "Running xformers install command with torch version constraints: $constrained_cmd"
+        
+        if $constrained_cmd; then
+            log "xformers installation with constraints succeeded."
+            # Quick verification
+            python -c "import xformers; print(f'xformers install OK: xformers {xformers.__version__} imported successfully.')" || {
+                log_error "xformers installed but import failed. This may indicate version conflicts."
                 return 1
             }
             return 0
         else
-            log_error "Both xformers installation methods failed."
-            return $status
+            local status=$?
+            log_error "xformers installation with constraints failed with status $status."
+            
+            # Fallback: Install xformers without constraints, then fix PyTorch versions
+            log "Attempting xformers fallback installation with post-correction..."
+            if pip install --no-cache-dir --ignore-installed xformers --extra-index-url ${TORCH_INDEX_URL}; then
+                log "xformers fallback installation succeeded. Now correcting PyTorch versions..."
+                # Force reinstall correct torch versions after xformers
+                pip install --force-reinstall --no-cache-dir torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} --extra-index-url ${TORCH_INDEX_URL}
+                
+                python -c "import xformers; print(f'xformers fallback OK: xformers {xformers.__version__} imported successfully.')" || {
+                    log_error "xformers fallback installed but import failed."
+                    return 1
+                }
+                return 0
+            else
+                log_error "All xformers installation methods failed."
+                log_error "ComfyUI will continue without xformers optimizations."
+                return 1
+            fi
         fi
-    fi
-}
+    }
 
 # Function to validate PyTorch versions after xformers installation
 validate_post_xformers_versions() {
@@ -926,28 +939,59 @@ except Exception as e:
         
         # Check for cached wheel file
         if [ -f "$cached_wheel" ]; then
-            log "Found compatible cached Nunchaku wheel: $cached_wheel"
-            log "Installing from cached wheel..."
+            log "Found cached Nunchaku wheel: $cached_wheel"
             
-            if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel"; then
-                log "Nunchaku installation from cached wheel completed successfully"
+            # Check wheel ABI compatibility before installation
+            log "Checking wheel ABI compatibility..."
+            local wheel_abi_check
+            wheel_abi_check=$(python -c "
+import sys
+import re
+wheel_name = '$(basename "$cached_wheel")'
+# Extract ABI tag from wheel filename: nunchaku-0.2.0+torch2.7-cp310-cp310-linux_x86_64.whl
+match = re.search(r'cp(\d+)-cp(\d+)', wheel_name)
+if match:
+    wheel_py_major, wheel_py_minor = match.groups()
+    current_py_major, current_py_minor = sys.version_info[:2]
+    if str(current_py_major) == wheel_py_major[0] and str(current_py_minor) == wheel_py_major[1:]:
+        print('compatible')
+    else:
+        print(f'incompatible: wheel for Python {wheel_py_major}.{wheel_py_minor}, current Python {current_py_major}.{current_py_minor}')
+else:
+    print('unknown_format')
+" 2>/dev/null || echo "check_failed")
+            
+            if [[ "$wheel_abi_check" == "compatible" ]]; then
+                log "✅ Wheel ABI compatibility check passed"
+                log "Installing from cached wheel..."
                 
-                # Verify installation
-                if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully from cached wheel')" 2>/dev/null; then
-                    log "✅ Nunchaku installation from cached wheel verified successfully"
-                    touch "$nunchaku_marker"
-                    log "Created installation marker: $nunchaku_marker"
-                    return 0
+                if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel"; then
+                    log "Nunchaku installation from cached wheel completed successfully"
+                    
+                    # Verify installation
+                    if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully from cached wheel')" 2>/dev/null; then
+                        log "✅ Nunchaku installation from cached wheel verified successfully"
+                        touch "$nunchaku_marker"
+                        log "Created installation marker: $nunchaku_marker"
+                        return 0
+                    else
+                        log_error "❌ Nunchaku installation from cached wheel verification failed"
+                        log_error "⚠️ Runtime compatibility issue detected with cached Nunchaku wheel"
+                        log_error "Removing incompatible cached wheel and trying fresh download"
+                        rm -f "$cached_wheel"
+                        # Continue to download section below
+                    fi
                 else
-                    log_error "❌ Nunchaku installation from cached wheel verification failed"
-                    log_error "⚠️ ABI compatibility issue detected with cached Nunchaku wheel"
-                    log_error "Removing incompatible cached wheel and skipping Nunchaku"
+                    log_error "❌ Failed to install Nunchaku from cached wheel"
+                    log_error "Removing failed wheel and trying fresh download"
                     rm -f "$cached_wheel"
-                    log_error "Nunchaku will be skipped but ComfyUI should continue to work normally"
-                    return 0  # Return success to continue script execution
+                    # Continue to download section below
                 fi
             else
-                log_error "❌ Failed to install Nunchaku from cached wheel"
+                log_error "❌ Wheel ABI compatibility check failed: $wheel_abi_check"
+                log_error "Removing incompatible cached wheel and trying fresh download"
+                rm -f "$cached_wheel"
+                # Continue to download section below
             fi
         fi
         
@@ -1713,6 +1757,8 @@ if [[ -z "$INSTALL_ONLY" ]]; then
 
 
   # Launch ComfyUI with A4000-optimized parameters using SageAttention
+  echo "NOTE: A pip dependency warning regarding xformers and torch versions may appear below."
+  echo "This is expected with the current package versions and can be safely ignored."
   PYTHONUNBUFFERED=1 service_loop "python main.py \
     --dont-print-server \
     --port $SD_COMFY_PORT \
