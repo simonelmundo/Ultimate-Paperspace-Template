@@ -76,7 +76,6 @@ setup_cuda_env() {
     
     # A4000-specific optimization (CuDNN V8 API should be fine)
     export TORCH_CUDNN_V8_API_ENABLED=1
-    export CUDA_VISIBLE_DEVICES=0 # Redundant, already set above
     
     echo "CUDA Environment Variables Set:"
     echo "  CUDA_HOME=$CUDA_HOME"
@@ -282,11 +281,54 @@ check_torch_versions() {
     echo "- xformers: ${XFORMERS_INSTALLED} (required: ${XFORMERS_VERSION})"
     echo "- CUDA available via torch: ${CUDA_AVAILABLE}"
     
-    # Simplified logic: if any component is wrong or missing, trigger a full reinstall.
+    # Smart version checking: accept newer compatible versions for xformers
+    local xformers_compatible=false
+    if [[ "${XFORMERS_INSTALLED}" == "not_installed" ]]; then
+        xformers_compatible=false
+    else
+        # Extract xformers base version (remove any suffixes)
+        local xformers_installed_base=$(echo "${XFORMERS_INSTALLED}" | cut -d'+' -f1)
+        local xformers_required_base=$(echo "${XFORMERS_VERSION}" | cut -d'+' -f1)
+        
+        # Check if installed version is >= required version for xformers
+        if python3 -c "
+import sys
+try:
+    from packaging import version
+    installed = version.parse('${xformers_installed_base}')
+    required = version.parse('${xformers_required_base}')
+    sys.exit(0 if installed >= required else 1)
+except ImportError:
+    # Fallback: simple string comparison if packaging not available
+    installed_parts = '${xformers_installed_base}'.split('.')
+    required_parts = '${xformers_required_base}'.split('.')
+    # Pad with zeros for comparison
+    max_len = max(len(installed_parts), len(required_parts))
+    installed_parts += ['0'] * (max_len - len(installed_parts))
+    required_parts += ['0'] * (max_len - len(required_parts))
+    # Compare numerically
+    for i, r in zip([int(x) for x in installed_parts], [int(x) for x in required_parts]):
+        if i > r:
+            sys.exit(0)  # installed > required
+        elif i < r:
+            sys.exit(1)  # installed < required
+    sys.exit(0)  # versions are equal
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+            xformers_compatible=true
+            echo "✅ xformers ${XFORMERS_INSTALLED} is compatible (>= ${XFORMERS_VERSION})"
+        else
+            xformers_compatible=false
+            echo "❌ xformers ${XFORMERS_INSTALLED} is incompatible (< ${XFORMERS_VERSION})"
+        fi
+    fi
+    
+    # Check if reinstallation is needed
     if [[ "${TORCH_INSTALLED_BASE}" != "${TORCH_BASE_VERSION}" || 
           "${TORCHVISION_INSTALLED}" == "not_installed" || 
           "${TORCHAUDIO_INSTALLED}" == "not_installed" ||
-          "${XFORMERS_INSTALLED}" != "${XFORMERS_VERSION}" ||
+          "${xformers_compatible}" != "true" ||
           ( "${TORCH_INSTALLED}" != "not_installed" && "${CUDA_AVAILABLE}" != "True" ) ]]; then
         echo "PyTorch ecosystem components are missing or have wrong versions. Reinstallation needed."
         return 1 # Needs reinstallation
@@ -506,6 +548,9 @@ fix_torch_versions() {
             validate_post_xformers_versions
             
             verify_installations
+            
+            # Create a marker to indicate recent successful installation
+            touch "/tmp/pytorch_ecosystem_fresh_install"
             ;;
         *)
             echo "DEBUG: Case default - unexpected result"
@@ -1303,193 +1348,7 @@ EOF
     process_requirements "$REPO_DIR/requirements.txt"
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
-    # Emergency PyTorch Recovery Function
-    emergency_pytorch_recovery() {
-        echo "🚨 EMERGENCY: Detected corrupted PyTorch installation. Performing full recovery..."
-        log_error "PyTorch ecosystem is corrupted. Starting emergency recovery procedure."
-        
-        # Perform aggressive cleanup
-        clean_torch_installations
-        
-        # Reinstall PyTorch ecosystem from scratch
-        echo "Reinstalling PyTorch ecosystem from scratch..."
-        if install_torch_core; then
-            echo "✅ PyTorch core recovery successful"
-        else
-            log_error "❌ PyTorch core recovery failed. Cannot proceed with SageAttention."
-            return 1
-        fi
-        
-        # Verify recovery
-        local torch_check
-        torch_check=$(python -c "import torch; print(f'Recovery check: torch {torch.__version__} working')" 2>&1)
-        local torch_status=$?
-        
-        if [[ $torch_status -eq 0 ]]; then
-            echo "✅ PyTorch recovery verified: $torch_check"
-            return 0
-        else
-            log_error "❌ PyTorch recovery verification failed: $torch_check"
-            return 1
-        fi
-    }
-
-    # SageAttention Installation Process
-    install_sageattention() {
-        # Initialize environment
-        echo "Verifying SageAttention installation..."
-        setup_environment
-        create_directories
-        setup_ccache
-        
-        # CRITICAL: Check if PyTorch is working before proceeding
-        echo "Checking PyTorch ecosystem health before SageAttention installation..."
-        local torch_health_check
-        torch_health_check=$(python -c "import torch; print(f'PyTorch {torch.__version__} working')" 2>&1)
-        local torch_health_status=$?
-        
-        if [[ $torch_health_status -ne 0 ]]; then
-            log_error "PyTorch ecosystem is broken. Error: $torch_health_check"
-            if emergency_pytorch_recovery; then
-                echo "✅ Emergency PyTorch recovery completed. Proceeding with SageAttention..."
-            else
-                log_error "❌ Emergency PyTorch recovery failed. Skipping SageAttention installation."
-                return 1
-            fi
-        else
-            echo "✅ PyTorch ecosystem health check passed: $torch_health_check"
-        fi
-        
-        # First, just try to import it. If it works, we're done.
-        if python -c "import sageattention" &>/dev/null; then
-            log "✅ SageAttention is already installed and importable."
-            return 0
-        fi
-
-        log "SageAttention not found. Proceeding with installation..."
-
-        # Now, check for a compatible cached wheel.
-        if check_and_install_cached_wheel; then
-            log "✅ Successfully installed SageAttention from cached wheel."
-            # Final verification
-            if python -c "import sageattention" &>/dev/null; then
-                 log "✅ SageAttention import confirmed after wheel installation."
-                 # Create a simple, temporary marker to avoid repeated checks within the same script run
-                 touch "/tmp/sageattention_installed_this_run"
-                 return 0
-            else
-                 log_error "Installed from wheel, but import still fails. This likely means the cached wheel is incompatible."
-                 # Fall through to build
-            fi
-        fi
-
-        log "No suitable cached wheel found or installation from wheel failed. Proceeding with full build."
-
-        # Proceed with full installation from source
-        install_dependencies
-        if clone_or_update_repo; then
-             build_and_install # This function will cache the wheel on success
-        else
-             log_error "Failed to clone or update SageAttention repository. Skipping build."
-             return 1 # Cannot proceed
-        fi
-
-        # Final check after building from source
-        log "Performing final SageAttention verification..."
-        pushd /tmp > /dev/null # Change to neutral directory to avoid import conflicts
-        local final_import_output
-        local final_import_status
-        final_import_output=$(python -c "import sageattention; print(f'✅ SageAttention {sageattention.__version__} successfully built and installed from source.')" 2>&1)
-        final_import_status=$?
-        popd > /dev/null # Return to original directory
-        
-        if [[ $final_import_status -eq 0 ]]; then
-            log "$final_import_output"
-            return 0
-        else
-            log_error "❌ Final SageAttention verification failed."
-            log_error "Import error output:"
-            log_error "$final_import_output"
-            # Don't fail completely since previous verification passed
-            log_error "Previous verification passed, so SageAttention may still be functional."
-            return 0  # Return success to continue script
-        fi
-    }
-
-    # Environment Setup
-    setup_environment() {
-        export CUDA_HOME=/usr/local/cuda-12.6
-        export PATH=$CUDA_HOME/bin:$PATH
-        export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-        export FORCE_CUDA=1
-        export TORCH_CUDA_ARCH_LIST="8.6"
-        export MAX_JOBS=$(nproc)
-        export USE_NINJA=1
-        echo "SageAttention Environment Setup:"
-        echo "  CUDA_HOME=$CUDA_HOME"
-        echo "  NVCC Check: $(nvcc --version || echo 'NVCC not found')"
-        echo "  Python Check: $(python --version || echo 'python not found')" # Ensure this is python3.10
-    }
-
-    # Directory Management
-    create_directories() {
-        export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions"
-        local sage_cache_base="/storage/.sageattention_cache"
-        local cuda_ver_for_path=$(nvcc --version | grep release | awk '{print $6}' | cut -c2- | sed 's/\.//g' || echo "unknowncuda")
-        export SAGEATTENTION_CACHE_DIR="${sage_cache_base}/v2_cuda${cuda_ver_for_path}"
-        export WHEEL_CACHE_DIR="/storage/.wheel_cache"
-        mkdir -p "$TORCH_EXTENSIONS_DIR" "$SAGEATTENTION_CACHE_DIR" "$WHEEL_CACHE_DIR"
-        echo "Created/Ensured directories:"
-        echo "  Torch Extensions: $TORCH_EXTENSIONS_DIR"
-        echo "  SageAttention Cache: $SAGEATTENTION_CACHE_DIR"
-        echo "  Wheel Cache: $WHEEL_CACHE_DIR"
-    }
-
-    # Ccache Configuration
-    setup_ccache() {
-        if command -v ccache &> /dev/null; then
-            export CMAKE_C_COMPILER_LAUNCHER=ccache
-            export CMAKE_CXX_COMPILER_LAUNCHER=ccache
-            ccache --max-size=3G
-            ccache -z
-        fi
-    }
-
-    # Cached Wheel Handling
-    check_and_install_cached_wheel() {
-        local sage_version="2.1.1"
-        local arch=$(uname -m)
-        local python_executable="$VENV_DIR/sd_comfy-env/bin/python"
-
-        # Determine Python version tag (e.g., cp310) for wheel searching
-        local py_version_short
-        py_version_short=$("$python_executable" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-        if [[ -z "$py_version_short" ]]; then
-            log_error "Could not determine Python version for wheel search."
-            return 1 # Failure
-        fi
-        local python_version_tag="cp${py_version_short}"
-
-        # Find the most recently built wheel for this python version
-        local sage_wheel
-        sage_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sageattention-${sage_version}-${python_version_tag}-*-linux_${arch}.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
-
-        if [[ ! -f "$sage_wheel" ]]; then
-            log "No suitable cached wheel found in $WHEEL_CACHE_DIR for Python ${python_version_tag}."
-            return 1 # Failure - no wheel found
-        fi
-
-        log "Found cached wheel: $(basename "$sage_wheel"). Attempting installation..."
-        if "$python_executable" -m pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$sage_wheel"; then
-            log "Installation of cached wheel succeeded."
-            return 0 # Success - pip install worked
-        else
-            log_error "Installation of cached wheel $(basename "$sage_wheel") failed."
-            log_error "This wheel may be corrupt or incompatible. Deleting it."
-            rm -f "$sage_wheel"
-            return 1 # Failure - pip install failed
-        fi
-    }
+    # Note: All SageAttention helper functions are defined earlier in the script to avoid duplication
 
     # Installation Success Handling
     handle_successful_installation() {
@@ -1686,9 +1545,7 @@ EOF
 
     # Execute installation
     
-    process_requirements "$REPO_DIR/requirements.txt"
-    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
-
+    # Note: Requirements processing already completed in STEP 4 above
     # Note: SageAttention and Nunchaku are now installed earlier in the process
 
     # Final checks and marker file
@@ -1743,15 +1600,19 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
   
   # --- ENSURE CORRECT TORCH VERSIONS AT RUNTIME ---
-  # It's still good practice to verify torch before launching,
-  # even if we don't reinstall SageAttention here.
-  echo "Verifying PyTorch ecosystem versions before launch..."
-  fix_torch_versions # This will now just check unless versions are wrong
-  fix_torch_status=$? 
+  # Skip redundant check if we just completed a fresh installation
+  if [[ -f "/tmp/pytorch_ecosystem_fresh_install" ]]; then
+      echo "Skipping PyTorch version check - fresh installation completed successfully"
+      rm -f "/tmp/pytorch_ecosystem_fresh_install"  # Clean up marker
+  else
+      echo "Verifying PyTorch ecosystem versions before launch..."
+      fix_torch_versions # This will now just check unless versions are wrong
+      fix_torch_status=$? 
 
-  if [[ $fix_torch_status -ne 0 ]]; then
-      log_error "fix_torch_versions function failed during pre-launch check with status $fix_torch_status."
-      exit 1
+      if [[ $fix_torch_status -ne 0 ]]; then
+          log_error "fix_torch_versions function failed during pre-launch check with status $fix_torch_status."
+          exit 1
+      fi
   fi
 
 
