@@ -895,7 +895,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         
         # Setup Nunchaku cache directories
         local nunchaku_cache_base="/storage/.nunchaku_cache"
-        local nunchaku_version="0.2.0"
+        local nunchaku_version="0.3.1"
         local python_version
         python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
         local arch=$(uname -m)
