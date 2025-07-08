@@ -133,7 +133,7 @@ install_cuda_12() {
         liblapack-dev \
         libjpeg-dev \
         libpng-dev \
-        libgl1-mesa-dev \
+        libgl1- \
         cuda-cudart-12-6 \
         cuda-cudart-dev-12-6 \
         cuda-nvcc-12-6 \
@@ -627,7 +627,8 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         libatlas-base-dev libblas-dev liblapack-dev \
         libjpeg-dev libpng-dev \
         python3-dev build-essential \
-        libgl1-mesa-dev || {
+        libgl1-mesa-dev \
+        espeak-ng || {
         echo "Warning: Some packages failed to install"
     }
 
