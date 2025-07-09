@@ -38,6 +38,7 @@ python-multipart==0.0.6
 -r /storage/stable-diffusion-comfy/custom_nodes/Comfyui-Spark-TTS/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Zonos/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui_llm_party/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/comfyui-manager/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-inspyrenet-rembg/requirements.txt
 
 
