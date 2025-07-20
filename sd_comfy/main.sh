@@ -1139,8 +1139,119 @@ else:
         log_error "ComfyUI will continue without Nunchaku quantization support"
     fi
 
-    # --- STEP 4: PROCESS REQUIREMENTS ---
-    echo "=== STEP 4: Installing Python dependencies ==="
+    # --- STEP 4: INSTALL HUNYUAN3D-2.1 TEXTURE COMPONENTS ---
+    echo "=== STEP 4: Installing Hunyuan3D-2.1 Texture Components ==="
+    
+    # Function to install Hunyuan3D texture generation components
+    install_hunyuan3d_texture_components() {
+        echo "Installing Hunyuan3D-2.1 texture generation components..."
+        log "Starting Hunyuan3D-2.1 texture components installation"
+        
+        # Check if Hunyuan3D custom node is already installed
+        local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
+        if [[ ! -d "$hunyuan3d_path" ]]; then
+            log_error "Hunyuan3D-2.1 custom node not found at $hunyuan3d_path"
+            log_error "Please ensure the Hunyuan3D-2.1 custom node is installed first"
+            return 1
+        fi
+        
+        echo "Found Hunyuan3D-2.1 custom node at: $hunyuan3d_path"
+        
+        # Install custom_rasterizer component
+        local custom_rasterizer_path="$hunyuan3d_path/hy3dpaint/custom_rasterizer"
+        if [[ -d "$custom_rasterizer_path" ]]; then
+            echo "Installing custom_rasterizer component..."
+            cd "$custom_rasterizer_path" || {
+                log_error "Failed to change directory to custom_rasterizer: $custom_rasterizer_path"
+                return 1
+            }
+            
+            # Check if precompiled wheel exists
+            if [[ -d "dist" ]] && ls dist/*.whl 1> /dev/null 2>&1; then
+                echo "Found precompiled wheel in dist folder, installing..."
+                local wheel_file=$(ls dist/*.whl | head -1)
+                if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
+                    echo "✅ custom_rasterizer installed from precompiled wheel"
+                else
+                    log_error "Failed to install custom_rasterizer from precompiled wheel, attempting compilation..."
+                    if python setup.py install; then
+                        echo "✅ custom_rasterizer compiled and installed successfully"
+                    else
+                        log_error "❌ custom_rasterizer compilation failed"
+                        return 1
+                    fi
+                fi
+            else
+                echo "No precompiled wheel found, compiling custom_rasterizer..."
+                if python setup.py install; then
+                    echo "✅ custom_rasterizer compiled and installed successfully"
+                else
+                    log_error "❌ custom_rasterizer compilation failed"
+                    return 1
+                fi
+            fi
+        else
+            log_error "custom_rasterizer directory not found at: $custom_rasterizer_path"
+            return 1
+        fi
+        
+        # Install DifferentiableRenderer component
+        local differentiable_renderer_path="$hunyuan3d_path/hy3dpaint/DifferentiableRenderer"
+        if [[ -d "$differentiable_renderer_path" ]]; then
+            echo "Installing DifferentiableRenderer component..."
+            cd "$differentiable_renderer_path" || {
+                log_error "Failed to change directory to DifferentiableRenderer: $differentiable_renderer_path"
+                return 1
+            }
+            
+            # Check if precompiled wheel exists
+            if [[ -d "dist" ]] && ls dist/*.whl 1> /dev/null 2>&1; then
+                echo "Found precompiled wheel in dist folder, installing..."
+                local wheel_file=$(ls dist/*.whl | head -1)
+                if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
+                    echo "✅ DifferentiableRenderer installed from precompiled wheel"
+                else
+                    log_error "Failed to install DifferentiableRenderer from precompiled wheel, attempting compilation..."
+                    if python setup.py install; then
+                        echo "✅ DifferentiableRenderer compiled and installed successfully"
+                    else
+                        log_error "❌ DifferentiableRenderer compilation failed"
+                        return 1
+                    fi
+                fi
+            else
+                echo "No precompiled wheel found, compiling DifferentiableRenderer..."
+                if python setup.py install; then
+                    echo "✅ DifferentiableRenderer compiled and installed successfully"
+                else
+                    log_error "❌ DifferentiableRenderer compilation failed"
+                    return 1
+                fi
+            fi
+        else
+            log_error "DifferentiableRenderer directory not found at: $differentiable_renderer_path"
+            return 1
+        fi
+        
+        # Return to original directory
+        cd "$REPO_DIR" || log_error "Failed to return to original directory"
+        
+        echo "✅ Hunyuan3D-2.1 texture components installation completed successfully"
+        return 0
+    }
+    
+    # Execute Hunyuan3D texture components installation
+    install_hunyuan3d_texture_components
+    hunyuan3d_status=$?
+    if [[ $hunyuan3d_status -eq 0 ]]; then
+        echo "✅ Hunyuan3D-2.1 texture components installation completed successfully."
+    else
+        log_error "⚠️ Hunyuan3D-2.1 texture components installation had issues (Status: $hunyuan3d_status)"
+        log_error "Hunyuan3D texture generation features may not work properly"
+    fi
+
+    # --- STEP 5: PROCESS REQUIREMENTS ---
+    echo "=== STEP 5: Installing Python dependencies ==="
     # TensorFlow installation
     pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"
 
@@ -1546,7 +1657,7 @@ EOF
 
     # Execute installation
     
-    # Note: Requirements processing already completed in STEP 4 above
+    # Note: Requirements processing already completed in STEP 5 above
     # Note: SageAttention and Nunchaku are now installed earlier in the process
 
     # Final checks and marker file
@@ -1567,7 +1678,7 @@ fi
 log "Finished Preparing Environment for Stable Diffusion Comfy"
 
 #######################################
-# STEP 5: MODEL DOWNLOAD
+# STEP 6: MODEL DOWNLOAD
 #######################################
 if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
   echo "### Downloading Model for Stable Diffusion Comfy ###"
@@ -1579,7 +1690,7 @@ else
 fi
 
 #######################################
-# STEP 6: START STABLE DIFFUSION
+# STEP 7: START STABLE DIFFUSION
 #######################################
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo "### Starting Stable Diffusion Comfy ###"
@@ -1638,7 +1749,7 @@ if [[ -z "$INSTALL_ONLY" ]]; then
 fi
 
 #######################################
-# STEP 7: FINAL NOTIFICATIONS
+# STEP 8: FINAL NOTIFICATIONS
 #######################################
 send_to_discord "Stable Diffusion Comfy Started"
 
