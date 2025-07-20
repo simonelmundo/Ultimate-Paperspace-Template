@@ -36,4 +36,4 @@ python-multipart==0.0.6
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-kjnodes/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-videohelpersuite/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-inspire-pack/requirements.txt
-
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Hunyuan3d-2-1/requirements.txt
