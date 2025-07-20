@@ -14,6 +14,8 @@ psutil==5.9.5
 uvicorn==0.23.2
 pynvml==11.5.0
 python-multipart==0.0.6
+flet==0.23.2
+
 
 # Requirements files to include
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-manager/requirements.txt
