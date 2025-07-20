@@ -1157,6 +1157,12 @@ else:
         
         echo "Found Hunyuan3D-2.1 custom node at: $hunyuan3d_path"
         
+        # Install required dependencies for compilation
+        echo "Installing required dependencies for Hunyuan3D compilation..."
+        set +e
+        pip install --no-cache-dir --disable-pip-version-check pybind11 ninja
+        set -e
+        
         # Install custom_rasterizer component
         local custom_rasterizer_path="$hunyuan3d_path/hy3dpaint/custom_rasterizer"
         if [[ -d "$custom_rasterizer_path" ]]; then
@@ -1168,16 +1174,47 @@ else:
             
             # Check if precompiled wheel exists
             if [[ -d "dist" ]] && ls dist/*.whl 1> /dev/null 2>&1; then
-                echo "Found precompiled wheel in dist folder, installing..."
+                echo "Found precompiled wheel in dist folder, checking compatibility..."
                 local wheel_file=$(ls dist/*.whl | head -1)
-                # Temporarily disable set -e for pip install to prevent script exit on failure
-                set +e
-                if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
-                    set -e
-                    echo "✅ custom_rasterizer installed from precompiled wheel"
+                local wheel_name=$(basename "$wheel_file")
+                
+                # Check Python version compatibility
+                local current_python_version
+                current_python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+                
+                # Extract Python version from wheel name (e.g., cp311 from cp311-cp311-linux_x86_64.whl)
+                local wheel_python_version
+                if [[ "$wheel_name" =~ cp([0-9]{2}) ]]; then
+                    wheel_python_version="${BASH_REMATCH[1]}"
                 else
-                    set -e
-                    log_error "Failed to install custom_rasterizer from precompiled wheel, attempting compilation..."
+                    wheel_python_version="unknown"
+                fi
+                
+                echo "Current Python version: $current_python_version, Wheel Python version: $wheel_python_version"
+                
+                if [[ "$wheel_python_version" == "$current_python_version" ]]; then
+                    echo "Wheel Python version matches, attempting installation..."
+                    # Temporarily disable set -e for pip install to prevent script exit on failure
+                    set +e
+                    if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
+                        set -e
+                        echo "✅ custom_rasterizer installed from precompiled wheel"
+                    else
+                        set -e
+                        log_error "Failed to install custom_rasterizer from precompiled wheel, attempting compilation..."
+                        set +e
+                        if python setup.py install; then
+                            set -e
+                            echo "✅ custom_rasterizer compiled and installed successfully"
+                        else
+                            set -e
+                            log_error "❌ custom_rasterizer compilation failed"
+                            return 1
+                        fi
+                    fi
+                else
+                    log_error "Wheel Python version mismatch: current=$current_python_version, wheel=$wheel_python_version"
+                    log_error "Skipping precompiled wheel and attempting compilation..."
                     set +e
                     if python setup.py install; then
                         set -e
@@ -1213,16 +1250,47 @@ else:
             
             # Check if precompiled wheel exists
             if [[ -d "dist" ]] && ls dist/*.whl 1> /dev/null 2>&1; then
-                echo "Found precompiled wheel in dist folder, installing..."
+                echo "Found precompiled wheel in dist folder, checking compatibility..."
                 local wheel_file=$(ls dist/*.whl | head -1)
-                # Temporarily disable set -e for pip install to prevent script exit on failure
-                set +e
-                if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
-                    set -e
-                    echo "✅ DifferentiableRenderer installed from precompiled wheel"
+                local wheel_name=$(basename "$wheel_file")
+                
+                # Check Python version compatibility
+                local current_python_version
+                current_python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+                
+                # Extract Python version from wheel name (e.g., cp311 from cp311-cp311-linux_x86_64.whl)
+                local wheel_python_version
+                if [[ "$wheel_name" =~ cp([0-9]{2}) ]]; then
+                    wheel_python_version="${BASH_REMATCH[1]}"
                 else
-                    set -e
-                    log_error "Failed to install DifferentiableRenderer from precompiled wheel, attempting compilation..."
+                    wheel_python_version="unknown"
+                fi
+                
+                echo "Current Python version: $current_python_version, Wheel Python version: $wheel_python_version"
+                
+                if [[ "$wheel_python_version" == "$current_python_version" ]]; then
+                    echo "Wheel Python version matches, attempting installation..."
+                    # Temporarily disable set -e for pip install to prevent script exit on failure
+                    set +e
+                    if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
+                        set -e
+                        echo "✅ DifferentiableRenderer installed from precompiled wheel"
+                    else
+                        set -e
+                        log_error "Failed to install DifferentiableRenderer from precompiled wheel, attempting compilation..."
+                        set +e
+                        if python setup.py install; then
+                            set -e
+                            echo "✅ DifferentiableRenderer compiled and installed successfully"
+                        else
+                            set -e
+                            log_error "❌ DifferentiableRenderer compilation failed"
+                            return 1
+                        fi
+                    fi
+                else
+                    log_error "Wheel Python version mismatch: current=$current_python_version, wheel=$wheel_python_version"
+                    log_error "Skipping precompiled wheel and attempting compilation..."
                     set +e
                     if python setup.py install; then
                         set -e
