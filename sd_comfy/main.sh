@@ -1170,13 +1170,20 @@ else:
             if [[ -d "dist" ]] && ls dist/*.whl 1> /dev/null 2>&1; then
                 echo "Found precompiled wheel in dist folder, installing..."
                 local wheel_file=$(ls dist/*.whl | head -1)
+                # Temporarily disable set -e for pip install to prevent script exit on failure
+                set +e
                 if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
+                    set -e
                     echo "✅ custom_rasterizer installed from precompiled wheel"
                 else
+                    set -e
                     log_error "Failed to install custom_rasterizer from precompiled wheel, attempting compilation..."
+                    set +e
                     if python setup.py install; then
+                        set -e
                         echo "✅ custom_rasterizer compiled and installed successfully"
                     else
+                        set -e
                         log_error "❌ custom_rasterizer compilation failed"
                         return 1
                     fi
@@ -1208,13 +1215,20 @@ else:
             if [[ -d "dist" ]] && ls dist/*.whl 1> /dev/null 2>&1; then
                 echo "Found precompiled wheel in dist folder, installing..."
                 local wheel_file=$(ls dist/*.whl | head -1)
+                # Temporarily disable set -e for pip install to prevent script exit on failure
+                set +e
                 if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
+                    set -e
                     echo "✅ DifferentiableRenderer installed from precompiled wheel"
                 else
+                    set -e
                     log_error "Failed to install DifferentiableRenderer from precompiled wheel, attempting compilation..."
+                    set +e
                     if python setup.py install; then
+                        set -e
                         echo "✅ DifferentiableRenderer compiled and installed successfully"
                     else
+                        set -e
                         log_error "❌ DifferentiableRenderer compilation failed"
                         return 1
                     fi
