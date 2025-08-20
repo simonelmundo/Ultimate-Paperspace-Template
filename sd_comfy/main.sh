@@ -43,6 +43,8 @@ declare -a CUSTOM_NODE_FAILURES=()
 declare -a CUSTOM_NODE_DETAILS=()
 declare -a CUSTOM_NODE_FAILED_DETAILS=()
 declare -a DETAILED_LOGS=()
+declare -a PIP_ERRORS=()
+declare -a PIP_SUCCESSES=()
 
 log() { echo "$1"; }
 
@@ -52,7 +54,21 @@ log_detail() {
     DETAILED_LOGS+=("$message")
 }
 
-log_error() { 
+# Capture pip installation results for final summary
+log_pip_success() {
+    local package="$1"
+    local method="$2"
+    PIP_SUCCESSES+=("✅ $package ($method)")
+}
+
+log_pip_error() {
+    local package="$1"
+    local error="$2"
+    local method="$3"
+    PIP_ERRORS+=("❌ $package ($method): $error")
+}
+
+log_error() {
     echo "ERROR: $1" >&2
     INSTALLATION_FAILURES+=("$1")
 }
@@ -118,11 +134,14 @@ pip_install() {
         install_flags="$flags --force-reinstall"
     fi
     
-    if pip install $install_flags "$package" 2>/dev/null; then
+        if pip install $install_flags "$package" 2>&1 | tee /tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log; then
         log "✅ Successfully installed: $package"
-            return 0
-        else
+        log_pip_success "$package" "pip_install function"
+        return 0
+    else
+        local pip_error=$(tail -n 5 /tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log 2>/dev/null | tr '\n' ' ')
         log_error "❌ Failed to install: $package"
+        log_pip_error "$package" "$pip_error" "pip_install function"
         return 1
     fi
 }
@@ -368,8 +387,8 @@ update_comfyui_manager() {
                 log "✅ ComfyUI Manager dependencies installed"
             else
                 log "⚠️ ComfyUI Manager dependencies had issues (continuing)"
-            fi
-        else
+        fi
+    else
             log "⏭️ ComfyUI Manager has no requirements.txt"
         fi
     ) || log_error "ComfyUI Manager update failed"
@@ -421,21 +440,33 @@ update_custom_nodes() {
                     requirements_list+=("$package")
                 done < requirements.txt
                 
-                # Strategy 1: Normal install (silent)
+                # Strategy 1: Normal install (with error capture)
+                local pip_output_file="/tmp/pip_install_${node_name}.log"
                 if timeout 300 pip install --no-cache-dir --disable-pip-version-check \
-                    -r requirements.txt &>/dev/null; then
+                    -r requirements.txt 2>&1 | tee "$pip_output_file"; then
                     node_details+=("$node_name: ✅ (${#requirements_list[@]} packages)")
+                    log_pip_success "$node_name requirements" "batch install"
                     ((successful_nodes++))
-            return 0
+                    return 0
+                else
+                    local pip_error=$(tail -n 10 "$pip_output_file" 2>/dev/null | tr '\n' ' ')
+                    log_detail "❌ Batch install failed for $node_name: $pip_error"
                 fi
                 
-                # Strategy 2: Individual package install (silent)
+                # Strategy 2: Individual package install (with error capture)
                 local packages_installed=0
+                local failed_packages=()
                 while IFS= read -r package; do
                     [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+                    local package_output_file="/tmp/pip_install_${node_name}_${package//[^a-zA-Z0-9]/_}.log"
                     if timeout 120 pip install --no-cache-dir --disable-pip-version-check \
-                        "$package" &>/dev/null; then
+                        "$package" 2>&1 | tee "$package_output_file"; then
                         ((packages_installed++))
+                        log_pip_success "$package" "individual install for $node_name"
+                    else
+                        local package_error=$(tail -n 5 "$package_output_file" 2>/dev/null | tr '\n' ' ')
+                        failed_packages+=("$package: $package_error")
+                        log_pip_error "$package" "$package_error" "individual install for $node_name"
                     fi
                 done < requirements.txt
                 
@@ -449,19 +480,24 @@ update_custom_nodes() {
             return 0
         fi
 
-                # Strategy 3: Force reinstall (silent)
+                # Strategy 3: Force reinstall (with error capture)
+                local force_pip_output_file="/tmp/pip_force_${node_name}.log"
                 if timeout 300 pip install --no-cache-dir --disable-pip-version-check --force-reinstall \
-                    -r requirements.txt &>/dev/null; then
+                    -r requirements.txt 2>&1 | tee "$force_pip_output_file"; then
                     node_details+=("$node_name: ✅ (${#requirements_list[@]} packages, forced)")
+                    log_pip_success "$node_name requirements" "force reinstall"
                     ((successful_nodes++))
-                 return 0
+                    return 0
+                else
+                    local force_pip_error=$(tail -n 10 "$force_pip_output_file" 2>/dev/null | tr '\n' ' ')
+                    log_detail "❌ Force reinstall failed for $node_name: $force_pip_error"
                 fi
                 
                 # All strategies failed
                 failed_details+=("$node_name: ❌ (${#requirements_list[@]} packages failed)")
                 log_node_failure "$node_name" "All pip installation strategies failed"
                 ((failed_nodes++))
-                return 1
+            return 1
                 
             else
                 node_details+=("$node_name: ✅ (no requirements)")
@@ -701,68 +737,86 @@ install_component() {
     ) || return 1
 }
 
-# Nunchaku installer (simplified)
-    install_nunchaku() {
-    # Check if compatible version is installed
-    if python -c "import nunchaku; print(nunchaku.__version__)" 2>/dev/null | grep -E "^0\.[3-9]\.|^[1-9]" >/dev/null; then
-        log_success "Nunchaku (compatible version already installed)"
-            return 0
-        fi
-        
-    # Check PyTorch compatibility (requires >= 2.5)
-    local torch_ver=$(python -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))" 2>/dev/null || echo "0.0")
-    python -c "
+# Nunchaku installer (working version)
+install_nunchaku() {
+    log "Installing Nunchaku for enhanced machine learning capabilities..."
+    log_detail "Starting Nunchaku installation process"
+    
+    # Setup Nunchaku cache directories
+    local nunchaku_cache_base="/storage/.nunchaku_cache"
+    local nunchaku_version="0.3.1"
+    local python_version
+    python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+    local arch=$(uname -m)
+
+    # Dynamically determine the torch version tag for the wheel, e.g., "2.7"
+    local torch_version_major_minor
+    torch_version_major_minor=$(python -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))" 2>/dev/null || echo "unknown")
+    
+    # Get the full torch version for cache markers, e.g., "2.7.1"
+    local torch_version
+    torch_version=$(python -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || echo "unknown")
+    
+    # Create cache directory structure
+    export NUNCHAKU_CACHE_DIR="${nunchaku_cache_base}/v${nunchaku_version}_cp${python_version}_torch${torch_version}_${arch}"
+    mkdir -p "$NUNCHAKU_CACHE_DIR" "$WHEEL_CACHE_DIR"
+    
+    log_detail "Nunchaku cache directory: $NUNCHAKU_CACHE_DIR"
+    log_detail "Wheel cache directory: $WHEEL_CACHE_DIR"
+    
+    # Check if Nunchaku is already installed and working
+    if python -c "import nunchaku; print(f'Nunchaku {nunchaku.__version__} already installed and working')" 2>/dev/null; then
+        log "✅ Nunchaku already installed and working, skipping installation"
+        log_detail "✅ Nunchaku already installed and working, skipping installation"
+        return 0
+    fi
+    
+    # Check PyTorch version to ensure compatibility
+    log_detail "Checking PyTorch compatibility for Nunchaku..."
+    local torch_check_output
+    torch_check_output=$(python -c "
 import sys
-major, minor = map(int, '$torch_ver'.split('.'))
-sys.exit(0 if major > 2 or (major == 2 and minor >= 5) else 1)
-" || {
-        log_error "PyTorch version $torch_ver < 2.5, skipping Nunchaku"
-                return 1
-            }
-            
-    # Uninstall old version and install compatible version
+try:
+    import torch
+    v = torch.__version__.split('+')[0]
+    major, minor = map(int, v.split('.')[:2])
+    if major > 2 or (major == 2 and minor >= 5):
+        print('compatible')
+        sys.exit(0)
+    else:
+        print(f'incompatible: {major}.{minor} < 2.5')
+        sys.exit(1)
+except Exception as e:
+    print(f'error: {e}')
+    sys.exit(1)
+" 2>/dev/null)
+    
+    if [[ "$torch_check_output" != "compatible" ]]; then
+        log_error "PyTorch version incompatible for Nunchaku: $torch_check_output"
+        log_detail "❌ PyTorch version incompatible for Nunchaku: $torch_check_output"
+        return 1
+    fi
+    
+    log_detail "✅ PyTorch compatibility check passed"
+    
+    # Uninstall any existing nunchaku
     pip uninstall -y nunchaku 2>/dev/null || true
     
-        # Try multiple strategies for nunchaku installation
-    log_detail "🔧 Attempting nunchaku installation with multiple strategies..."
-    
-    # Strategy 1: Try exact version
-    if pip_install "nunchaku==0.3.2" "" false; then
-        log_success "Nunchaku (version 0.3.2 installed)"
-        log_detail "✅ Nunchaku (version 0.3.2 installed)"
+    # Try to install the specific version
+    log_detail "Installing nunchaku version $nunchaku_version..."
+    if pip install "nunchaku==$nunchaku_version" 2>&1 | tee /tmp/nunchaku_install.log; then
+        log_success "Nunchaku version $nunchaku_version installed successfully"
+        log_detail "✅ Nunchaku version $nunchaku_version installed successfully"
+        log_pip_success "nunchaku" "version $nunchaku_version"
         return 0
+    else
+        local install_error=$(tail -n 5 /tmp/nunchaku_install.log 2>/dev/null | tr '\n' ' ')
+        log_error "Failed to install nunchaku version $nunchaku_version"
+        log_detail "❌ Failed to install nunchaku version $nunchaku_version"
+        log_pip_error "nunchaku" "$install_error" "version $nunchaku_version"
+        return 1
     fi
-    
-    # Strategy 2: Try compatible range
-    if pip_install "nunchaku>=0.3.1,<0.4.0" "" false; then
-        log_success "Nunchaku (compatible version installed)"
-        log_detail "✅ Nunchaku (compatible version installed)"
-        return 0
-    fi
-    
-    # Strategy 3: Try latest version
-    if pip_install "nunchaku" "" false; then
-        log_success "Nunchaku (latest version installed)"
-        log_detail "✅ Nunchaku (latest version installed)"
-        return 0
-    fi
-    
-    # Strategy 4: Try from source
-    log_detail "⚠️ All pip strategies failed, trying source installation..."
-    if git clone https://github.com/thu-ml/nunchaku.git /tmp/nunchaku_source 2>/dev/null; then
-        cd /tmp/nunchaku_source
-        if pip install -e . 2>/dev/null; then
-            log_success "Nunchaku (installed from source)"
-            log_detail "✅ Nunchaku (installed from source)"
-            cd "$REPO_DIR"
-            return 0
-        fi
-        cd "$REPO_DIR"
-    fi
-    
-    log_error "All nunchaku installation strategies failed"
-                return 1
-            }
+}
             
 # Hunyuan3D texture components (simplified)
     install_hunyuan3d_texture_components() {
@@ -862,8 +916,8 @@ main() {
             log "✅ ComfyUI repository updated successfully"
         else
             log "⚠️ ComfyUI repository update had issues (continuing)"
-        fi
-    else
+                    fi
+                else
         log "⚠️ ComfyUI repository not found, skipping update"
     fi
     
@@ -1057,6 +1111,25 @@ generate_installation_summary() {
         echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         for log_entry in "${DETAILED_LOGS[@]}"; do
             echo "   $log_entry"
+        done
+    fi
+    
+    # Pip installation results
+    if [[ ${#PIP_SUCCESSES[@]} -gt 0 ]]; then
+        echo ""
+        echo "✅ PIP INSTALLATION SUCCESSES (${#PIP_SUCCESSES[@]} total):"
+        echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        for pip_success in "${PIP_SUCCESSES[@]}"; do
+            echo "   $pip_success"
+        done
+    fi
+    
+    if [[ ${#PIP_ERRORS[@]} -gt 0 ]]; then
+        echo ""
+        echo "❌ PIP INSTALLATION ERRORS (${#PIP_ERRORS[@]} total):"
+        echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        for pip_error in "${PIP_ERRORS[@]}"; do
+            echo "   $pip_error"
         done
     fi
     
