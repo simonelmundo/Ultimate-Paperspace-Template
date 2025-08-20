@@ -40,6 +40,8 @@ declare -a INSTALLATION_SUCCESSES=()
 declare -a INSTALLATION_FAILURES=()
 declare -a DEPENDENCY_CONFLICTS=()
 declare -a CUSTOM_NODE_FAILURES=()
+declare -a CUSTOM_NODE_DETAILS=()
+declare -a CUSTOM_NODE_FAILED_DETAILS=()
 
 log() { echo "$1"; }
 log_error() { 
@@ -97,7 +99,7 @@ pip_install() {
     # Check if package is already installed (unless forcing)
     if [[ "$force" != "true" ]] && python -c "import $pkg_name" 2>/dev/null; then
         log "⏭️ Already installed: $pkg_name (skipping)"
-        return 0
+             return 0
     fi
     
     log "Installing: $package"
@@ -110,8 +112,8 @@ pip_install() {
     
     if pip install $install_flags "$package" 2>/dev/null; then
         log "✅ Successfully installed: $package"
-        return 0
-    else
+            return 0
+        else
         log_error "❌ Failed to install: $package"
         return 1
     fi
@@ -329,75 +331,145 @@ EOF
     fi
 }
 
+# Update ComfyUI Manager specifically (it's a critical component)
+update_comfyui_manager() {
+    local manager_dir="$REPO_DIR/custom_nodes/comfyui-manager"
+    
+    if [[ ! -d "$manager_dir" ]]; then
+        log "⚠️ ComfyUI Manager not found, skipping update"
+        return 0
+    fi
+    
+    log "🔧 Updating ComfyUI Manager..."
+    
+    (
+        cd "$manager_dir" || return 1
+        
+        # Git update
+        if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
+            log "✅ ComfyUI Manager git update successful"
+        else
+            log "⚠️ ComfyUI Manager git update had issues"
+        fi
+        
+        # Install requirements if they exist
+        if [[ -f requirements.txt ]]; then
+            log "📦 Installing ComfyUI Manager dependencies..."
+            if timeout 300 pip install --no-cache-dir --disable-pip-version-check \
+                -r requirements.txt &>/dev/null; then
+                log "✅ ComfyUI Manager dependencies installed"
+            else
+                log "⚠️ ComfyUI Manager dependencies had issues (continuing)"
+            fi
+        else
+            log "⏭️ ComfyUI Manager has no requirements.txt"
+        fi
+    ) || log_error "ComfyUI Manager update failed"
+}
+
 # ROBUST custom nodes update (handles dependency conflicts)
 update_custom_nodes() {
     local nodes_dir="$REPO_DIR/custom_nodes"
     [[ ! -d "$nodes_dir" ]] && return 0
     
-    log "Updating custom nodes with robust dependency handling..."
+    log "🔄 Updating custom nodes with robust dependency handling..."
+    
+    # Arrays to collect detailed information for final summary
+    local total_nodes=0
+    local successful_nodes=0
+    local failed_nodes=0
+    local node_details=()
+    local failed_details=()
+    
     for git_dir in "$nodes_dir"/*/.git; do
         [[ ! -d "$git_dir" ]] && continue
         
         local node_dir="${git_dir%/.git}"
         local node_name=$(basename "$node_dir")
+        ((total_nodes++))
         
-        log "Processing: $node_name"
+        # Show minimal progress (just the node name)
+        log "🔧 $node_name"
+        
         (
-            cd "$node_dir" && 
-            git fetch --all &>/dev/null &&
-            git reset --hard origin/HEAD &>/dev/null &&
+            cd "$node_dir" || return 1
             
-            # Install requirements smartly (avoid unnecessary reinstalls)
+            # Git update (silent)
+            git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null
+            
+            # Install requirements.txt if it exists
             if [[ -f requirements.txt ]]; then
-                log "Installing requirements for $node_name..."
-                
                 # Check if requirements.txt is not empty
                 if [[ ! -s requirements.txt ]]; then
-                    log_success "Custom node: $node_name (empty requirements)"
-                    continue
+                    node_details+=("$node_name: ✅ (empty requirements)")
+                    ((successful_nodes++))
+                    return 0
                 fi
                 
-                # Strategy 1: Normal install
-                if timeout 60 pip install --no-cache-dir --disable-pip-version-check \
-                    -r requirements.txt 2>/dev/null; then
-                    log_success "Custom node: $node_name"
+                # Collect requirements for summary
+                local requirements_list=()
+                while IFS= read -r package; do
+                    [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+                    requirements_list+=("$package")
+                done < requirements.txt
                 
-                # Strategy 2: Individual package install (often works when batch fails)
-                elif [[ $(wc -l < requirements.txt) -le 5 ]]; then
-                    log "⚠️ Batch install failed for $node_name, trying individual packages..."
-                    local individual_success=true
-                    while IFS= read -r package; do
-                        # Skip empty lines and comments
-                        [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
-                        
-                        if ! timeout 30 pip install --no-cache-dir --disable-pip-version-check \
-                            "$package" 2>/dev/null; then
-                            individual_success=false
-                            break
-                        fi
-                    done < requirements.txt
-                    
-                    if [[ "$individual_success" == "true" ]]; then
-                        log_success "Custom node: $node_name (individual packages)"
-                    else
-                        log_node_failure "$node_name" "Individual package installation failed"
-                    fi
-                
-                # Strategy 3: Force reinstall (last resort)
-                else
-                    log "⚠️ Normal install failed for $node_name, forcing reinstall..."
-                    if timeout 120 pip install --no-cache-dir --disable-pip-version-check --force-reinstall \
-                        -r requirements.txt 2>/dev/null; then
-                        log_success "Custom node: $node_name (forced)"
-                    else
-                        log_node_failure "$node_name" "Requirements installation failed (may need manual intervention)"
-                    fi
+                # Strategy 1: Normal install (silent)
+                if timeout 300 pip install --no-cache-dir --disable-pip-version-check \
+                    -r requirements.txt &>/dev/null; then
+                    node_details+=("$node_name: ✅ (${#requirements_list[@]} packages)")
+                    ((successful_nodes++))
+            return 0
                 fi
+                
+                # Strategy 2: Individual package install (silent)
+                local packages_installed=0
+                while IFS= read -r package; do
+                    [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+                    if timeout 120 pip install --no-cache-dir --disable-pip-version-check \
+                        "$package" &>/dev/null; then
+                        ((packages_installed++))
+                    fi
+                done < requirements.txt
+                
+                if [[ $packages_installed -eq ${#requirements_list[@]} ]]; then
+                    node_details+=("$node_name: ✅ (${#requirements_list[@]} packages, individual install)")
+                    ((successful_nodes++))
+                    return 0
+                elif [[ $packages_installed -gt 0 ]]; then
+                    node_details+=("$node_name: ⚠️ (${packages_installed}/${#requirements_list[@]} packages)")
+                    ((successful_nodes++))
+            return 0
+        fi
+
+                # Strategy 3: Force reinstall (silent)
+                if timeout 300 pip install --no-cache-dir --disable-pip-version-check --force-reinstall \
+                    -r requirements.txt &>/dev/null; then
+                    node_details+=("$node_name: ✅ (${#requirements_list[@]} packages, forced)")
+                    ((successful_nodes++))
+                 return 0
+                fi
+                
+                # All strategies failed
+                failed_details+=("$node_name: ❌ (${#requirements_list[@]} packages failed)")
+                log_node_failure "$node_name" "All pip installation strategies failed"
+                ((failed_nodes++))
+                return 1
+                
             else
-                log_success "Custom node: $node_name (no requirements)"
+                node_details+=("$node_name: ✅ (no requirements)")
+                ((successful_nodes++))
+            return 0
             fi
-        ) || log_node_failure "$node_name" "Git update failed"
+        ) || {
+            failed_details+=("$node_name: ❌ (git/processing failed)")
+            log_node_failure "$node_name" "Git update or processing failed"
+            ((failed_nodes++))
+        }
     done
+    
+    # Store detailed results for final summary
+    CUSTOM_NODE_DETAILS=("${node_details[@]}")
+    CUSTOM_NODE_FAILED_DETAILS=("${failed_details[@]}")
     
     log "✅ Custom nodes update completed"
 }
@@ -478,53 +550,9 @@ resolve_dependencies() {
         log_error "flet installation failed"
     fi
     
-    # Install missing custom node dependencies with wheel caching
-    log "🔧 Installing missing custom node dependencies with wheel caching..."
-    
-    local missing_deps=(
-        "blend_modes" 
-        "deepdiff" 
-        "rembg" 
-        "webcolors" 
-        "ultralytics" 
-        "inflect" 
-        "soxr" 
-        "hydra-core" 
-        "groundingdino-py" 
-        "imageio-ffmpeg" 
-        "oss2"
-        "lark"
-        "opencv-python"
-        "scikit-image"
-        "segment-anything-2"
-        "segment-anything"
-        "dill"
-        "kanjize"
-        "einx"
-        "opencv-contrib-python"
-        "onnxruntime-gpu"
-    )
-    
-    for dep in "${missing_deps[@]}"; do
-        # Special handling for OpenCV to ensure contrib version
-        if [[ "$dep" == "opencv-python" ]]; then
-            # Uninstall basic opencv first
-            pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
-            # Install contrib version
-            if install_with_cache "opencv-contrib-python"; then
-                log_success "Custom node dependency: opencv-contrib-python (with wheel caching)"
-            else
-                log_error "Failed to install: opencv-contrib-python (falling back to basic)"
-                install_with_cache "opencv-python" || log_error "Basic opencv also failed"
-            fi
-        else
-            if install_with_cache "$dep"; then
-                log_success "Custom node dependency: $dep (with wheel caching)"
-            else
-                log_error "Failed to install: $dep (custom node may not work fully)"
-            fi
-        fi
-    done
+    # Custom node dependencies are now handled by update_custom_nodes() function
+    # which installs requirements.txt files directly from each custom node
+    log "✅ Custom node dependencies will be installed from their individual requirements.txt files"
     
     log "✅ Core dependencies installation completed"
     
@@ -594,8 +622,8 @@ install_component() {
         log "🔄 Trying cached SageAttention wheel: $cached_wheel"
         if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel" 2>/dev/null; then
             log_success "SageAttention (from cached wheel)"
-            return 0
-        else
+                return 0
+            else
             log "⚠️ Cached wheel failed, removing and trying source build..."
             rm -f "$cached_wheel"
         fi
@@ -638,22 +666,49 @@ major, minor = map(int, '$torch_ver'.split('.'))
 sys.exit(0 if major > 2 or (major == 2 and minor >= 5) else 1)
 " || {
         log_error "PyTorch version $torch_ver < 2.5, skipping Nunchaku"
-            return 1
-    }
-    
+                return 1
+            }
+            
     # Uninstall old version and install compatible version
     pip uninstall -y nunchaku 2>/dev/null || true
     
-        # Try to install compatible version (0.3.2 is mentioned as supported)
+        # Try multiple strategies for nunchaku installation
+    log "🔧 Attempting nunchaku installation with multiple strategies..."
+    
+    # Strategy 1: Try exact version
     if pip_install "nunchaku==0.3.2" "" false; then
-        log_success "Nunchaku (updated to compatible version 0.3.2)"
+        log_success "Nunchaku (version 0.3.2 installed)"
         return 0
-    else
-        log_error "Failed to install compatible nunchaku version 0.3.2"
-        return 1
     fi
-}
-
+    
+    # Strategy 2: Try compatible range
+    if pip_install "nunchaku>=0.3.1,<0.4.0" "" false; then
+        log_success "Nunchaku (compatible version installed)"
+        return 0
+    fi
+    
+    # Strategy 3: Try latest version
+    if pip_install "nunchaku" "" false; then
+        log_success "Nunchaku (latest version installed)"
+        return 0
+    fi
+    
+    # Strategy 4: Try from source
+    log "⚠️ All pip strategies failed, trying source installation..."
+    if git clone https://github.com/thu-ml/nunchaku.git /tmp/nunchaku_source 2>/dev/null; then
+        cd /tmp/nunchaku_source
+        if pip install -e . 2>/dev/null; then
+            log_success "Nunchaku (installed from source)"
+            cd "$REPO_DIR"
+            return 0
+        fi
+        cd "$REPO_DIR"
+    fi
+    
+    log_error "All nunchaku installation strategies failed"
+                return 1
+            }
+            
 # Hunyuan3D texture components (simplified)
     install_hunyuan3d_texture_components() {
         local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
@@ -736,13 +791,25 @@ main() {
     export UPDATE_REPO=$SD_COMFY_UPDATE_REPO
     export UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT
     
-    # Handle git repository state
+    # Update main ComfyUI repository
+    log "🔄 Updating main ComfyUI repository..."
     if [[ -d ".git" ]]; then
+        # Reset any local changes to requirements.txt
         [[ -n "$(git status --porcelain requirements.txt 2>/dev/null)" ]] && git checkout -- requirements.txt
         
+        # Ensure we're on a proper branch
         if ! git symbolic-ref -q HEAD >/dev/null; then
             git checkout main || git checkout master || git checkout -b main
         fi
+        
+        # Update to latest
+        if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
+            log "✅ ComfyUI repository updated successfully"
+        else
+            log "⚠️ ComfyUI repository update had issues (continuing)"
+        fi
+    else
+        log "⚠️ ComfyUI repository not found, skipping update"
     fi
     
     # Create directory symlinks (from original)
@@ -776,10 +843,16 @@ main() {
     install_component "hunyuan3d_texture_components"
     
     # Dependencies and updates
-    log "🔄 Step 1: Updating custom nodes..."
+    log "🔄 Step 1: Installing core nunchaku package (required by nunchaku nodes)..."
+    install_component "nunchaku" || log_error "Nunchaku installation had issues (continuing)"
+    
+    log "🔄 Step 2: Updating ComfyUI Manager (if present)..."
+    update_comfyui_manager || log_error "ComfyUI Manager update had issues (continuing)"
+    
+    log "🔄 Step 3: Updating custom nodes..."
     update_custom_nodes || log_error "Custom nodes update had issues (continuing)"
     
-    log "🔄 Step 2: Resolving core dependencies..."
+    log "🔄 Step 4: Resolving core dependencies..."
     resolve_dependencies || log_error "Some dependencies failed (continuing)"
     
     # Process requirements files
@@ -902,6 +975,25 @@ generate_installation_summary() {
         for node_issue in "${CUSTOM_NODE_FAILURES[@]}"; do
             echo "   🔧 $node_issue"
         done
+    fi
+    
+    # Detailed Custom Node Results
+    if [[ ${#CUSTOM_NODE_DETAILS[@]} -gt 0 ]]; then
+        echo ""
+        echo "📋 DETAILED CUSTOM NODE RESULTS:"
+        echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        for node_detail in "${CUSTOM_NODE_DETAILS[@]}"; do
+            echo "   $node_detail"
+        done
+        
+        if [[ ${#CUSTOM_NODE_FAILED_DETAILS[@]} -gt 0 ]]; then
+            echo ""
+            echo "❌ FAILED CUSTOM NODES:"
+            echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            for failed_detail in "${CUSTOM_NODE_FAILED_DETAILS[@]}"; do
+                echo "   $failed_detail"
+            done
+        fi
     fi
     
     # System Status Check
