@@ -35,6 +35,12 @@ lark
 opencv-python
 scikit-image
 segment-anything-2
+segment-anything
+dill
+kanjize
+einx
+opencv-contrib-python
+onnxruntime-gpu
 
 # Core ComfyUI requirements (custom nodes handled dynamically by update_custom_nodes function)
 -r /storage/stable-diffusion-comfy/requirements.txt
