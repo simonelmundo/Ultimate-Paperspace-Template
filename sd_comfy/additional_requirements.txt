@@ -1,3 +1,6 @@
+# System dependencies (installed via apt):
+# - espeak-ng (text-to-speech engine)
+
 # Direct package requirements
 einops
 scipy
@@ -16,26 +19,23 @@ pynvml==11.5.0
 python-multipart==0.0.6
 flet==0.23.2
 
+# Custom node dependencies (missing packages that cause import failures)
+blend_modes
+deepdiff
+rembg
+webcolors
+ultralytics
+inflect
+soxr
+hydra-core
+groundingdino-py
+imageio-ffmpeg
+oss2
+lark
+opencv-python
+scikit-image
+segment-anything-2
 
-# Requirements files to include
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui-manager/requirements.txt
+# Core ComfyUI requirements (custom nodes handled dynamically by update_custom_nodes function)
 -r /storage/stable-diffusion-comfy/requirements.txt
--r /storage/stable-diffusion-comfy/tests-unit/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Crystools/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui-impact-pack/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui-impact-subpack/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-GGUF/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-LTXVideo/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui_layerstyle/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/was-node-suite-comfyui/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui-easy-use/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui_ultimatesdupscale/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-FluxTrainer/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-SUPIR/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/Comfyui-Spark-TTS/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Zonos/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui-inspyrenet-rembg/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui-kjnodes/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui-videohelpersuite/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/comfyui-inspire-pack/requirements.txt
--r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Hunyuan3d-2-1/requirements.txt
+
