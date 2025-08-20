@@ -42,8 +42,16 @@ declare -a DEPENDENCY_CONFLICTS=()
 declare -a CUSTOM_NODE_FAILURES=()
 declare -a CUSTOM_NODE_DETAILS=()
 declare -a CUSTOM_NODE_FAILED_DETAILS=()
+declare -a DETAILED_LOGS=()
 
 log() { echo "$1"; }
+
+# Collect detailed logs for final summary (silent during execution)
+log_detail() {
+    local message="$1"
+    DETAILED_LOGS+=("$message")
+}
+
 log_error() { 
     echo "ERROR: $1" >&2
     INSTALLATION_FAILURES+=("$1")
@@ -154,7 +162,7 @@ install_with_cache() {
         find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1
         
         if [[ $wheels_found -eq 1 ]]; then
-            log "💾 Wheel cached for future use: $package"
+            log_detail "💾 Wheel cached for future use: $package"
         fi
         return 0
     else
@@ -515,40 +523,82 @@ resolve_dependencies() {
         log "🔧 Installing build tool: $tool (with wheel caching)"
         if install_with_cache "$tool"; then
             log_success "Build tool: $tool (cached wheel used)"
+            log_detail "✅ Build tool: $tool (cached wheel used)"
             ((build_success++))
         else
             log_error "Build tool failed: $tool (continuing with next tool)"
+            log_detail "❌ Build tool failed: $tool (continuing with next tool)"
             # Don't exit - continue with other tools
         fi
     done
     
     if [[ $build_success -eq ${#build_tools[@]} ]]; then
         log_success "All build tools installed successfully"
+        log_detail "✅ All build tools installed successfully ($build_success/${#build_tools[@]})"
     elif [[ $build_success -gt 0 ]]; then
         log_success "Some build tools installed ($build_success/${#build_tools[@]} succeeded)"
+        log_detail "⚠️ Some build tools installed ($build_success/${#build_tools[@]} succeeded)"
     else
         log_error "All build tools installation failed - may cause compilation issues"
+        log_detail "❌ All build tools installation failed - may cause compilation issues"
     fi
     
     if install_with_cache "av"; then
         log_success "av (pyav) for video processing (with wheel caching)"
+        log_detail "✅ av (pyav) for video processing (with wheel caching)"
     else
         log_error "av (pyav) installation failed"
+        log_detail "❌ av (pyav) installation failed"
     fi
     
     if install_with_cache "timm==1.0.13"; then
         log_success "timm (vision models) (with wheel caching)"
+        log_detail "✅ timm (vision models) (with wheel caching)"
     else
         log_error "timm installation failed"
+        log_detail "❌ timm installation failed"
     fi
     
     # flet often conflicts, so uninstall first
     pip uninstall -y flet 2>/dev/null || true
     if pip_install "flet==0.23.2" "" false; then
         log_success "flet UI library"
+        log_detail "✅ flet UI library (version 0.23.2)"
     else
         log_error "flet installation failed"
+        log_detail "❌ flet installation failed"
     fi
+    
+    # Install core system dependencies that are commonly needed
+    log "🔧 Installing core system dependencies..."
+    
+    local core_deps=(
+        "einops"
+        "scipy"
+        "torchsde"
+        "aiohttp"
+        "spandrel"
+        "kornia==0.7.0"
+        "urllib3==1.21"
+        "requests==2.31.0"
+        "fastapi==0.103.2"
+        "gradio_client==0.6.0"
+        "peewee==3.16.3"
+        "psutil==5.9.5"
+        "uvicorn==0.23.2"
+        "pynvml==11.5.0"
+        "python-multipart==0.0.6"
+    )
+    
+    for dep in "${core_deps[@]}"; do
+        if install_with_cache "$dep"; then
+            log_success "Core dependency: $dep (with wheel caching)"
+            log_detail "✅ Core dependency: $dep (with wheel caching)"
+        else
+            log_error "Failed to install: $dep (continuing)"
+            log_detail "❌ Failed to install: $dep (continuing)"
+        fi
+    done
     
     # Custom node dependencies are now handled by update_custom_nodes() function
     # which installs requirements.txt files directly from each custom node
@@ -559,39 +609,39 @@ resolve_dependencies() {
     # Show wheel cache status
     local wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
     local cached_wheels=$(find "$wheel_cache" -name "*.whl" 2>/dev/null | wc -l)
-    log "💾 Wheel cache status: $cached_wheels wheels cached in $wheel_cache"
+    log_detail "💾 Wheel cache status: $cached_wheels wheels cached in $wheel_cache"
     
     # Verify critical dependencies are working
-    log "🔍 Verifying critical dependencies..."
+    log_detail "🔍 Verifying critical dependencies..."
     local critical_deps=("segment_anything" "nunchaku" "opencv")
     local verification_success=0
     
     for dep in "${critical_deps[@]}"; do
         if [[ "$dep" == "opencv" ]]; then
             if python -c "import cv2; import cv2.ximgproc; print('OpenCV contrib working')" 2>/dev/null; then
-                log "✅ OpenCV contrib verification: SUCCESS"
+                log_detail "✅ OpenCV contrib verification: SUCCESS"
                 ((verification_success++))
             else
-                log_error "❌ OpenCV contrib verification: FAILED"
+                log_detail "❌ OpenCV contrib verification: FAILED"
             fi
         elif [[ "$dep" == "nunchaku" ]]; then
             if python -c "import nunchaku; print(f'Nunchaku {nunchaku.__version__} working')" 2>/dev/null; then
-                log "✅ Nunchaku verification: SUCCESS"
+                log_detail "✅ Nunchaku verification: SUCCESS"
                 ((verification_success++))
             else
-                log_error "❌ Nunchaku verification: FAILED"
+                log_detail "❌ Nunchaku verification: FAILED"
             fi
         elif [[ "$dep" == "segment_anything" ]]; then
             if python -c "import segment_anything; print('Segment Anything working')" 2>/dev/null; then
-                log "✅ Segment Anything verification: SUCCESS"
+                log_detail "✅ Segment Anything verification: SUCCESS"
                 ((verification_success++))
             else
-                log_error "❌ Segment Anything verification: FAILED"
+                log_detail "❌ Segment Anything verification: FAILED"
             fi
         fi
     done
     
-    log "📊 Critical dependency verification: $verification_success/${#critical_deps[@]} working"
+    log_detail "📊 Critical dependency verification: $verification_success/${#critical_deps[@]} working"
     
     log "📋 Continuing to requirements processing..."
 }
@@ -619,12 +669,13 @@ install_component() {
     # Try cached wheel first
     local cached_wheel=$(find "$wheel_cache" -name "sageattention*.whl" 2>/dev/null | head -1)
     if [[ -n "$cached_wheel" ]]; then
-        log "🔄 Trying cached SageAttention wheel: $cached_wheel"
+        log_detail "🔄 Trying cached SageAttention wheel: $cached_wheel"
         if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel" 2>/dev/null; then
             log_success "SageAttention (from cached wheel)"
-                return 0
-            else
-            log "⚠️ Cached wheel failed, removing and trying source build..."
+            log_detail "✅ SageAttention (from cached wheel)"
+            return 0
+        else
+            log_detail "⚠️ Cached wheel failed, removing and trying source build..."
             rm -f "$cached_wheel"
         fi
     fi
@@ -673,32 +724,36 @@ sys.exit(0 if major > 2 or (major == 2 and minor >= 5) else 1)
     pip uninstall -y nunchaku 2>/dev/null || true
     
         # Try multiple strategies for nunchaku installation
-    log "🔧 Attempting nunchaku installation with multiple strategies..."
+    log_detail "🔧 Attempting nunchaku installation with multiple strategies..."
     
     # Strategy 1: Try exact version
     if pip_install "nunchaku==0.3.2" "" false; then
         log_success "Nunchaku (version 0.3.2 installed)"
+        log_detail "✅ Nunchaku (version 0.3.2 installed)"
         return 0
     fi
     
     # Strategy 2: Try compatible range
     if pip_install "nunchaku>=0.3.1,<0.4.0" "" false; then
         log_success "Nunchaku (compatible version installed)"
+        log_detail "✅ Nunchaku (compatible version installed)"
         return 0
     fi
     
     # Strategy 3: Try latest version
     if pip_install "nunchaku" "" false; then
         log_success "Nunchaku (latest version installed)"
+        log_detail "✅ Nunchaku (latest version installed)"
         return 0
     fi
     
     # Strategy 4: Try from source
-    log "⚠️ All pip strategies failed, trying source installation..."
+    log_detail "⚠️ All pip strategies failed, trying source installation..."
     if git clone https://github.com/thu-ml/nunchaku.git /tmp/nunchaku_source 2>/dev/null; then
         cd /tmp/nunchaku_source
         if pip install -e . 2>/dev/null; then
             log_success "Nunchaku (installed from source)"
+            log_detail "✅ Nunchaku (installed from source)"
             cd "$REPO_DIR"
             return 0
         fi
@@ -856,9 +911,8 @@ main() {
     resolve_dependencies || log_error "Some dependencies failed (continuing)"
     
     # Process requirements files
-    log "🔄 Step 3: Processing requirements files..."
+    log "🔄 Step 5: Processing requirements files..."
     process_requirements "$REPO_DIR/requirements.txt" || log_error "Core requirements had issues (continuing)"
-    process_requirements "/notebooks/sd_comfy/additional_requirements.txt" || log_error "Additional requirements had issues (continuing)"
     
     touch "/tmp/sd_comfy.prepared"
     log "✅ ComfyUI setup complete! Proceeding to model download and launch..."
@@ -994,6 +1048,16 @@ generate_installation_summary() {
                 echo "   $failed_detail"
             done
         fi
+    fi
+    
+    # Detailed execution logs
+    if [[ ${#DETAILED_LOGS[@]} -gt 0 ]]; then
+        echo ""
+        echo "📋 DETAILED EXECUTION LOGS (${#DETAILED_LOGS[@]} entries):"
+        echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        for log_entry in "${DETAILED_LOGS[@]}"; do
+            echo "   $log_entry"
+        done
     fi
     
     # System Status Check
