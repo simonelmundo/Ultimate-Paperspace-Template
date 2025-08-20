@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+# Removed set -e to allow better error handling - individual failures won't stop the entire script
 
 #######################################
 # OPTIMIZED COMFYUI SETUP SCRIPT
@@ -117,23 +117,42 @@ pip_install() {
     fi
 }
 
-# Smart package installer with caching
+# Smart package installer with robust wheel caching
 install_with_cache() {
     local package="$1"
     local wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
+    local pip_cache="${PIP_CACHE_DIR:-/storage/.pip_cache}"
     
-    mkdir -p "$wheel_cache"
+    mkdir -p "$wheel_cache" "$pip_cache"
+    
+    # Set pip cache directory
+    export PIP_CACHE_DIR="$pip_cache"
+    
+    # Extract package name for caching (remove version constraints)
+    local pkg_name=$(echo "$package" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
     
     # Try cached wheel first
-    local cached_wheel=$(find "$wheel_cache" -name "*${package}*" -type f 2>/dev/null | head -1)
+    local cached_wheel=$(find "$wheel_cache" -name "${pkg_name}*.whl" -type f 2>/dev/null | head -1)
     if [[ -n "$cached_wheel" && -f "$cached_wheel" ]]; then
-        pip_install "$cached_wheel" && return 0
+        log "🔄 Using cached wheel: $(basename "$cached_wheel")"
+        if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel" 2>/dev/null; then
+            return 0
+        else
+            log "⚠️ Cached wheel failed, removing and rebuilding..."
+            rm -f "$cached_wheel"
+        fi
     fi
     
-    # Install and cache
-    pip_install "$package" && {
-        find /tmp -name "*${package}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null || true
-    }
+    # Install with pip cache and save wheels
+    log "📦 Installing and caching: $package"
+    if pip install --cache-dir "$pip_cache" --disable-pip-version-check "$package" 2>/dev/null; then
+        # Copy any new wheels to our cache
+        find "$pip_cache" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null || true
+        find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null || true
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Consolidated CUDA installation (replaces install_cuda_12 function)
@@ -405,45 +424,33 @@ resolve_dependencies() {
         log_error "NumPy installation failed"
     fi
     
-    # TensorFlow often causes "Illegal instruction" crashes on some systems
-    log "🔍 Testing TensorFlow compatibility..."
-    if python -c "import tensorflow" 2>/dev/null; then
-        log_success "TensorFlow (already working)"
-    else
-        log "⚠️ TensorFlow not found, attempting installation..."
-        if timeout 30 pip_install "tensorflow>=2.8.0,<2.19.0" "" false 2>/dev/null; then
-            # Test if it works without crashing
-            if timeout 10 python -c "import tensorflow; print('TensorFlow OK')" 2>/dev/null; then
-                log_success "TensorFlow"
-            else
-                log_conflict "TensorFlow installed but causes system crashes (skipping)"
-                pip uninstall -y tensorflow 2>/dev/null || true
-            fi
-        else
-            log_error "TensorFlow installation failed (may be incompatible with this system)"
-        fi
-    fi
+    # TensorFlow removed per user request - not needed for ComfyUI
+    # This eliminates the "Illegal instruction" crashes and reduces dependencies
     
     # Essential packages - try normal install first
     log "Installing essential packages..."
     
-    # Install build tools individually (often fixes group install failures)
+    # Install build tools individually with better error handling
     local build_tools=("pybind11" "ninja" "packaging")
     local build_success=0
     
     for tool in "${build_tools[@]}"; do
+        log "🔧 Installing build tool: $tool"
         if pip_install "$tool" "" false; then
             log_success "Build tool: $tool"
             ((build_success++))
         else
-            log_error "Build tool failed: $tool"
+            log_error "Build tool failed: $tool (continuing with next tool)"
+            # Don't exit - continue with other tools
         fi
     done
     
     if [[ $build_success -eq ${#build_tools[@]} ]]; then
         log_success "All build tools installed successfully"
+    elif [[ $build_success -gt 0 ]]; then
+        log_success "Some build tools installed ($build_success/${#build_tools[@]} succeeded)"
     else
-        log_error "Some build tools installation failed ($build_success/${#build_tools[@]} succeeded)"
+        log_error "All build tools installation failed - may cause compilation issues"
     fi
     
     if pip_install "av" "" false; then
@@ -466,7 +473,37 @@ resolve_dependencies() {
         log_error "flet installation failed"
     fi
     
+    # Install missing custom node dependencies
+    log "🔧 Installing missing custom node dependencies..."
+    
+    local missing_deps=(
+        "blend_modes" 
+        "deepdiff" 
+        "rembg" 
+        "webcolors" 
+        "ultralytics" 
+        "inflect" 
+        "soxr" 
+        "hydra-core" 
+        "groundingdino-py" 
+        "imageio-ffmpeg" 
+        "oss2"
+        "lark"
+        "opencv-python"
+        "scikit-image"
+        "segment-anything-2"
+    )
+    
+    for dep in "${missing_deps[@]}"; do
+        if pip_install "$dep" "" false; then
+            log_success "Custom node dependency: $dep"
+        else
+            log_error "Failed to install: $dep (custom node may not work fully)"
+        fi
+    done
+    
     log "✅ Core dependencies installation completed"
+    log "📋 Continuing to requirements processing..."
 }
 
 # Component installer framework
@@ -525,7 +562,11 @@ install_component() {
 
 # Nunchaku installer (simplified)
     install_nunchaku() {
-    python -c "import nunchaku" 2>/dev/null && return 0
+    # Check if compatible version is installed
+    if python -c "import nunchaku; print(nunchaku.__version__)" 2>/dev/null | grep -E "^0\.[3-9]\.|^[1-9]" >/dev/null; then
+        log_success "Nunchaku (compatible version already installed)"
+        return 0
+    fi
     
     # Check PyTorch compatibility (requires >= 2.5)
     local torch_ver=$(python -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))" 2>/dev/null || echo "0.0")
@@ -538,7 +579,17 @@ sys.exit(0 if major > 2 or (major == 2 and minor >= 5) else 1)
             return 1
     }
     
-    install_with_cache "nunchaku"
+    # Uninstall old version and install compatible version
+    pip uninstall -y nunchaku 2>/dev/null || true
+    
+    # Try to install compatible version (0.3.2 is mentioned as supported)
+    if pip_install "nunchaku>=0.3.1" "" false; then
+        log_success "Nunchaku (updated to compatible version)"
+        return 0
+    else
+        log_error "Failed to install compatible nunchaku version"
+        return 1
+    fi
 }
 
 # Hunyuan3D texture components (simplified)
@@ -609,7 +660,7 @@ main() {
     if [[ -f "/tmp/sd_comfy.prepared" && -z "$REINSTALL_SD_COMFY" ]]; then
         log "ComfyUI already prepared. Activating environment..."
         source "${VENV_DIR:-/tmp}/sd_comfy-env/bin/activate" || exit 1
-        return 0
+                    return 0
     fi
     
     # Environment and CUDA setup
@@ -663,15 +714,19 @@ main() {
     install_component "hunyuan3d_texture_components"
     
     # Dependencies and updates
-    update_custom_nodes
-    resolve_dependencies
+    log "🔄 Step 1: Updating custom nodes..."
+    update_custom_nodes || log_error "Custom nodes update had issues (continuing)"
+    
+    log "🔄 Step 2: Resolving core dependencies..."
+    resolve_dependencies || log_error "Some dependencies failed (continuing)"
     
     # Process requirements files
-    process_requirements "$REPO_DIR/requirements.txt"
-    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
+    log "🔄 Step 3: Processing requirements files..."
+    process_requirements "$REPO_DIR/requirements.txt" || log_error "Core requirements had issues (continuing)"
+    process_requirements "/notebooks/sd_comfy/additional_requirements.txt" || log_error "Additional requirements had issues (continuing)"
     
     touch "/tmp/sd_comfy.prepared"
-    log "ComfyUI setup complete!"
+    log "✅ ComfyUI setup complete! Proceeding to model download and launch..."
 }
 
 # Model download
@@ -790,23 +845,13 @@ generate_installation_summary() {
     # Key packages check
     echo "   📦 Key Package Status:"
     
-    local packages=("numpy" "tensorflow" "xformers" "av" "timm" "flet" "pybind11" "ninja")
+    local packages=("numpy" "xformers" "av" "timm" "flet" "pybind11" "ninja")
     for pkg in "${packages[@]}"; do
-        # Special handling for TensorFlow to avoid crashes
-        if [[ "$pkg" == "tensorflow" ]]; then
-            if timeout 5 python -c "import tensorflow" 2>/dev/null; then
-                local version=$(timeout 5 python -c "import tensorflow; print(tensorflow.__version__)" 2>/dev/null || echo "unknown")
-                echo "      ✅ $pkg: $version"
-            else
-                echo "      ❌ $pkg: NOT AVAILABLE (may cause system crashes)"
-            fi
+        if timeout 5 python -c "import $pkg" 2>/dev/null; then
+            local version=$(timeout 5 python -c "import $pkg; print(getattr($pkg, '__version__', 'unknown'))" 2>/dev/null || echo "unknown")
+            echo "      ✅ $pkg: $version"
         else
-            if timeout 5 python -c "import $pkg" 2>/dev/null; then
-                local version=$(timeout 5 python -c "import $pkg; print(getattr($pkg, '__version__', 'unknown'))" 2>/dev/null || echo "unknown")
-                echo "      ✅ $pkg: $version"
-            else
-                echo "      ❌ $pkg: NOT AVAILABLE"
-            fi
+            echo "      ❌ $pkg: NOT AVAILABLE"
         fi
     done
     
@@ -896,12 +941,12 @@ launch
 send_to_discord "Stable Diffusion Comfy Started"
 
 if env | grep -q "PAPERSPACE"; then
-    send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-comfy/"
+  send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-comfy/"
 fi
 
 if [[ -n "${CF_TOKEN}" ]]; then
-    if [[ "$RUN_SCRIPT" != *"sd_comfy"* ]]; then
-        export RUN_SCRIPT="$RUN_SCRIPT,sd_comfy"
-    fi
+  if [[ "$RUN_SCRIPT" != *"sd_comfy"* ]]; then
+    export RUN_SCRIPT="$RUN_SCRIPT,sd_comfy"
+  fi
     bash "$SCRIPT_DIR/../cloudflare_reload.sh"
 fi
