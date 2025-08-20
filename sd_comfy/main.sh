@@ -147,8 +147,13 @@ install_with_cache() {
     log "📦 Installing and caching: $package"
     if pip install --cache-dir "$pip_cache" --disable-pip-version-check "$package" 2>/dev/null; then
         # Copy any new wheels to our cache
-        find "$pip_cache" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null || true
-        find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null || true
+        local wheels_found=0
+        find "$pip_cache" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1
+        find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1
+        
+        if [[ $wheels_found -eq 1 ]]; then
+            log "💾 Wheel cached for future use: $package"
+        fi
         return 0
     else
         return 1
@@ -435,9 +440,9 @@ resolve_dependencies() {
     local build_success=0
     
     for tool in "${build_tools[@]}"; do
-        log "🔧 Installing build tool: $tool"
-        if pip_install "$tool" "" false; then
-            log_success "Build tool: $tool"
+        log "🔧 Installing build tool: $tool (with wheel caching)"
+        if install_with_cache "$tool"; then
+            log_success "Build tool: $tool (cached wheel used)"
             ((build_success++))
         else
             log_error "Build tool failed: $tool (continuing with next tool)"
@@ -453,14 +458,14 @@ resolve_dependencies() {
         log_error "All build tools installation failed - may cause compilation issues"
     fi
     
-    if pip_install "av" "" false; then
-        log_success "av (pyav) for video processing"
+    if install_with_cache "av"; then
+        log_success "av (pyav) for video processing (with wheel caching)"
     else
         log_error "av (pyav) installation failed"
     fi
     
-    if pip_install "timm==1.0.13" "" false; then
-        log_success "timm (vision models)"
+    if install_with_cache "timm==1.0.13"; then
+        log_success "timm (vision models) (with wheel caching)"
     else
         log_error "timm installation failed"
     fi
@@ -473,8 +478,8 @@ resolve_dependencies() {
         log_error "flet installation failed"
     fi
     
-    # Install missing custom node dependencies
-    log "🔧 Installing missing custom node dependencies..."
+    # Install missing custom node dependencies with wheel caching
+    log "🔧 Installing missing custom node dependencies with wheel caching..."
     
     local missing_deps=(
         "blend_modes" 
@@ -492,17 +497,74 @@ resolve_dependencies() {
         "opencv-python"
         "scikit-image"
         "segment-anything-2"
+        "segment-anything"
+        "dill"
+        "kanjize"
+        "einx"
+        "opencv-contrib-python"
+        "onnxruntime-gpu"
     )
     
     for dep in "${missing_deps[@]}"; do
-        if pip_install "$dep" "" false; then
-            log_success "Custom node dependency: $dep"
+        # Special handling for OpenCV to ensure contrib version
+        if [[ "$dep" == "opencv-python" ]]; then
+            # Uninstall basic opencv first
+            pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
+            # Install contrib version
+            if install_with_cache "opencv-contrib-python"; then
+                log_success "Custom node dependency: opencv-contrib-python (with wheel caching)"
+            else
+                log_error "Failed to install: opencv-contrib-python (falling back to basic)"
+                install_with_cache "opencv-python" || log_error "Basic opencv also failed"
+            fi
         else
-            log_error "Failed to install: $dep (custom node may not work fully)"
+            if install_with_cache "$dep"; then
+                log_success "Custom node dependency: $dep (with wheel caching)"
+            else
+                log_error "Failed to install: $dep (custom node may not work fully)"
+            fi
         fi
     done
     
     log "✅ Core dependencies installation completed"
+    
+    # Show wheel cache status
+    local wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
+    local cached_wheels=$(find "$wheel_cache" -name "*.whl" 2>/dev/null | wc -l)
+    log "💾 Wheel cache status: $cached_wheels wheels cached in $wheel_cache"
+    
+    # Verify critical dependencies are working
+    log "🔍 Verifying critical dependencies..."
+    local critical_deps=("segment_anything" "nunchaku" "opencv")
+    local verification_success=0
+    
+    for dep in "${critical_deps[@]}"; do
+        if [[ "$dep" == "opencv" ]]; then
+            if python -c "import cv2; import cv2.ximgproc; print('OpenCV contrib working')" 2>/dev/null; then
+                log "✅ OpenCV contrib verification: SUCCESS"
+                ((verification_success++))
+            else
+                log_error "❌ OpenCV contrib verification: FAILED"
+            fi
+        elif [[ "$dep" == "nunchaku" ]]; then
+            if python -c "import nunchaku; print(f'Nunchaku {nunchaku.__version__} working')" 2>/dev/null; then
+                log "✅ Nunchaku verification: SUCCESS"
+                ((verification_success++))
+            else
+                log_error "❌ Nunchaku verification: FAILED"
+            fi
+        elif [[ "$dep" == "segment_anything" ]]; then
+            if python -c "import segment_anything; print('Segment Anything working')" 2>/dev/null; then
+                log "✅ Segment Anything verification: SUCCESS"
+                ((verification_success++))
+            else
+                log_error "❌ Segment Anything verification: FAILED"
+            fi
+        fi
+    done
+    
+    log "📊 Critical dependency verification: $verification_success/${#critical_deps[@]} working"
+    
     log "📋 Continuing to requirements processing..."
 }
 
@@ -565,9 +627,9 @@ install_component() {
     # Check if compatible version is installed
     if python -c "import nunchaku; print(nunchaku.__version__)" 2>/dev/null | grep -E "^0\.[3-9]\.|^[1-9]" >/dev/null; then
         log_success "Nunchaku (compatible version already installed)"
-        return 0
-    fi
-    
+            return 0
+        fi
+        
     # Check PyTorch compatibility (requires >= 2.5)
     local torch_ver=$(python -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))" 2>/dev/null || echo "0.0")
     python -c "
@@ -582,12 +644,12 @@ sys.exit(0 if major > 2 or (major == 2 and minor >= 5) else 1)
     # Uninstall old version and install compatible version
     pip uninstall -y nunchaku 2>/dev/null || true
     
-    # Try to install compatible version (0.3.2 is mentioned as supported)
-    if pip_install "nunchaku>=0.3.1" "" false; then
-        log_success "Nunchaku (updated to compatible version)"
+        # Try to install compatible version (0.3.2 is mentioned as supported)
+    if pip_install "nunchaku==0.3.2" "" false; then
+        log_success "Nunchaku (updated to compatible version 0.3.2)"
         return 0
     else
-        log_error "Failed to install compatible nunchaku version"
+        log_error "Failed to install compatible nunchaku version 0.3.2"
         return 1
     fi
 }
@@ -729,11 +791,24 @@ main() {
     log "✅ ComfyUI setup complete! Proceeding to model download and launch..."
 }
 
-# Model download
+# Model download (can run in background)
 download_models() {
-if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
-        log "Downloading models..."
-        bash "$SCRIPT_DIR/../utils/sd_model_download/main.sh"
+    if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
+        log "📥 Starting model download process..."
+        log "💡 Models will download in background while ComfyUI is running"
+        log "💡 You can start using ComfyUI immediately!"
+        
+        # Run model download in background
+        bash "$SCRIPT_DIR/../utils/sd_model_download/main.sh" &
+        local download_pid=$!
+        
+        log "📋 Model download started with PID: $download_pid"
+        log "📋 Check progress with: tail -f $LOG_DIR/sd_comfy.log"
+        
+        # Save PID for potential management
+        echo "$download_pid" > /tmp/model_download.pid
+    else
+        log "⏭️ Model download skipped (SKIP_MODEL_DOWNLOAD set)"
     fi
 }
 
@@ -930,12 +1005,20 @@ generate_installation_summary() {
 
 # Execute main workflow
 main
-download_models  
 
 # Generate comprehensive summary before launch
 generate_installation_summary
 
+# Start ComfyUI first (so user can access it immediately)
+log "🚀 Starting ComfyUI first for immediate access..."
 launch
+
+# Download models in background (non-blocking)
+log "📥 Starting model download in background..."
+download_models &
+
+# Wait a moment for ComfyUI to start
+sleep 5
 
 # Final notifications (from original)
 send_to_discord "Stable Diffusion Comfy Started"
@@ -943,6 +1026,23 @@ send_to_discord "Stable Diffusion Comfy Started"
 if env | grep -q "PAPERSPACE"; then
   send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-comfy/"
 fi
+
+# Show final status
+log ""
+log "🎉 COMFYUI STARTUP COMPLETE!"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log "✅ ComfyUI is now running and accessible"
+log "📥 Model download is running in background"
+log "🔗 Access ComfyUI at: http://localhost:$SD_COMFY_PORT"
+if env | grep -q "PAPERSPACE"; then
+  log "🌐 Paperspace URL: https://$PAPERSPACE_FQDN/sd-comfy/"
+fi
+log ""
+log "📋 Useful commands:"
+log "   • Check ComfyUI logs: tail -f $LOG_DIR/sd_comfy.log"
+log "   • Check model download: tail -f /tmp/model_download.log"
+log "   • Stop model download: kill \$(cat /tmp/model_download.pid)"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [[ -n "${CF_TOKEN}" ]]; then
   if [[ "$RUN_SCRIPT" != *"sd_comfy"* ]]; then
