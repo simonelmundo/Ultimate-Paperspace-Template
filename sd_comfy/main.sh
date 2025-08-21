@@ -611,9 +611,13 @@ process_combined_requirements() {
     
     log "🔧 Processing combined requirements file: $req_file"
     
+    # Enhanced caching - pre-download and cache wheels
+    enhanced_requirements_cache "$req_file"
+    
     mkdir -p "$cache_dir"
     export PIP_CACHE_DIR="$cache_dir"
     export PIP_DISABLE_PIP_VERSION_CHECK=1
+    export PIP_FIND_LINKS="/storage/.wheel_cache"
     
     # Create Python script to handle version conflicts
     cat > "/tmp/resolve_conflicts.py" << 'EOF'
@@ -794,20 +798,20 @@ EOF
             for batch in /tmp/pkg_batch_*; do
                 log "📦 Installing batch $(basename "$batch")..."
                 
-                # Try batch installation first (faster) - suppress verbose output
-                if ! timeout 90s pip install --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_$(basename "$batch").log" 2>&1; then
+                # Try batch installation first (faster) with wheel cache - suppress verbose output
+                if ! timeout 90s pip install --no-cache-dir --disable-pip-version-check --quiet --find-links "/storage/.wheel_cache" -r "$batch" >"/tmp/pip_batch_$(basename "$batch").log" 2>&1; then
                     log "⚠️ Batch installation failed or timed out, trying optimized batch strategies..."
                     
                     # Strategy 1: Try with --no-deps
                     log "🔄 Strategy 1: Installing batch with --no-deps..."
-                    if timeout 90s pip install --no-deps --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_nodeps_$(basename "$batch").log" 2>&1; then
+                    if timeout 90s pip install --no-deps --no-cache-dir --disable-pip-version-check --quiet --find-links "/storage/.wheel_cache" -r "$batch" >"/tmp/pip_batch_nodeps_$(basename "$batch").log" 2>&1; then
                         log "✅ Strategy 1 successful (--no-deps) for $(basename "$batch")"
                         continue
                     fi
                     
                     # Strategy 2: Try with --force-reinstall
                     log "🔄 Strategy 2: Installing batch with --force-reinstall..."
-                    if timeout 90s pip install --force-reinstall --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_force_$(basename "$batch").log" 2>&1; then
+                    if timeout 90s pip install --force-reinstall --no-cache-dir --disable-pip-version-check --quiet --find-links "/storage/.wheel_cache" -r "$batch" >"/tmp/pip_batch_force_$(basename "$batch").log" 2>&1; then
                         log "✅ Strategy 2 successful (--force-reinstall) for $(basename "$batch")"
                         continue
                     fi
@@ -832,8 +836,8 @@ EOF
                         [[ -z "$pkg" ]] && continue
                         log "  📦 Installing: $pkg"
                         
-                        # Try to install with timeout
-                        if timeout 60s pip install --no-cache-dir --disable-pip-version-check --quiet "$pkg" >"/tmp/pip_individual_${pkg//[^a-zA-Z0-9]/_}.log" 2>&1; then
+                        # Try to install with timeout and wheel cache
+                        if timeout 60s pip install --no-cache-dir --disable-pip-version-check --quiet --find-links "/storage/.wheel_cache" "$pkg" >"/tmp/pip_individual_${pkg//[^a-zA-Z0-9]/_}.log" 2>&1; then
                             log "✅ Successfully installed: $pkg"
                         else
                             log_error "❌ Failed to install: $pkg (continuing)"
@@ -890,7 +894,7 @@ resolve_dependencies() {
     
     # Install core build tools with caching
     log "📦 Installing core build tools..."
-    for pkg in "wheel" "setuptools" "numpy>=1.26.0,<2.3.0"; do 
+    for pkg in "wheel" "setuptools" "numpy>=1.26.0,<2.3.0" "zipfile36"; do 
         install_with_cache "$pkg" || log_error "Core tool failed: $pkg"
     done
     
@@ -975,17 +979,30 @@ install_component() {
         return 1
     fi
     
-    # Try cached wheel first
-    local cached_wheel=$(find "$wheel_cache" -name "sageattention*.whl" 2>/dev/null | head -1)
-    if [[ -n "$cached_wheel" ]]; then
-        log "🔄 Found cached SageAttention wheel, trying installation..."
-        if install_package "$cached_wheel"; then
-            log "✅ SageAttention installed from cached wheel"
-            return 0
+    # Try cached wheel first with proper version/platform matching
+    local python_version=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null || echo "cp310")
+    local arch=$(uname -m)
+    local cached_wheel=$(find "$wheel_cache" -name "sageattention-*-${python_version}-${python_version}-linux_${arch}.whl" 2>/dev/null | sort -V | tail -1)
+    
+    if [[ -n "$cached_wheel" && -f "$cached_wheel" ]]; then
+        log "🔄 Found compatible cached SageAttention wheel: $(basename "$cached_wheel")"
+        
+        # Verify wheel integrity
+        if python -c "import zipfile; zipfile.ZipFile('$cached_wheel').testzip()" 2>/dev/null; then
+            log "✅ Cached wheel integrity verified"
+            if install_package "$cached_wheel"; then
+                log "✅ SageAttention installed from cached wheel"
+                return 0
+            else
+                log "⚠️ Cached wheel installation failed, removing and rebuilding..."
+                rm -f "$cached_wheel"
+            fi
         else
-            log "⚠️ Cached wheel installation failed, removing and rebuilding..."
+            log "⚠️ Cached wheel corrupted, removing and rebuilding..."
             rm -f "$cached_wheel"
         fi
+    else
+        log "📦 No compatible cached SageAttention wheel found for ${python_version}-linux_${arch}"
     fi
     
     # Clone repository if needed
@@ -1106,7 +1123,7 @@ except Exception as e:
             
             # Verify cached wheel integrity before using
             log "🔍 Verifying cached wheel integrity..."
-            if ! python -c "import wheel; wheel.verify_wheel('$cached_wheel')" 2>/dev/null; then
+            if ! python -c "import zipfile; zipfile.ZipFile('$cached_wheel').testzip()" 2>/dev/null; then
                 log "⚠️ Cached wheel is corrupted, removing and downloading fresh..."
                 rm -f "$cached_wheel"
             else
@@ -1167,10 +1184,22 @@ except Exception as e:
             
             # Verify wheel file integrity BEFORE caching
             log "🔍 Verifying wheel file integrity before caching..."
-            if ! python -c "import wheel; wheel.verify_wheel('$temp_wheel')" 2>/dev/null; then
-                log "⚠️ Downloaded wheel verification failed - wheel is corrupted"
+            local file_size=$(stat -f%z "$temp_wheel" 2>/dev/null || stat -c%s "$temp_wheel" 2>/dev/null || echo "0")
+            if [[ "$file_size" -lt 1000000 ]]; then
+                log "⚠️ Downloaded wheel too small ($file_size bytes) - likely download failed"
+                rm -f "$temp_wheel"
                 log "🔄 Trying pip direct install instead..."
-                rm -f "$temp_wheel"  # Clean up corrupted temp file
+                if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku" 2>/dev/null; then
+                    log "✅ Nunchaku installed directly via pip (bypassing failed download)"
+                    return 0
+                else
+                    log_error "❌ Direct pip install also failed"
+                    return 1
+                fi
+            elif ! python -c "import zipfile; zipfile.ZipFile('$temp_wheel').testzip()" 2>/dev/null; then
+                log "⚠️ Downloaded wheel verification failed - wheel is corrupted"
+                rm -f "$temp_wheel"
+                log "🔄 Trying pip direct install instead..."
                 if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku" 2>/dev/null; then
                     log "✅ Nunchaku installed directly via pip (bypassing corrupted wheel)"
                     return 0
@@ -1256,11 +1285,14 @@ except Exception as e:
     process_requirements() {
         local req_file="$1"
         [[ ! -f "$req_file" ]] && return 0
-        log "📋 Processing requirements: $req_file"
+        log "📋 Processing requirements with enhanced caching: $req_file"
         
-        # Try batch installation first
-        if pip install --quiet -r "$req_file" 2>/dev/null; then
-            log "✅ Batch installation successful"
+        # Use enhanced caching first
+        enhanced_requirements_cache "$req_file"
+        
+        # Try batch installation first with wheel cache
+        if pip install --quiet --find-links "/storage/.wheel_cache" -r "$req_file" 2>/dev/null; then
+            log "✅ Batch installation successful (using cached wheels)"
             return 0
         fi
         
@@ -1323,6 +1355,102 @@ prepare_link() {
             }
         }
     done
+}
+
+# Cache Management - Keep cache under specified size limit
+manage_cache_size() {
+    local cache_dirs=("/storage/.pip_cache" "/storage/.wheel_cache" "/storage/.apt_cache" "/storage/.sageattention_cache")
+    local max_size_gb=${1:-7}  # Default 7GB limit
+    local max_size_bytes=$((max_size_gb * 1024 * 1024 * 1024))
+    
+    log "🧹 Managing cache sizes (limit: ${max_size_gb}GB)..."
+    
+    for cache_dir in "${cache_dirs[@]}"; do
+        [[ ! -d "$cache_dir" ]] && continue
+        
+        local current_size=$(du -sb "$cache_dir" 2>/dev/null | cut -f1 || echo "0")
+        local current_size_mb=$((current_size / 1024 / 1024))
+        
+        if [[ $current_size -gt $((max_size_bytes / 4)) ]]; then
+            log "📊 Cache $cache_dir: ${current_size_mb}MB (cleaning old files...)"
+            
+            # Remove files older than 7 days
+            find "$cache_dir" -type f -mtime +7 -delete 2>/dev/null || true
+            
+            # If still too large, remove oldest files
+            while [[ $(du -sb "$cache_dir" 2>/dev/null | cut -f1 || echo "0") -gt $((max_size_bytes / 4)) ]]; do
+                local oldest_file=$(find "$cache_dir" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -f2- -d' ')
+                [[ -n "$oldest_file" ]] && rm -f "$oldest_file" 2>/dev/null || break
+            done
+            
+            local new_size=$(du -sb "$cache_dir" 2>/dev/null | cut -f1 || echo "0")
+            local new_size_mb=$((new_size / 1024 / 1024))
+            log "✅ Cache $cache_dir cleaned: ${new_size_mb}MB"
+        else
+            log "✅ Cache $cache_dir: ${current_size_mb}MB (within limits)"
+        fi
+    done
+}
+
+# Enhanced Requirements Caching - Pre-download and cache all requirements
+enhanced_requirements_cache() {
+    local req_file="$1"
+    local cache_dir="/storage/.requirements_cache"
+    local wheel_cache="/storage/.wheel_cache"
+    
+    [[ ! -f "$req_file" ]] && return 0
+    
+    log "🚀 Enhanced requirements caching for: $(basename "$req_file")"
+    mkdir -p "$cache_dir" "$wheel_cache"
+    
+    # Create cache key based on requirements file hash
+    local req_hash=$(md5sum "$req_file" 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+    local cache_marker="$cache_dir/cached_${req_hash}.marker"
+    
+    # Check if this exact requirements set is already cached
+    if [[ -f "$cache_marker" ]]; then
+        log "✅ Requirements already cached (hash: $req_hash), using cached packages..."
+        
+        # Install from cached packages using find and pip install with local wheels
+        local cached_count=0
+        while read -r pkg_name; do
+            [[ -z "$pkg_name" ]] && continue
+            local cached_wheels=$(find "$wheel_cache" -name "${pkg_name}*.whl" 2>/dev/null | head -1)
+            if [[ -n "$cached_wheels" ]]; then
+                log "💾 Using cached wheel for: $pkg_name"
+                pip install --no-cache-dir --disable-pip-version-check --quiet --find-links "$wheel_cache" "$pkg_name" 2>/dev/null && ((cached_count++))
+            fi
+        done < <(grep -v '^[[:space:]]*#' "$req_file" | grep -v '^[[:space:]]*$' | sed 's/[<>=!].*//' | sed 's/\[.*\]//' | sort -u)
+        
+        log "💾 Used $cached_count cached packages"
+        return 0
+    fi
+    
+    # Pre-download all wheels to cache
+    log "📥 Pre-downloading and caching wheels..."
+    local download_temp="/tmp/req_download_$$"
+    mkdir -p "$download_temp"
+    
+    # Download wheels without installing
+    if pip download --no-cache-dir --dest "$download_temp" -r "$req_file" --quiet 2>/dev/null; then
+        # Move downloaded wheels to cache
+        local wheels_cached=0
+        for wheel in "$download_temp"/*.whl; do
+            [[ -f "$wheel" ]] && cp "$wheel" "$wheel_cache/" && ((wheels_cached++))
+        done
+        
+        log "💾 Cached $wheels_cached wheels for future use"
+        
+        # Create cache marker
+        echo "Cached requirements on $(date)" > "$cache_marker"
+        echo "Requirements hash: $req_hash" >> "$cache_marker"
+        echo "Wheels cached: $wheels_cached" >> "$cache_marker"
+    else
+        log "⚠️ Pre-download failed, will use standard installation"
+    fi
+    
+    # Clean up temp directory
+    rm -rf "$download_temp"
 }
 
 # Send to Discord (simplified)
@@ -1430,10 +1558,17 @@ create_combined_requirements_file() {
     fi
 }
 
-# Fast batch installer for critical dependencies
+# Fast batch installer for critical dependencies with enhanced caching
 install_critical_dependencies() {
-    log "📦 Installing Critical Custom Node Dependencies (AFTER batch requirements)..."
-    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub==0.20.3")
+    log "📦 Installing Critical Custom Node Dependencies with Enhanced Caching..."
+    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub>=0.34.0")
+    
+    # Create temporary requirements file for enhanced caching
+    local temp_critical_req="/tmp/critical_deps_$(date +%s).txt"
+    printf "%s\n" "${critical_packages[@]}" > "$temp_critical_req"
+    
+    # Use enhanced caching for critical dependencies
+    enhanced_requirements_cache "$temp_critical_req"
     
     # Fast check for already installed packages using pip list
     log "🔍 Fast-checking already installed packages..."
@@ -1459,9 +1594,9 @@ install_critical_dependencies() {
         local temp_req_file="/tmp/critical_deps_$(date +%s).txt"
         printf "%s\n" "${packages_to_install[@]}" > "$temp_req_file"
         
-        # Batch install with optimized flags
-        if pip install --no-cache-dir --disable-pip-version-check --quiet --progress-bar off -r "$temp_req_file" 2>/dev/null; then
-            log "✅ Batch installation successful for ${#packages_to_install[@]} packages"
+        # Batch install with optimized flags and wheel cache
+        if pip install --no-cache-dir --disable-pip-version-check --quiet --progress-bar off --find-links "/storage/.wheel_cache" -r "$temp_req_file" 2>/dev/null; then
+            log "✅ Batch installation successful for ${#packages_to_install[@]} packages (using cached wheels)"
         else
             log "⚠️ Batch installation failed, falling back to individual installation..."
             # Fallback to individual installation
@@ -1480,9 +1615,10 @@ install_critical_dependencies() {
         fi
         
         # Clean up
-        rm -f "$temp_req_file"
+        rm -f "$temp_req_file" "$temp_critical_req"
     else
         log "✅ All critical packages already installed"
+        rm -f "$temp_critical_req"
     fi
     
     # Final verification of critical dependencies
@@ -1574,6 +1710,9 @@ main() {
     pip config set global.disable_pip_version_check true 2>/dev/null || true
     pip config set global.no_cache_dir true 2>/dev/null || true
     
+    # Manage cache sizes to stay under 7GB limit
+    manage_cache_size 7
+    
     # Enhanced system dependencies installation with caching
     install_system_dependencies
     
@@ -1602,7 +1741,8 @@ main() {
     log "📋 Collecting requirements from all custom nodes..."
     create_combined_requirements_file
     
-    # Process the combined requirements
+    # Process the combined requirements with enhanced caching
+    log "🚀 Using enhanced caching for faster requirements processing..."
     process_combined_requirements "/tmp/all_custom_node_requirements.txt" || log_error "Combined requirements processing had issues (continuing)"
     
     # Handle specific dependency conflicts AFTER all requirements are processed
@@ -1626,12 +1766,16 @@ main() {
     # Fix critical huggingface_hub compatibility issues
     log "🔧 Fixing huggingface_hub compatibility issues..."
     pip uninstall -y huggingface_hub diffusers 2>/dev/null || true
-    pip install --quiet "huggingface_hub==0.20.3" 2>/dev/null || log_error "huggingface_hub fix failed"
+    pip install --quiet "huggingface_hub>=0.34.0" 2>/dev/null || log_error "huggingface_hub fix failed"
     pip install --quiet "diffusers" 2>/dev/null || log_error "diffusers fix failed"
     
     # CRITICAL: Install missing dependencies AFTER batch requirements processing
     log "🚀 Installing Critical Custom Node Dependencies (AFTER batch requirements)..."
     install_critical_dependencies
+    
+    # Final cache cleanup and optimization
+    log "🧹 Final cache optimization..."
+    manage_cache_size 7
     
     touch "/tmp/sd_comfy.prepared"
 }
