@@ -394,339 +394,256 @@ update_comfyui_manager() {
     ) || log_error "ComfyUI Manager update failed"
 }
 
-# ROBUST custom nodes update (handles dependency conflicts)
 update_custom_nodes() {
     local nodes_dir="$REPO_DIR/custom_nodes"
     [[ ! -d "$nodes_dir" ]] && return 0
     
-    log "🔄 Updating custom nodes with robust dependency handling..."
-    
-    # Arrays to collect detailed information for final summary
-    local total_nodes=0
-    local successful_nodes=0
-    local failed_nodes=0
-    local node_details=()
-    local failed_details=()
+    local combined_reqs="/tmp/all_custom_node_requirements.txt"
+    echo -n > "$combined_reqs"
     
     for git_dir in "$nodes_dir"/*/.git; do
         [[ ! -d "$git_dir" ]] && continue
-        
         local node_dir="${git_dir%/.git}"
         local node_name=$(basename "$node_dir")
-        ((total_nodes++))
         
-        # Show minimal progress (just the node name)
-        log "🔧 $node_name"
+        if [[ -f "$node_dir/requirements.txt" && -s "$node_dir/requirements.txt" ]]; then
+            echo "# From $node_name" >> "$combined_reqs"
+            grep -v "^[[:space:]]*#\|^[[:space:]]*$" "$node_dir/requirements.txt" >> "$combined_reqs"
+            echo "" >> "$combined_reqs"
+        fi
+    done
+    
+    [[ -s "$combined_reqs" ]] && process_combined_requirements "$combined_reqs"
+    
+    for git_dir in "$nodes_dir"/*/.git; do
+        [[ ! -d "$git_dir" ]] && continue
+        local node_dir="${git_dir%/.git}"
+        local node_name=$(basename "$node_dir")
         
         (
             cd "$node_dir" || return 1
-            
-            # Git update (silent)
-            git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null
-            
-            # Install requirements.txt if it exists
-            if [[ -f requirements.txt ]]; then
-                # Check if requirements.txt is not empty
-                if [[ ! -s requirements.txt ]]; then
-                    node_details+=("$node_name: ✅ (empty requirements)")
-                    ((successful_nodes++))
-                    return 0
-                fi
-                
-                # Collect requirements for summary
-                local requirements_list=()
-                while IFS= read -r package; do
-                    [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
-                    requirements_list+=("$package")
-                done < requirements.txt
-                
-                # Strategy 1: Normal install (with error capture)
-                local pip_output_file="/tmp/pip_install_${node_name}.log"
-                if timeout 300 pip install --no-cache-dir --disable-pip-version-check \
-                    -r requirements.txt 2>&1 | tee "$pip_output_file"; then
-                    node_details+=("$node_name: ✅ (${#requirements_list[@]} packages)")
-                    log_pip_success "$node_name requirements" "batch install"
-                    ((successful_nodes++))
-                    return 0
-                else
-                    local pip_error=$(tail -n 10 "$pip_output_file" 2>/dev/null | tr '\n' ' ')
-                    log_detail "❌ Batch install failed for $node_name: $pip_error"
-                fi
-                
-                # Strategy 2: Individual package install (with error capture)
-                local packages_installed=0
-                local failed_packages=()
-                while IFS= read -r package; do
-                    [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
-                    local package_output_file="/tmp/pip_install_${node_name}_${package//[^a-zA-Z0-9]/_}.log"
-                    if timeout 120 pip install --no-cache-dir --disable-pip-version-check \
-                        "$package" 2>&1 | tee "$package_output_file"; then
-                        ((packages_installed++))
-                        log_pip_success "$package" "individual install for $node_name"
-                    else
-                        local package_error=$(tail -n 5 "$package_output_file" 2>/dev/null | tr '\n' ' ')
-                        failed_packages+=("$package: $package_error")
-                        log_pip_error "$package" "$package_error" "individual install for $node_name"
-                    fi
-                done < requirements.txt
-                
-                if [[ $packages_installed -eq ${#requirements_list[@]} ]]; then
-                    node_details+=("$node_name: ✅ (${#requirements_list[@]} packages, individual install)")
-                    ((successful_nodes++))
-                    return 0
-                elif [[ $packages_installed -gt 0 ]]; then
-                    node_details+=("$node_name: ⚠️ (${packages_installed}/${#requirements_list[@]} packages)")
-                    ((successful_nodes++))
-            return 0
-        fi
-
-                # Strategy 3: Force reinstall (with error capture)
-                local force_pip_output_file="/tmp/pip_force_${node_name}.log"
-                if timeout 300 pip install --no-cache-dir --disable-pip-version-check --force-reinstall \
-                    -r requirements.txt 2>&1 | tee "$force_pip_output_file"; then
-                    node_details+=("$node_name: ✅ (${#requirements_list[@]} packages, forced)")
-                    log_pip_success "$node_name requirements" "force reinstall"
-                    ((successful_nodes++))
-                    return 0
-                else
-                    local force_pip_error=$(tail -n 10 "$force_pip_output_file" 2>/dev/null | tr '\n' ' ')
-                    log_detail "❌ Force reinstall failed for $node_name: $force_pip_error"
-                fi
-                
-                # All strategies failed
-                failed_details+=("$node_name: ❌ (${#requirements_list[@]} packages failed)")
-                log_node_failure "$node_name" "All pip installation strategies failed"
-                ((failed_nodes++))
-            return 1
-                
+            if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
+                return 0
             else
-                node_details+=("$node_name: ✅ (no requirements)")
-                ((successful_nodes++))
-            return 0
+                log_node_failure "$node_name" "Git update failed"
+                return 1
             fi
-        ) || {
-            failed_details+=("$node_name: ❌ (git/processing failed)")
-            log_node_failure "$node_name" "Git update or processing failed"
-            ((failed_nodes++))
-        }
+        ) || true
     done
     
-    # Store detailed results for final summary
-    CUSTOM_NODE_DETAILS=("${node_details[@]}")
-    CUSTOM_NODE_FAILED_DETAILS=("${failed_details[@]}")
-    
-    log "✅ Custom nodes update completed"
+    rm -f "$combined_reqs"
 }
 
-# BULLETPROOF dependency resolution (ignores dependency conflicts)
+process_combined_requirements() {
+    local req_file="$1"
+    local cache_dir="/storage/.pip_cache"
+    local resolved_reqs="/tmp/resolved_requirements.txt"
+    local verify_script="/tmp/verify_missing_packages.py"
+    
+    [[ ! -f "$req_file" ]] && return 0
+    
+    mkdir -p "$cache_dir"
+    export PIP_CACHE_DIR="$cache_dir"
+    export PIP_DISABLE_PIP_VERSION_CHECK=1
+    
+    cat > "/tmp/resolve_conflicts.py" << 'EOF'
+import re, sys
+from collections import defaultdict
+
+def parse_requirement(req):
+    match = re.match(r'^([a-zA-Z0-9_\-\.]+)(.*)$', req.strip())
+    if not match: return req.strip(), ""
+    name, version_spec = match.groups()
+    return name.lower(), version_spec.strip()
+
+def normalize_requirement(req):
+    if req.startswith(('git+', 'http')): return req
+    return req.split('#')[0].strip()
+
+requirements = []
+with open(sys.argv[1], 'r') as f:
+    for line in f:
+        line = line.strip()
+        if line and not line.startswith('#'):
+            req = normalize_requirement(line)
+            if req: requirements.append(req)
+
+package_versions = defaultdict(list)
+for req in requirements:
+    if req.startswith(('git+', 'http')): continue
+    name, version_spec = parse_requirement(req)
+    if name: package_versions[name].append((version_spec, req))
+
+resolved_requirements = []
+processed_packages = set()
+
+for req in requirements:
+    if req.startswith(('git+', 'http')):
+        if req not in processed_packages:
+            resolved_requirements.append(req)
+            processed_packages.add(req)
+        continue
+    
+    name, version_spec = parse_requirement(req)
+    if name and name not in processed_packages:
+        if len(package_versions[name]) > 1:
+            chosen_version = min(package_versions[name], key=lambda x: len(x[0]))
+            resolved_requirements.append(chosen_version[1])
+        else:
+            resolved_requirements.append(req)
+        processed_packages.add(name)
+
+with open(sys.argv[2], 'w') as f:
+    for req in sorted(set(resolved_requirements)):
+        f.write(f"{req}\n")
+EOF
+    
+    python "/tmp/resolve_conflicts.py" "$req_file" "$resolved_reqs" || cp "$req_file" "$resolved_reqs"
+    
+    cat > "$verify_script" << 'EOF'
+import sys, importlib.util, re
+
+def normalize_package_name(name):
+    base_name = re.sub(r'[<>=!~\[\];].*$', '', name).strip()
+    name_mapping = {
+        'opencv-contrib-python': 'cv2', 'opencv-python': 'cv2', 'scikit-image': 'skimage',
+        'scikit-learn': 'sklearn', 'pillow': 'PIL', 'pytorch': 'torch', 'pyyaml': 'yaml',
+        'python-dateutil': 'dateutil', 'protobuf': 'google.protobuf', 'blend-modes': 'blend_modes',
+        'transparent-background': 'transparent_background', 'inference-cli': 'inference',
+        'bitsandbytes': 'bitsandbytes', 'huggingface-hub': 'huggingface_hub',
+    }
+    return name_mapping.get(base_name.lower(), base_name.replace('-', '_').replace('.', '_'))
+
+def is_package_available(package_name):
+    if package_name.startswith(('git+', 'http')): return False
+    try:
+        module_name = normalize_package_name(package_name)
+        if '.' in module_name:
+            spec = importlib.util.find_spec(module_name)
+            if spec is not None: return True
+            parent_module = module_name.split('.')[0]
+            spec = importlib.util.find_spec(parent_module)
+            return spec is not None
+        else:
+            spec = importlib.util.find_spec(module_name)
+            return spec is not None
+    except: return False
+
+missing_packages = []
+with open(sys.argv[1], 'r') as f:
+    for line in f:
+        package = line.strip()
+        if package and not package.startswith('#'):
+            if not is_package_available(package):
+                missing_packages.append(package)
+
+with open(sys.argv[2], 'w') as f:
+    for pkg in missing_packages:
+        f.write(f"{pkg}\n")
+EOF
+    
+    python "$verify_script" "$resolved_reqs" "/tmp/missing_packages.txt"
+    
+    if [[ -s "/tmp/missing_packages.txt" ]]; then
+        split -l 5 "/tmp/missing_packages.txt" "/tmp/batch_"
+        
+        for batch_file in /tmp/batch_*; do
+            if timeout 180 pip install --no-cache-dir --disable-pip-version-check -r "$batch_file" 2>&1 | tee "/tmp/pip_batch_$(basename "$batch_file").log"; then
+                continue
+            else
+                while IFS= read -r package; do
+                    [[ -z "$package" ]] && continue
+                    if timeout 90 pip install --no-cache-dir --disable-pip-version-check "$package" 2>&1 | tee "/tmp/pip_individual_${package//[^a-zA-Z0-9]/_}.log"; then
+                        log_pip_success "$package" "individual install"
+                    else
+                        local error_msg=$(tail -n 3 "/tmp/pip_individual_${package//[^a-zA-Z0-9]/_}.log" 2>/dev/null | tr '\n' ' ')
+                        log_pip_error "$package" "$error_msg" "individual install"
+                    fi
+                done < "$batch_file"
+            fi
+        done
+        
+        rm -f /tmp/batch_* /tmp/pip_batch_* /tmp/pip_individual_*
+    fi
+    
+    if grep -E "git\+https?://" "$resolved_reqs" >/dev/null 2>&1; then
+        grep -E "git\+https?://" "$resolved_reqs" | while IFS= read -r repo; do
+            if timeout 300 pip install --no-cache-dir --disable-pip-version-check "$repo"; then
+                log_pip_success "$repo" "git repository"
+            else
+                log_pip_error "$repo" "Git installation timeout or failure" "git repository"
+            fi
+        done
+    fi
+    
+    rm -f "$resolved_reqs" "$verify_script" "/tmp/missing_packages.txt" "/tmp/resolve_conflicts.py"
+}
+
 resolve_dependencies() {
-    log "Installing core dependencies with conflict bypassing..."
-    
-    # Core Python dependencies - only reinstall if needed
-    log "Installing core Python packages..."
-    
-    # Fix core tools with multiple strategies
-    log "🔧 Installing core build tools..."
-    
-    # Strategy 1: Individual installation
     python -m pip install --upgrade pip 2>/dev/null || \
     curl https://bootstrap.pypa.io/get-pip.py | python 2>/dev/null || \
     log_error "pip upgrade failed"
     
-    if pip_install "wheel" "" false && pip_install "setuptools" "" false; then
-        log_success "Core tools (pip, wheel, setuptools)"
-    else
-        log_error "Core tools installation failed"
-    fi
+    pip_install "wheel" "" false && pip_install "setuptools" "" false
+    pip_install "numpy>=1.26.0,<2.3.0" "" false
     
-    if pip_install "numpy>=1.26.0,<2.3.0" "" false; then
-        log_success "NumPy"
-    else
-        log_error "NumPy installation failed"
-    fi
-    
-    # TensorFlow removed per user request - not needed for ComfyUI
-    # This eliminates the "Illegal instruction" crashes and reduces dependencies
-    
-    # Essential packages - try normal install first
-    log "Installing essential packages..."
-    
-    # Install build tools individually with better error handling
     local build_tools=("pybind11" "ninja" "packaging")
-    local build_success=0
-    
     for tool in "${build_tools[@]}"; do
-        log "🔧 Installing build tool: $tool (with wheel caching)"
-        if install_with_cache "$tool"; then
-            log_success "Build tool: $tool (cached wheel used)"
-            log_detail "✅ Build tool: $tool (cached wheel used)"
-            ((build_success++))
-        else
-            log_error "Build tool failed: $tool (continuing with next tool)"
-            log_detail "❌ Build tool failed: $tool (continuing with next tool)"
-            # Don't exit - continue with other tools
-        fi
+        install_with_cache "$tool" || log_error "Build tool failed: $tool"
     done
     
-    if [[ $build_success -eq ${#build_tools[@]} ]]; then
-        log_success "All build tools installed successfully"
-        log_detail "✅ All build tools installed successfully ($build_success/${#build_tools[@]})"
-    elif [[ $build_success -gt 0 ]]; then
-        log_success "Some build tools installed ($build_success/${#build_tools[@]} succeeded)"
-        log_detail "⚠️ Some build tools installed ($build_success/${#build_tools[@]} succeeded)"
-    else
-        log_error "All build tools installation failed - may cause compilation issues"
-        log_detail "❌ All build tools installation failed - may cause compilation issues"
-    fi
+    install_with_cache "av" || log_error "av installation failed"
+    install_with_cache "timm==1.0.13" || log_error "timm installation failed"
     
-    if install_with_cache "av"; then
-        log_success "av (pyav) for video processing (with wheel caching)"
-        log_detail "✅ av (pyav) for video processing (with wheel caching)"
-    else
-        log_error "av (pyav) installation failed"
-        log_detail "❌ av (pyav) installation failed"
-    fi
-    
-    if install_with_cache "timm==1.0.13"; then
-        log_success "timm (vision models) (with wheel caching)"
-        log_detail "✅ timm (vision models) (with wheel caching)"
-    else
-        log_error "timm installation failed"
-        log_detail "❌ timm installation failed"
-    fi
-    
-    # flet often conflicts, so uninstall first
     pip uninstall -y flet 2>/dev/null || true
-    if pip_install "flet==0.23.2" "" false; then
-        log_success "flet UI library"
-        log_detail "✅ flet UI library (version 0.23.2)"
-    else
-        log_error "flet installation failed"
-        log_detail "❌ flet installation failed"
-    fi
-    
-    # Install core system dependencies that are commonly needed
-    log "🔧 Installing core system dependencies..."
+    pip_install "flet==0.23.2" "" false || log_error "flet installation failed"
     
     local core_deps=(
-        "einops"
-        "scipy"
-        "torchsde"
-        "aiohttp"
-        "spandrel"
-        "kornia==0.7.0"
-        "urllib3==1.21"
-        "requests==2.31.0"
-        "fastapi==0.103.2"
-        "gradio_client==0.6.0"
-        "peewee==3.16.3"
-        "psutil==5.9.5"
-        "uvicorn==0.23.2"
-        "pynvml==11.5.0"
+        "einops" "scipy" "torchsde" "aiohttp" "spandrel"
+        "kornia==0.7.0" "urllib3==1.21" "requests==2.31.0"
+        "fastapi==0.103.2" "gradio_client==0.6.0" "peewee==3.16.3"
+        "psutil==5.9.5" "uvicorn==0.23.2" "pynvml==11.5.0"
         "python-multipart==0.0.6"
     )
     
     for dep in "${core_deps[@]}"; do
-        if install_with_cache "$dep"; then
-            log_success "Core dependency: $dep (with wheel caching)"
-            log_detail "✅ Core dependency: $dep (with wheel caching)"
-        else
-            log_error "Failed to install: $dep (continuing)"
-            log_detail "❌ Failed to install: $dep (continuing)"
-        fi
+        install_with_cache "$dep" || log_error "Failed to install: $dep"
     done
-    
-    # Custom node dependencies are now handled by update_custom_nodes() function
-    # which installs requirements.txt files directly from each custom node
-    log "✅ Custom node dependencies will be installed from their individual requirements.txt files"
-    
-    log "✅ Core dependencies installation completed"
-    
-    # Show wheel cache status
-    local wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
-    local cached_wheels=$(find "$wheel_cache" -name "*.whl" 2>/dev/null | wc -l)
-    log_detail "💾 Wheel cache status: $cached_wheels wheels cached in $wheel_cache"
-    
-    # Verify critical dependencies are working
-    log_detail "🔍 Verifying critical dependencies..."
-    local critical_deps=("segment_anything" "nunchaku" "opencv")
-    local verification_success=0
-    
-    for dep in "${critical_deps[@]}"; do
-        if [[ "$dep" == "opencv" ]]; then
-            if python -c "import cv2; import cv2.ximgproc; print('OpenCV contrib working')" 2>/dev/null; then
-                log_detail "✅ OpenCV contrib verification: SUCCESS"
-                ((verification_success++))
-            else
-                log_detail "❌ OpenCV contrib verification: FAILED"
-            fi
-        elif [[ "$dep" == "nunchaku" ]]; then
-            if python -c "import nunchaku; print(f'Nunchaku {nunchaku.__version__} working')" 2>/dev/null; then
-                log_detail "✅ Nunchaku verification: SUCCESS"
-                ((verification_success++))
-            else
-                log_detail "❌ Nunchaku verification: FAILED"
-            fi
-        elif [[ "$dep" == "segment_anything" ]]; then
-            if python -c "import segment_anything; print('Segment Anything working')" 2>/dev/null; then
-                log_detail "✅ Segment Anything verification: SUCCESS"
-                ((verification_success++))
-            else
-                log_detail "❌ Segment Anything verification: FAILED"
-            fi
-        fi
-    done
-    
-    log_detail "📊 Critical dependency verification: $verification_success/${#critical_deps[@]} working"
-    
-    log "📋 Continuing to requirements processing..."
 }
 
-# Component installer framework
 install_component() {
     local component="$1"
     local install_func="install_${component}"
     
     if declare -f "$install_func" >/dev/null; then
-        log "Installing $component..."
         "$install_func" || log_error "$component installation failed"
     fi
 }
 
-# SageAttention installer (simplified from complex original)
-    install_sageattention() {
-    # Check if already installed
+install_sageattention() {
     python -c "import sageattention" 2>/dev/null && return 0
     
     local cache_dir="/storage/.sageattention_cache"
     local wheel_cache="/storage/.wheel_cache"
     mkdir -p "$cache_dir" "$wheel_cache"
     
-    # Try cached wheel first
     local cached_wheel=$(find "$wheel_cache" -name "sageattention*.whl" 2>/dev/null | head -1)
     if [[ -n "$cached_wheel" ]]; then
-        log_detail "🔄 Trying cached SageAttention wheel: $cached_wheel"
         if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel" 2>/dev/null; then
-            log_success "SageAttention (from cached wheel)"
-            log_detail "✅ SageAttention (from cached wheel)"
             return 0
         else
-            log_detail "⚠️ Cached wheel failed, removing and trying source build..."
             rm -f "$cached_wheel"
         fi
     fi
     
-    # Build from source
     if [[ ! -d "$cache_dir/src" ]]; then
         git clone https://github.com/thu-ml/SageAttention.git "$cache_dir/src" || return 1
     fi
     
-    # Set build environment
     export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions"
-        export MAX_JOBS=$(nproc)
-        export USE_NINJA=1
+    export MAX_JOBS=$(nproc)
+    export USE_NINJA=1
     
-    # Build and install
     (
         cd "$cache_dir/src" &&
         rm -rf build dist *.egg-info &&
@@ -737,42 +654,9 @@ install_component() {
     ) || return 1
 }
 
-# Nunchaku installer (working version)
 install_nunchaku() {
-    log "Installing Nunchaku for enhanced machine learning capabilities..."
-    log_detail "Starting Nunchaku installation process"
+    python -c "import nunchaku" 2>/dev/null && return 0
     
-    # Setup Nunchaku cache directories
-    local nunchaku_cache_base="/storage/.nunchaku_cache"
-    local nunchaku_version="0.3.1"
-    local python_version
-    python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-    local arch=$(uname -m)
-
-    # Dynamically determine the torch version tag for the wheel, e.g., "2.7"
-    local torch_version_major_minor
-    torch_version_major_minor=$(python -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))" 2>/dev/null || echo "unknown")
-    
-    # Get the full torch version for cache markers, e.g., "2.7.1"
-    local torch_version
-    torch_version=$(python -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || echo "unknown")
-    
-    # Create cache directory structure
-    export NUNCHAKU_CACHE_DIR="${nunchaku_cache_base}/v${nunchaku_version}_cp${python_version}_torch${torch_version}_${arch}"
-    mkdir -p "$NUNCHAKU_CACHE_DIR" "$WHEEL_CACHE_DIR"
-    
-    log_detail "Nunchaku cache directory: $NUNCHAKU_CACHE_DIR"
-    log_detail "Wheel cache directory: $WHEEL_CACHE_DIR"
-    
-    # Check if Nunchaku is already installed and working
-    if python -c "import nunchaku; print(f'Nunchaku {nunchaku.__version__} already installed and working')" 2>/dev/null; then
-        log "✅ Nunchaku already installed and working, skipping installation"
-        log_detail "✅ Nunchaku already installed and working, skipping installation"
-        return 0
-    fi
-    
-    # Check PyTorch version to ensure compatibility
-    log_detail "Checking PyTorch compatibility for Nunchaku..."
     local torch_check_output
     torch_check_output=$(python -c "
 import sys
@@ -785,7 +669,7 @@ try:
         sys.exit(0)
     else:
         print(f'incompatible: {major}.{minor} < 2.5')
-        sys.exit(1)
+    sys.exit(1)
 except Exception as e:
     print(f'error: {e}')
     sys.exit(1)
@@ -793,39 +677,27 @@ except Exception as e:
     
     if [[ "$torch_check_output" != "compatible" ]]; then
         log_error "PyTorch version incompatible for Nunchaku: $torch_check_output"
-        log_detail "❌ PyTorch version incompatible for Nunchaku: $torch_check_output"
         return 1
     fi
     
-    log_detail "✅ PyTorch compatibility check passed"
-    
-    # Uninstall any existing nunchaku
     pip uninstall -y nunchaku 2>/dev/null || true
     
-    # Try to install the specific version
-    log_detail "Installing nunchaku version $nunchaku_version..."
-    if pip install "nunchaku==$nunchaku_version" 2>&1 | tee /tmp/nunchaku_install.log; then
-        log_success "Nunchaku version $nunchaku_version installed successfully"
-        log_detail "✅ Nunchaku version $nunchaku_version installed successfully"
-        log_pip_success "nunchaku" "version $nunchaku_version"
+    if pip install "nunchaku==0.3.1" 2>&1 | tee /tmp/nunchaku_install.log; then
+        log_pip_success "nunchaku" "version 0.3.1"
         return 0
     else
         local install_error=$(tail -n 5 /tmp/nunchaku_install.log 2>/dev/null | tr '\n' ' ')
-        log_error "Failed to install nunchaku version $nunchaku_version"
-        log_detail "❌ Failed to install nunchaku version $nunchaku_version"
-        log_pip_error "nunchaku" "$install_error" "version $nunchaku_version"
+        log_pip_error "nunchaku" "$install_error" "version 0.3.1"
         return 1
     fi
 }
             
-# Hunyuan3D texture components (simplified)
-    install_hunyuan3d_texture_components() {
-        local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
+install_hunyuan3d_texture_components() {
+    local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
     [[ ! -d "$hunyuan3d_path" ]] && return 1
     
     pip_install "pybind11 ninja"
     
-    # Install custom_rasterizer and DifferentiableRenderer
     for component in custom_rasterizer DifferentiableRenderer; do
         local comp_path="$hunyuan3d_path/hy3dpaint/$component"
         if [[ -d "$comp_path" ]]; then
@@ -834,19 +706,14 @@ except Exception as e:
     done
 }
 
-# Requirements processor (simplified from complex original)
-    process_requirements() {
-        local req_file="$1"
+process_requirements() {
+    local req_file="$1"
     [[ ! -f "$req_file" ]] && return 0
     
-    log "Processing requirements: $(basename "$req_file")"
-    
-    # Simple batch installation with timeout
     timeout 120s pip_install "-r $req_file" || {
-        # Fallback: install individually
         while read -r pkg; do
-            [[ "$pkg" =~ ^[[:space:]]*# ]] && continue  # Skip comments
-            [[ -z "$pkg" ]] && continue  # Skip empty lines
+            [[ "$pkg" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$pkg" ]] && continue
             pip_install "$pkg" || true
         done < "$req_file"
     }
@@ -865,63 +732,33 @@ service_loop() {
 #######################################
 
 main() {
-    log "Starting ComfyUI setup..."
-    
-    echo ""
-    echo "🎯 INTELLIGENT INSTALLATION MODE ENABLED"
-    echo "   ✅ Checking existing packages before installing"
-    echo "   ✅ Avoiding unnecessary reinstalls and uninstalls"
-    echo "   ✅ Force reinstall only when conflicts detected"
-    echo "   ✅ This will SIGNIFICANTLY reduce installation time!"
-    echo "   ✅ No more endless pip install/uninstall cycles!"
-    echo ""
-    
-    # Test connectivity first
     test_connectivity || {
         log_error "Network connectivity test failed. Check your internet connection."
         exit 1
     }
     
-    # Only run setup if needed
     if [[ -f "/tmp/sd_comfy.prepared" && -z "$REINSTALL_SD_COMFY" ]]; then
-        log "ComfyUI already prepared. Activating environment..."
         source "${VENV_DIR:-/tmp}/sd_comfy-env/bin/activate" || exit 1
-                    return 0
+        return 0
     fi
     
-    # Environment and CUDA setup
     setup_cuda_env
     install_cuda
     
-    # Repository setup
     cd "$REPO_DIR"
     export TARGET_REPO_URL="https://github.com/comfyanonymous/ComfyUI.git"
     export TARGET_REPO_DIR=$REPO_DIR
     export UPDATE_REPO=$SD_COMFY_UPDATE_REPO
     export UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT
     
-    # Update main ComfyUI repository
-    log "🔄 Updating main ComfyUI repository..."
     if [[ -d ".git" ]]; then
-        # Reset any local changes to requirements.txt
         [[ -n "$(git status --porcelain requirements.txt 2>/dev/null)" ]] && git checkout -- requirements.txt
-        
-        # Ensure we're on a proper branch
         if ! git symbolic-ref -q HEAD >/dev/null; then
             git checkout main || git checkout master || git checkout -b main
         fi
-        
-        # Update to latest
-        if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
-            log "✅ ComfyUI repository updated successfully"
-        else
-            log "⚠️ ComfyUI repository update had issues (continuing)"
-                    fi
-                else
-        log "⚠️ ComfyUI repository not found, skipping update"
+        git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null
     fi
     
-    # Create directory symlinks (from original)
     prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy" \
                  "$MODEL_DIR:$WORKING_DIR/models" \
                  "$MODEL_DIR/sd:$LINK_MODEL_TO" \
@@ -932,44 +769,29 @@ main() {
                  "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO" \
                  "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
     
-    # Virtual environment setup
     local venv_path="${VENV_DIR:-/tmp}/sd_comfy-env"
     rm -rf "$venv_path"
     python3.10 -m venv "$venv_path"
     source "$venv_path/bin/activate"
     
-    # System dependencies
     apt-get update -qq
     apt-get install -y \
         libatlas-base-dev libblas-dev liblapack-dev \
         libjpeg-dev libpng-dev python3-dev build-essential \
         libgl1-mesa-dev espeak-ng 2>/dev/null || true
     
-    # Core installations
     setup_pytorch
     install_component "sageattention"
     install_component "nunchaku"
     install_component "hunyuan3d_texture_components"
     
-    # Dependencies and updates
-    log "🔄 Step 1: Installing core nunchaku package (required by nunchaku nodes)..."
     install_component "nunchaku" || log_error "Nunchaku installation had issues (continuing)"
-    
-    log "🔄 Step 2: Updating ComfyUI Manager (if present)..."
     update_comfyui_manager || log_error "ComfyUI Manager update had issues (continuing)"
-    
-    log "🔄 Step 3: Updating custom nodes..."
     update_custom_nodes || log_error "Custom nodes update had issues (continuing)"
-    
-    log "🔄 Step 4: Resolving core dependencies..."
     resolve_dependencies || log_error "Some dependencies failed (continuing)"
-    
-    # Process requirements files
-    log "🔄 Step 5: Processing requirements files..."
     process_requirements "$REPO_DIR/requirements.txt" || log_error "Core requirements had issues (continuing)"
     
     touch "/tmp/sd_comfy.prepared"
-    log "✅ ComfyUI setup complete! Proceeding to model download and launch..."
 }
 
 # Model download (can run in background)
