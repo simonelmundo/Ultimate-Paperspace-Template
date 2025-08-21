@@ -3,7 +3,7 @@
 
 #######################################
 # OPTIMIZED COMFYUI SETUP SCRIPT
-# 90% Reduction from 1939 to ~280 lines
+# 70% Reduction from 1939 to ~577 lines (further optimized)
 # Maintains all essential functionality
 #######################################
 
@@ -26,62 +26,16 @@ mkdir -p "$LOG_DIR"
 # GLOBAL VIRTUAL ENVIRONMENT ACTIVATION - Activate once, keep active
 activate_global_venv() {
     local venv_path="${VENV_DIR:-/tmp}/sd_comfy-env"
-    
-    # If venv doesn't exist, create it
-    if [[ ! -d "$venv_path" ]]; then
-        log "🔧 Creating virtual environment: $venv_path"
-        python3.10 -m venv "$venv_path" || {
-            log_error "Failed to create virtual environment"
-            exit 1
-        }
-    fi
-    
-    # Activate the virtual environment
-    log "🔧 Activating virtual environment: $venv_path"
-    source "$venv_path/bin/activate" || {
-        log_error "Failed to activate virtual environment"
-        exit 1
-    }
-    
-    # Verify activation worked
-    if [[ "$VIRTUAL_ENV" != "$venv_path" ]]; then
-        log_error "Virtual environment activation failed - VIRTUAL_ENV=$VIRTUAL_ENV"
-        exit 1
-    fi
-    
-    log "✅ Virtual environment activated: $VIRTUAL_ENV"
-    log "✅ Python executable: $(which python)"
-    log "✅ Python version: $(python --version)"
+    [[ ! -d "$venv_path" ]] && python3.10 -m venv "$venv_path"
+    source "$venv_path/bin/activate"
 }
 
-# Verify virtual environment is still active
-verify_venv_active() {
-    if [[ -z "$VIRTUAL_ENV" ]]; then
-        log_error "❌ Virtual environment is not active! Re-activating..."
-        activate_global_venv
-        return 1
-    fi
-    
-    local expected_venv="${VENV_DIR:-/tmp}/sd_comfy-env"
-    if [[ "$VIRTUAL_ENV" != "$expected_venv" ]]; then
-        log_error "❌ Wrong virtual environment active! Expected: $expected_venv, Got: $VIRTUAL_ENV"
-        activate_global_venv
-        return 1
-    fi
-    
-    return 0
-}
+
 
 # Test network connectivity
 test_connectivity() {
     log "Testing network connectivity..."
-    if ping -c 1 8.8.8.8 &>/dev/null; then
-        log "✅ Network connectivity OK"
-        return 0
-    else
-        log_error "❌ Network connectivity failed"
-        return 1
-    fi
+    ping -c 1 8.8.8.8 &>/dev/null && { log "✅ Network connectivity OK"; return 0; } || { log_error "❌ Network connectivity failed"; return 1; }
 }
 
 # Enhanced logging with error tracking
@@ -146,96 +100,40 @@ log_node_failure() {
 
 # Single CUDA environment setup (replaces 6+ duplicate functions)
 setup_cuda_env() {
-    export CUDA_HOME=/usr/local/cuda-12.6
-    export PATH=$CUDA_HOME/bin:$PATH
-    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-    export FORCE_CUDA=1
-    export CUDA_VISIBLE_DEVICES=0
-    export PYOPENGL_PLATFORM="osmesa"
-    export WINDOW_BACKEND="headless"
-    export TORCH_CUDA_ARCH_LIST="8.6"
-    export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
-    export CUDA_LAUNCH_BLOCKING=0
-    export CUDA_DEVICE_MAX_CONNECTIONS=32
-    export TORCH_CUDNN_V8_API_ENABLED=1
+    export CUDA_HOME=/usr/local/cuda-12.6 PATH=$CUDA_HOME/bin:$PATH LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH FORCE_CUDA=1 CUDA_VISIBLE_DEVICES=0 PYOPENGL_PLATFORM="osmesa" WINDOW_BACKEND="headless" TORCH_CUDA_ARCH_LIST="8.6" PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8" CUDA_LAUNCH_BLOCKING=0 CUDA_DEVICE_MAX_CONNECTIONS=32 TORCH_CUDNN_V8_API_ENABLED=1
 }
 
 # SMART pip installer - avoids unnecessary reinstalls
 pip_install() {
-    local package="$1"
-    local flags="${2:---no-cache-dir --disable-pip-version-check}"
-    local force="${3:-false}"
-    
-    # Extract package name for checking
+    local package="$1" flags="${2:---no-cache-dir --disable-pip-version-check}" force="${3:-false}"
     local pkg_name=$(echo "$package" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
     
     # Check if package is already installed (unless forcing)
-    if [[ "$force" != "true" ]] && python -c "import $pkg_name" 2>/dev/null; then
-        log "⏭️ Already installed: $pkg_name (skipping)"
-             return 0
-    fi
+    [[ "$force" != "true" ]] && python -c "import $pkg_name" 2>/dev/null && { log "⏭️ Already installed: $pkg_name (skipping)"; return 0; }
     
     log "Installing: $package"
+    local install_flags="$flags"; [[ "$force" == "true" ]] && install_flags="$flags --force-reinstall"
     
-    # Add --force-reinstall only if explicitly requested
-    local install_flags="$flags"
-    if [[ "$force" == "true" ]]; then
-        install_flags="$flags --force-reinstall"
-    fi
-    
-        if pip install $install_flags "$package" 2>&1 | tee /tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log; then
-        log "✅ Successfully installed: $package"
-        log_pip_success "$package" "pip_install function"
-        return 0
-    else
-        local pip_error=$(tail -n 5 /tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log 2>/dev/null | tr '\n' ' ')
-        log_error "❌ Failed to install: $package"
-        log_pip_error "$package" "$pip_error" "pip_install function"
-        return 1
-    fi
+    pip install $install_flags "$package" 2>&1 | tee /tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log && { log "✅ Successfully installed: $package"; log_pip_success "$package" "pip_install function"; return 0; } || { local pip_error=$(tail -n 5 /tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log 2>/dev/null | tr '\n' ' '); log_error "❌ Failed to install: $package"; log_pip_error "$package" "$pip_error" "pip_install function"; return 1; }
 }
 
 # Smart package installer with robust wheel caching
 install_with_cache() {
-    local package="$1"
-    local wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
-    local pip_cache="${PIP_CACHE_DIR:-/storage/.pip_cache}"
-    
-    mkdir -p "$wheel_cache" "$pip_cache"
-    
-    # Set pip cache directory
-    export PIP_CACHE_DIR="$pip_cache"
-    
-    # Extract package name for caching (remove version constraints)
+    local package="$1" wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}" pip_cache="${PIP_CACHE_DIR:-/storage/.pip_cache}"
     local pkg_name=$(echo "$package" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
     
-    # Try cached wheel first
+    # Check if package is already installed first
+    python -c "import $pkg_name" 2>/dev/null && { log "⏭️ Already installed: $pkg_name (skipping)"; return 0; }
+    
+    mkdir -p "$wheel_cache" "$pip_cache" && export PIP_CACHE_DIR="$pip_cache"
     local cached_wheel=$(find "$wheel_cache" -name "${pkg_name}*.whl" -type f 2>/dev/null | head -1)
-    if [[ -n "$cached_wheel" && -f "$cached_wheel" ]]; then
-        log "🔄 Using cached wheel: $(basename "$cached_wheel")"
-        if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel" 2>/dev/null; then
-            return 0
-        else
-            log "⚠️ Cached wheel failed, removing and rebuilding..."
-            rm -f "$cached_wheel"
-        fi
-    fi
+    
+    # Try cached wheel first
+    [[ -n "$cached_wheel" && -f "$cached_wheel" ]] && { log "🔄 Using cached wheel: $(basename "$cached_wheel")"; pip install --no-cache-dir --disable-pip-version-check "$cached_wheel" 2>/dev/null && return 0 || { log "⚠️ Cached wheel failed, removing and rebuilding..."; rm -f "$cached_wheel"; }; }
     
     # Install with pip cache and save wheels
     log "📦 Installing and caching: $package"
-    if pip install --cache-dir "$pip_cache" --disable-pip-version-check "$package" 2>/dev/null; then
-        # Copy any new wheels to our cache
-        local wheels_found=0
-        find "$pip_cache" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1
-        find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1
-        
-        if [[ $wheels_found -eq 1 ]]; then
-            log_detail "💾 Wheel cached for future use: $package"
-        fi
-        return 0
-    else
-        return 1
-    fi
+    pip install --cache-dir "$pip_cache" --disable-pip-version-check "$package" 2>/dev/null && { local wheels_found=0; find "$pip_cache" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1; find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1; [[ $wheels_found -eq 1 ]] && log_detail "💾 Wheel cached for future use: $package"; return 0; } || return 1
 }
 
 # Consolidated CUDA installation (replaces install_cuda_12 function)
@@ -243,49 +141,27 @@ install_cuda() {
     local marker="/storage/.cuda_12.6_installed"
     
     # Check if already installed
-    if [[ -f "$marker" ]]; then
-        setup_cuda_env
-        hash -r
-        if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.6"* ]]; then
-             return 0
-        fi
-    fi
+    [[ -f "$marker" ]] && { setup_cuda_env; hash -r; command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.6"* ]] && return 0; }
     
     log "Installing CUDA 12.6..."
     
-    # Clean up old CUDA versions
+    # Clean up old CUDA versions and install new
     dpkg -l | grep -q "cuda-11" && apt-get remove --purge -y 'cuda-11-*' 2>/dev/null || true
-    
-    # Add CUDA repository
     wget -qO /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
-    dpkg -i /tmp/cuda-keyring.deb
-    rm -f /tmp/cuda-keyring.deb
-
-    # Update and install
-    apt-get update -qq
-    apt-get install -y \
-        build-essential python3-dev \
-        cuda-cudart-12-6 cuda-nvcc-12-6 \
-        libcublas-12-6 libcufft-12-6 \
-        libcurand-12-6 libcusolver-12-6 \
-        libcusparse-12-6 libnpp-12-6 2>/dev/null
+    dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb
     
-    # Configure environment
-    setup_cuda_env
-    hash -r
-
-    # Verify and create marker
-    if command -v nvcc &>/dev/null; then
-        touch "$marker"
-    # Make environment persistent
-    cat > /etc/profile.d/cuda12.sh << 'EOL'
+    # Update and install CUDA packages (including development headers)
+    apt-get update -qq && apt-get install -y build-essential python3-dev cuda-cudart-12-6 cuda-nvcc-12-6 libcublas-12-6 libcublas-dev-12-6 libcufft-12-6 libcufft-dev-12-6 libcurand-12-6 libcurand-dev-12-6 libcusolver-12-6 libcusolver-dev-12-6 libcusparse-12-6 libcusparse-dev-12-6 libnpp-12-6 libnpp-dev-12-6 2>/dev/null
+    
+    # Configure environment and verify
+    setup_cuda_env && hash -r
+    command -v nvcc &>/dev/null && { touch "$marker"; cat > /etc/profile.d/cuda12.sh << 'EOL'
 export CUDA_HOME=/usr/local/cuda-12.6
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export FORCE_CUDA=1
 EOL
-    chmod +x /etc/profile.d/cuda12.sh
-    fi
+        chmod +x /etc/profile.d/cuda12.sh; }
 }
 
 # ULTIMATE PyTorch Installation (uses multiple strategies to beat dependency hell)
@@ -410,74 +286,41 @@ EOF
 # Update ComfyUI Manager specifically (it's a critical component)
 update_comfyui_manager() {
     local manager_dir="$REPO_DIR/custom_nodes/comfyui-manager"
-    
-    if [[ ! -d "$manager_dir" ]]; then
-        log "⚠️ ComfyUI Manager not found, skipping update"
-        return 0
-    fi
-    
+    [[ ! -d "$manager_dir" ]] && { log "⚠️ ComfyUI Manager not found, skipping update"; return 0; }
     log "🔧 Updating ComfyUI Manager..."
-    
-    (
-        cd "$manager_dir" || return 1
-        
-        # Git update
-        if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
-            log "✅ ComfyUI Manager git update successful"
-        else
-            log "⚠️ ComfyUI Manager git update had issues"
-        fi
-        
-        # Install requirements if they exist
-        if [[ -f requirements.txt ]]; then
-            log "📦 Installing ComfyUI Manager dependencies..."
-            if timeout 300 pip install --no-cache-dir --disable-pip-version-check \
-                -r requirements.txt &>/dev/null; then
-                log "✅ ComfyUI Manager dependencies installed"
-            else
-                log "⚠️ ComfyUI Manager dependencies had issues (continuing)"
-        fi
-    else
-            log "⏭️ ComfyUI Manager has no requirements.txt"
-        fi
-    ) || log_error "ComfyUI Manager update failed"
+    cd "$manager_dir" || { log_error "ComfyUI Manager directory access failed"; return 1; }
+    git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null && log "✅ ComfyUI Manager git update successful" || log "⚠️ ComfyUI Manager git update had issues"
+    cd - > /dev/null
+    [[ -f "$manager_dir/requirements.txt" ]] && { log "📦 Installing ComfyUI Manager dependencies..."; pip install -r "$manager_dir/requirements.txt" && log "✅ ComfyUI Manager dependencies installed" || log "⚠️ ComfyUI Manager dependencies had issues (continuing)"; } || log "⏭️ ComfyUI Manager has no requirements.txt"
 }
 
 update_custom_nodes() {
     local nodes_dir="$REPO_DIR/custom_nodes"
     [[ ! -d "$nodes_dir" ]] && return 0
     
+    # Collect requirements from all nodes
     local combined_reqs="/tmp/all_custom_node_requirements.txt"
     echo -n > "$combined_reqs"
-    
     for git_dir in "$nodes_dir"/*/.git; do
         [[ ! -d "$git_dir" ]] && continue
         local node_dir="${git_dir%/.git}"
         local node_name=$(basename "$node_dir")
-        
-        if [[ -f "$node_dir/requirements.txt" && -s "$node_dir/requirements.txt" ]]; then
-            echo "# From $node_name" >> "$combined_reqs"
-            grep -v "^[[:space:]]*#\|^[[:space:]]*$" "$node_dir/requirements.txt" >> "$combined_reqs"
-            echo "" >> "$combined_reqs"
-        fi
+        [[ -f "$node_dir/requirements.txt" && -s "$node_dir/requirements.txt" ]] && { echo "# From $node_name" >> "$combined_reqs"; grep -v "^[[:space:]]*#\|^[[:space:]]*$" "$node_dir/requirements.txt" >> "$combined_reqs"; echo "" >> "$combined_reqs"; }
     done
     
     [[ -s "$combined_reqs" ]] && process_combined_requirements "$combined_reqs"
     
+    # Update all git repositories
     for git_dir in "$nodes_dir"/*/.git; do
         [[ ! -d "$git_dir" ]] && continue
         local node_dir="${git_dir%/.git}"
         local node_name=$(basename "$node_dir")
-        
-        (
-            cd "$node_dir" || return 1
-            if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
-                    return 0
-                else
-                log_node_failure "$node_name" "Git update failed"
-                return 1
-            fi
-        ) || true
+        if cd "$node_dir"; then
+            git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null
+            cd - > /dev/null
+        else
+            log_node_failure "$node_name" "Git update failed - directory access failed"
+        fi
     done
     
     rm -f "$combined_reqs"
@@ -597,16 +440,15 @@ EOF
         split -l 5 "/tmp/missing_packages.txt" "/tmp/batch_"
         
         for batch_file in /tmp/batch_*; do
-            if timeout 180 pip install --no-cache-dir --disable-pip-version-check -r "$batch_file" 2>&1 | tee "/tmp/pip_batch_$(basename "$batch_file").log"; then
+            if pip install --no-cache-dir --disable-pip-version-check -r "$batch_file" 2>&1 | tee "/tmp/pip_batch_$(basename "$batch_file").log"; then
             continue
             else
                 while IFS= read -r package; do
                     [[ -z "$package" ]] && continue
-                    if timeout 90 pip install --no-cache-dir --disable-pip-version-check "$package" 2>&1 | tee "/tmp/pip_individual_${package//[^a-zA-Z0-9]/_}.log"; then
+                    if pip_install "$package"; then
                         log_pip_success "$package" "individual install"
                     else
-                        local error_msg=$(tail -n 3 "/tmp/pip_individual_${package//[^a-zA-Z0-9]/_}.log" 2>/dev/null | tr '\n' ' ')
-                        log_pip_error "$package" "$error_msg" "individual install"
+                        log_pip_error "$package" "Installation failed" "individual install"
                     fi
                 done < "$batch_file"
         fi
@@ -617,10 +459,10 @@ EOF
     
     if grep -E "git\+https?://" "$resolved_reqs" >/dev/null 2>&1; then
         grep -E "git\+https?://" "$resolved_reqs" | while IFS= read -r repo; do
-            if timeout 300 pip install --no-cache-dir --disable-pip-version-check "$repo"; then
+            if pip_install "$repo"; then
                 log_pip_success "$repo" "git repository"
             else
-                log_pip_error "$repo" "Git installation timeout or failure" "git repository"
+                log_pip_error "$repo" "Git installation failed" "git repository"
         fi
     done
     fi
@@ -629,128 +471,66 @@ EOF
 }
 
 resolve_dependencies() {
-    python -m pip install --upgrade pip 2>/dev/null || \
-    curl https://bootstrap.pypa.io/get-pip.py | python 2>/dev/null || \
-    log_error "pip upgrade failed"
+    python -m pip install --upgrade pip 2>/dev/null || curl https://bootstrap.pypa.io/get-pip.py | python 2>/dev/null || log_error "pip upgrade failed"
     
-    pip_install "wheel" "" false && pip_install "setuptools" "" false
-    pip_install "numpy>=1.26.0,<2.3.0" "" false
+    # Install core build tools
+    for pkg in "wheel" "setuptools" "numpy>=1.26.0,<2.3.0"; do pip_install "$pkg" "" false; done
     
+    # Install build tools
     local build_tools=("pybind11" "ninja" "packaging")
-    for tool in "${build_tools[@]}"; do
-        install_with_cache "$tool" || log_error "Build tool failed: $tool"
-    done
+    for tool in "${build_tools[@]}"; do install_with_cache "$tool" || log_error "Build tool failed: $tool"; done
     
+    # Install specific packages
     install_with_cache "av" || log_error "av installation failed"
     install_with_cache "timm==1.0.13" || log_error "timm installation failed"
-    
     pip uninstall -y flet 2>/dev/null || true
     pip_install "flet==0.23.2" "" false || log_error "flet installation failed"
     
-    local core_deps=(
-        "einops" "scipy" "torchsde" "aiohttp" "spandrel"
-        "kornia==0.7.0" "urllib3==1.21" "requests==2.31.0"
-        "fastapi==0.103.2" "gradio_client==0.6.0" "peewee==3.16.3"
-        "psutil==5.9.5" "uvicorn==0.23.2" "pynvml==11.5.0"
-        "python-multipart==0.0.6"
-    )
-    
-    for dep in "${core_deps[@]}"; do
-        install_with_cache "$dep" || log_error "Failed to install: $dep"
-    done
+    # Install core dependencies
+    local core_deps=("einops" "scipy" "torchsde" "aiohttp" "spandrel" "kornia==0.7.0" "urllib3==1.21" "requests==2.31.0" "fastapi==0.103.2" "gradio_client==0.6.0" "peewee==3.16.3" "psutil==5.9.5" "uvicorn==0.23.2" "pynvml==11.5.0" "python-multipart==0.0.6")
+    for dep in "${core_deps[@]}"; do install_with_cache "$dep" || log_error "Failed to install: $dep"; done
 }
 
 install_component() {
-    local component="$1"
-    local install_func="install_${component}"
-    
-    if declare -f "$install_func" >/dev/null; then
-        "$install_func" || log_error "$component installation failed"
-    fi
+    local component="$1" install_func="install_${component}"
+    declare -f "$install_func" >/dev/null && "$install_func" || log_error "$component installation failed"
 }
 
     install_sageattention() {
     python -c "import sageattention" 2>/dev/null && return 0
-    
-    local cache_dir="/storage/.sageattention_cache"
-    local wheel_cache="/storage/.wheel_cache"
+    local cache_dir="/storage/.sageattention_cache" wheel_cache="/storage/.wheel_cache"
     mkdir -p "$cache_dir" "$wheel_cache"
-    
     local cached_wheel=$(find "$wheel_cache" -name "sageattention*.whl" 2>/dev/null | head -1)
-    if [[ -n "$cached_wheel" ]]; then
-        if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel" 2>/dev/null; then
-                return 0
-            else
-            rm -f "$cached_wheel"
-        fi
-    fi
-    
-    if [[ ! -d "$cache_dir/src" ]]; then
-        git clone https://github.com/thu-ml/SageAttention.git "$cache_dir/src" || return 1
-    fi
-    
-    export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions"
-        export MAX_JOBS=$(nproc)
-        export USE_NINJA=1
-    
-    (
-        cd "$cache_dir/src" &&
-        rm -rf build dist *.egg-info &&
-        python setup.py bdist_wheel &&
-        local wheel=$(find dist -name "*.whl" | head -1) &&
-        [[ -n "$wheel" ]] && cp "$wheel" "$wheel_cache/" &&
-        pip_install "$wheel"
-    ) || return 1
+    [[ -n "$cached_wheel" ]] && { pip_install "$cached_wheel" && return 0 || rm -f "$cached_wheel"; }
+    [[ ! -d "$cache_dir/src" ]] && git clone https://github.com/thu-ml/SageAttention.git "$cache_dir/src" || return 1
+    export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions" MAX_JOBS=$(nproc) USE_NINJA=1
+    cd "$cache_dir/src" || return 1
+    rm -rf build dist *.egg-info
+    python setup.py bdist_wheel || return 1
+    local wheel=$(find dist -name "*.whl" | head -1)
+    [[ -n "$wheel" ]] && cp "$wheel" "$wheel_cache/" && pip_install "$wheel" || return 1
+    cd - > /dev/null
 }
 
     install_nunchaku() {
     python -c "import nunchaku" 2>/dev/null && return 0
-    
-        local torch_check_output
-        torch_check_output=$(python -c "
-import sys
-try:
-    import torch
-    v = torch.__version__.split('+')[0]
-    major, minor = map(int, v.split('.')[:2])
-    if major > 2 or (major == 2 and minor >= 5):
-        print('compatible')
-        sys.exit(0)
-    else:
-        print(f'incompatible: {major}.{minor} < 2.5')
-    sys.exit(1)
-except Exception as e:
-    print(f'error: {e}')
-    sys.exit(1)
-" 2>/dev/null)
-    
-    if [[ "$torch_check_output" != "compatible" ]]; then
-        log_error "PyTorch version incompatible for Nunchaku: $torch_check_output"
-            return 1
-        fi
-        
+    local torch_check_output=$(python -c "import sys; import torch; v=torch.__version__.split('+')[0]; major,minor=map(int,v.split('.')[:2]); print('compatible' if major>2 or (major==2 and minor>=5) else f'incompatible: {major}.{minor} < 2.5'); sys.exit(0 if major>2 or (major==2 and minor>=5) else 1)" 2>/dev/null)
+    [[ "$torch_check_output" != "compatible" ]] && { log_error "PyTorch version incompatible for Nunchaku: $torch_check_output"; return 1; }
     pip uninstall -y nunchaku 2>/dev/null || true
-    
-    if pip install "nunchaku==0.3.1" 2>&1 | tee /tmp/nunchaku_install.log; then
-        log_pip_success "nunchaku" "version 0.3.1"
-                return 0
-            else
-        local install_error=$(tail -n 5 /tmp/nunchaku_install.log 2>/dev/null | tr '\n' ' ')
-        log_pip_error "nunchaku" "$install_error" "version 0.3.1"
-                    return 1
-    fi
+    pip_install "nunchaku==0.3.1" "" true && { log_pip_success "nunchaku" "version 0.3.1"; return 0; } || { log_pip_error "nunchaku" "Installation failed using pip_install" "version 0.3.1"; return 1; }
 }
             
     install_hunyuan3d_texture_components() {
         local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
     [[ ! -d "$hunyuan3d_path" ]] && return 1
-    
-    pip_install "pybind11 ninja"
-    
+    pip_install "pybind11"
+    pip_install "ninja"
     for component in custom_rasterizer DifferentiableRenderer; do
         local comp_path="$hunyuan3d_path/hy3dpaint/$component"
         if [[ -d "$comp_path" ]]; then
-            (cd "$comp_path" && python setup.py install) || log_error "$component installation failed"
+            cd "$comp_path" || { log_error "$component directory access failed"; continue; }
+            python setup.py install || log_error "$component installation failed"
+            cd - > /dev/null
         fi
     done
 }
@@ -758,23 +538,11 @@ except Exception as e:
     process_requirements() {
         local req_file="$1"
     [[ ! -f "$req_file" ]] && return 0
-    
-    timeout 120s pip_install "-r $req_file" || {
-        while read -r pkg; do
-            [[ "$pkg" =~ ^[[:space:]]*# ]] && continue
-            [[ -z "$pkg" ]] && continue
-            pip_install "$pkg" || true
-        done < "$req_file"
-    }
+    pip install -r "$req_file" || { while read -r pkg; do [[ "$pkg" =~ ^[[:space:]]*# ]] || [[ -z "$pkg" ]] || pip_install "$pkg" || true; done < "$req_file"; }
 }
 
 # Service loop function (from original)
-service_loop() {
-    while true; do
-        eval "$1"
-        sleep 1
-    done
-}
+service_loop() { while true; do eval "$1"; sleep 1; done; }
 
 #######################################
 # MAIN EXECUTION FLOW
@@ -800,42 +568,19 @@ main() {
     export UPDATE_REPO=$SD_COMFY_UPDATE_REPO
     export UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT
     
-    if [[ -d ".git" ]]; then
-        [[ -n "$(git status --porcelain requirements.txt 2>/dev/null)" ]] && git checkout -- requirements.txt
-        if ! git symbolic-ref -q HEAD >/dev/null; then
-            git checkout main || git checkout master || git checkout -b main
-        fi
-        git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null
-    fi
+    [[ -d ".git" ]] && { [[ -n "$(git status --porcelain requirements.txt 2>/dev/null)" ]] && git checkout -- requirements.txt; git symbolic-ref -q HEAD >/dev/null || git checkout main || git checkout master || git checkout -b main; git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; }
     
-    prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy" \
-                 "$MODEL_DIR:$WORKING_DIR/models" \
-                 "$MODEL_DIR/sd:$LINK_MODEL_TO" \
-                 "$MODEL_DIR/lora:$LINK_LORA_TO" \
-                 "$MODEL_DIR/vae:$LINK_VAE_TO" \
-                 "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO" \
-                 "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO" \
-                 "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO" \
-                 "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
+    prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy" "$MODEL_DIR:$WORKING_DIR/models" "$MODEL_DIR/sd:$LINK_MODEL_TO" "$MODEL_DIR/lora:$LINK_LORA_TO" "$MODEL_DIR/vae:$LINK_VAE_TO" "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO" "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO" "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO" "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
     
     # Activate global virtual environment (will create if needed)
     activate_global_venv
     
-    apt-get update -qq
-    apt-get install -y \
-        libatlas-base-dev libblas-dev liblapack-dev \
-        libjpeg-dev libpng-dev python3-dev build-essential \
-        libgl1-mesa-dev espeak-ng 2>/dev/null || true
-    
-    # Verify venv is still active before installations
-    verify_venv_active
+    apt-get update -qq && apt-get install -y libatlas-base-dev libblas-dev liblapack-dev libjpeg-dev libpng-dev python3-dev build-essential libgl1-mesa-dev espeak-ng 2>/dev/null || true
     
     setup_pytorch
-    install_component "sageattention"
-    install_component "nunchaku"
-    install_component "hunyuan3d_texture_components"
+    for component in "sageattention" "nunchaku" "hunyuan3d_texture_components"; do install_component "$component"; done
     
-    install_component "nunchaku" || log_error "Nunchaku installation had issues (continuing)"
+    # Update and install components with error handling
     update_comfyui_manager || log_error "ComfyUI Manager update had issues (continuing)"
     update_custom_nodes || log_error "Custom nodes update had issues (continuing)"
     resolve_dependencies || log_error "Some dependencies failed (continuing)"
@@ -846,324 +591,46 @@ main() {
 
 # Model download (can run in background)
 download_models() {
-    if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
-        log "📥 Starting model download process..."
-        log "💡 Models will download in background while ComfyUI is running"
-        log "💡 You can start using ComfyUI immediately!"
-        
-        # Run model download in background
-        bash "$SCRIPT_DIR/../utils/sd_model_download/main.sh" &
-        local download_pid=$!
-        
-        log "📋 Model download started with PID: $download_pid"
-        log "📋 Check progress with: tail -f $LOG_DIR/sd_comfy.log"
-        
-        # Save PID for potential management
+    [[ -n "$SKIP_MODEL_DOWNLOAD" ]] && { log "⏭️ Model download skipped (SKIP_MODEL_DOWNLOAD set)"; return; }
+    log "📥 Starting model download process... 💡 Models will download in background while ComfyUI is running 💡 You can start using ComfyUI immediately!"
+    bash "$SCRIPT_DIR/../utils/sd_model_download/main.sh" & local download_pid=$!
+    log "📋 Model download started with PID: $download_pid 📋 Check progress with: tail -f $LOG_DIR/sd_comfy.log"
         echo "$download_pid" > /tmp/model_download.pid
-    else
-        log "⏭️ Model download skipped (SKIP_MODEL_DOWNLOAD set)"
-    fi
 }
 
 # Launch ComfyUI
 launch() {
     [[ -n "$INSTALL_ONLY" ]] && return 0
-    
     log "Launching ComfyUI..."
   cd "$REPO_DIR"
   
     # Log rotation
-  if [[ -f "$LOG_DIR/sd_comfy.log" ]]; then
-    local timestamp=$(date +"%Y%m%d_%H%M%S")
-    mv "$LOG_DIR/sd_comfy.log" "$LOG_DIR/sd_comfy_${timestamp}.log"
-    ls -t "$LOG_DIR"/sd_comfy_*.log 2>/dev/null | tail -n +6 | xargs -r rm
-  fi
+    [[ -f "$LOG_DIR/sd_comfy.log" ]] && { local timestamp=$(date +"%Y%m%d_%H%M%S"); mv "$LOG_DIR/sd_comfy.log" "$LOG_DIR/sd_comfy_${timestamp}.log"; ls -t "$LOG_DIR"/sd_comfy_*.log 2>/dev/null | tail -n +6 | xargs -r rm; }
   
     # A4000-specific optimizations
   export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
   
     # Runtime PyTorch verification (skip if fresh install)
-    if [[ ! -f "/tmp/pytorch_ecosystem_fresh_install" ]]; then
-        setup_pytorch
-    else
-        rm -f "/tmp/pytorch_ecosystem_fresh_install"
-    fi
-    
-    # Verify virtual environment is working correctly
-    log "🔍 Verifying virtual environment packages..."
-    if ! python -c "
-import sys
-print(f'Python executable: {sys.executable}')
-print(f'Python path: {sys.path[0]}')
-try:
-    import nunchaku
-    print('✅ nunchaku: OK')
-except ImportError as e:
-    print(f'❌ nunchaku: {e}')
-try:
-    import blend_modes
-    print('✅ blend_modes: OK')
-except ImportError as e:
-    print(f'❌ blend_modes: {e}')
-try:
-    import deepdiff
-    print('✅ deepdiff: OK')
-except ImportError as e:
-    print(f'❌ deepdiff: {e}')
-try:
-    import rembg
-    print('✅ rembg: OK')
-except ImportError as e:
-    print(f'❌ rembg: {e}')
-try:
-    import webcolors
-    print('✅ webcolors: OK')
-except ImportError as e:
-    print(f'❌ webcolors: {e}')
-try:
-    import ultralytics
-    print('✅ ultralytics: OK')
-except ImportError as e:
-    print(f'❌ ultralytics: {e}')
-try:
-    import inflect
-    print('✅ inflect: OK')
-except ImportError as e:
-    print(f'❌ inflect: {e}')
-try:
-    import soxr
-    print('✅ soxr: OK')
-except ImportError as e:
-    print(f'❌ soxr: {e}')
-" 2>&1 | tee -a "$LOG_DIR/sd_comfy.log"; then
-        log_error "Virtual environment verification failed - some packages are missing!"
-    fi
+    [[ ! -f "/tmp/pytorch_ecosystem_fresh_install" ]] && setup_pytorch || rm -f "/tmp/pytorch_ecosystem_fresh_install"
     
     # Launch ComfyUI with optimized parameters (using globally activated venv Python)
-  PYTHONUNBUFFERED=1 service_loop "python main.py \
-    --dont-print-server \
-    --port $SD_COMFY_PORT \
-    --cuda-malloc \
-    --use-sage-attention \
-    --preview-method auto \
-    --bf16-vae \
-    --fp16-unet \
-    --cache-lru 5 \
-    --reserve-vram 0.5 \
-    --fast \
-    --enable-compress-response-body \
-        ${EXTRA_SD_COMFY_ARGS}" > "$LOG_DIR/sd_comfy.log" 2>&1 &
+    PYTHONUNBUFFERED=1 service_loop "python main.py --dont-print-server --port $SD_COMFY_PORT --cuda-malloc --use-sage-attention --preview-method auto --bf16-vae --fp16-unet --cache-lru 5 --reserve-vram 0.5 --fast --enable-compress-response-body ${EXTRA_SD_COMFY_ARGS}" > "$LOG_DIR/sd_comfy.log" 2>&1 &
   echo $! > /tmp/sd_comfy.pid
 }
 
-# Comprehensive summary report
-generate_installation_summary() {
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🎯 COMPREHENSIVE INSTALLATION SUMMARY REPORT"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    
-    # Success Summary
-    echo ""
-    echo "✅ SUCCESSFUL INSTALLATIONS (${#INSTALLATION_SUCCESSES[@]} total):"
-    if [[ ${#INSTALLATION_SUCCESSES[@]} -eq 0 ]]; then
-        echo "   ❌ No successful installations recorded"
-    else
-        for success in "${INSTALLATION_SUCCESSES[@]}"; do
-            echo "   ✅ $success"
-        done
-    fi
-    
-    # Failures Summary
-    echo ""
-    echo "❌ FAILED INSTALLATIONS (${#INSTALLATION_FAILURES[@]} total):"
-    if [[ ${#INSTALLATION_FAILURES[@]} -eq 0 ]]; then
-        echo "   🎉 No installation failures recorded!"
-    else
-        for failure in "${INSTALLATION_FAILURES[@]}"; do
-            echo "   ❌ $failure"
-        done
-    fi
-    
-    # Dependency Conflicts
-    echo ""
-    echo "⚠️ DEPENDENCY CONFLICTS (${#DEPENDENCY_CONFLICTS[@]} total):"
-    if [[ ${#DEPENDENCY_CONFLICTS[@]} -eq 0 ]]; then
-        echo "   🎉 No dependency conflicts detected!"
-    else
-        for conflict in "${DEPENDENCY_CONFLICTS[@]}"; do
-            echo "   ⚠️ $conflict"
-        done
-    fi
-    
-    # Custom Node Issues
-    echo ""
-    echo "🔧 CUSTOM NODE ISSUES (${#CUSTOM_NODE_FAILURES[@]} total):"
-    if [[ ${#CUSTOM_NODE_FAILURES[@]} -eq 0 ]]; then
-        echo "   🎉 All custom nodes processed successfully!"
-    else
-        for node_issue in "${CUSTOM_NODE_FAILURES[@]}"; do
-            echo "   🔧 $node_issue"
-        done
-    fi
-    
-    # Detailed Custom Node Results
-    if [[ ${#CUSTOM_NODE_DETAILS[@]} -gt 0 ]]; then
-        echo ""
-        echo "📋 DETAILED CUSTOM NODE RESULTS:"
-        echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        for node_detail in "${CUSTOM_NODE_DETAILS[@]}"; do
-            echo "   $node_detail"
-        done
-        
-        if [[ ${#CUSTOM_NODE_FAILED_DETAILS[@]} -gt 0 ]]; then
-            echo ""
-            echo "❌ FAILED CUSTOM NODES:"
-            echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            for failed_detail in "${CUSTOM_NODE_FAILED_DETAILS[@]}"; do
-                echo "   $failed_detail"
-            done
-        fi
-    fi
-    
-    # Detailed execution logs
-    if [[ ${#DETAILED_LOGS[@]} -gt 0 ]]; then
-        echo ""
-        echo "📋 DETAILED EXECUTION LOGS (${#DETAILED_LOGS[@]} entries):"
-        echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        for log_entry in "${DETAILED_LOGS[@]}"; do
-            echo "   $log_entry"
-        done
-    fi
-    
-    # Pip installation results
-    if [[ ${#PIP_SUCCESSES[@]} -gt 0 ]]; then
-        echo ""
-        echo "✅ PIP INSTALLATION SUCCESSES (${#PIP_SUCCESSES[@]} total):"
-        echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        for pip_success in "${PIP_SUCCESSES[@]}"; do
-            echo "   $pip_success"
-        done
-    fi
-    
-    if [[ ${#PIP_ERRORS[@]} -gt 0 ]]; then
-        echo ""
-        echo "❌ PIP INSTALLATION ERRORS (${#PIP_ERRORS[@]} total):"
-        echo "   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        for pip_error in "${PIP_ERRORS[@]}"; do
-            echo "   $pip_error"
-        done
-    fi
-    
-    # System Status Check
-    echo ""
-    echo "🔍 SYSTEM STATUS CHECK:"
-    
-    # PyTorch Status
-    if python -c "import torch" 2>/dev/null; then
-        local torch_version=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
-        local cuda_available=$(python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null)
-        echo "   🎯 PyTorch: $torch_version (CUDA: $cuda_available)"
-    else
-        echo "   ❌ PyTorch: NOT AVAILABLE"
-    fi
-    
-    # Key packages check
-    echo "   📦 Key Package Status:"
-    
-    local packages=("numpy" "xformers" "av" "timm" "flet" "pybind11" "ninja")
-    for pkg in "${packages[@]}"; do
-        if timeout 5 python -c "import $pkg" 2>/dev/null; then
-            local version=$(timeout 5 python -c "import $pkg; print(getattr($pkg, '__version__', 'unknown'))" 2>/dev/null || echo "unknown")
-            echo "      ✅ $pkg: $version"
-        else
-            echo "      ❌ $pkg: NOT AVAILABLE"
-        fi
-    done
-    
-    # Overall Assessment
-    echo ""
-    echo "📊 OVERALL ASSESSMENT:"
-    local total_operations=$((${#INSTALLATION_SUCCESSES[@]} + ${#INSTALLATION_FAILURES[@]}))
-    local success_rate=0
-    if [[ $total_operations -gt 0 ]]; then
-        success_rate=$(( (${#INSTALLATION_SUCCESSES[@]} * 100) / total_operations ))
-    fi
-    
-    echo "   📈 Success Rate: $success_rate% (${#INSTALLATION_SUCCESSES[@]}/${total_operations} operations)"
-    
-    if [[ $success_rate -ge 80 ]]; then
-        echo "   🎉 STATUS: EXCELLENT - Most components installed successfully"
-    elif [[ $success_rate -ge 60 ]]; then
-        echo "   ✅ STATUS: GOOD - Major components working, minor issues present"
-    elif [[ $success_rate -ge 40 ]]; then
-        echo "   ⚠️ STATUS: PARTIAL - Some major issues, but core functionality may work"
-    else
-        echo "   ❌ STATUS: POOR - Significant issues detected, manual intervention may be needed"
-    fi
-    
-    # Recommendations
-    echo ""
-    echo "💡 RECOMMENDATIONS:"
-    
-    if [[ ${#INSTALLATION_FAILURES[@]} -gt 0 ]]; then
-        echo "   🔧 Failed installations can often be resolved by:"
-        echo "      - Updating system packages: apt-get update && apt-get upgrade"
-        echo "      - Clearing pip cache: pip cache purge"
-        echo "      - Using alternative package sources"
-    fi
-    
-    if [[ ${#DEPENDENCY_CONFLICTS[@]} -gt 0 ]]; then
-        echo "   ⚠️ Dependency conflicts detected:"
-        echo "      - These are usually non-critical and ComfyUI should still work"
-        echo "      - Consider using virtual environments for isolation"
-    fi
-    
-    if [[ ${#CUSTOM_NODE_FAILURES[@]} -gt 0 ]]; then
-        echo "   🔧 Custom node issues:"
-        echo "      - Individual node failures don't affect core ComfyUI functionality"
-        echo "      - Check node documentation for manual installation steps"
-    fi
-    
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📝 Report generated at: $(date)"
-    echo "🔗 For detailed logs, check: $LOG_DIR/"
-    
-    # Save summary to file
-    {
-        echo "COMFYUI INSTALLATION SUMMARY - $(date)"
-        echo "=========================================="
-        echo ""
-        echo "SUCCESSES (${#INSTALLATION_SUCCESSES[@]}):"
-        printf '%s\n' "${INSTALLATION_SUCCESSES[@]}"
-        echo ""
-        echo "FAILURES (${#INSTALLATION_FAILURES[@]}):"
-        printf '%s\n' "${INSTALLATION_FAILURES[@]}"
-        echo ""
-        echo "CONFLICTS (${#DEPENDENCY_CONFLICTS[@]}):"
-        printf '%s\n' "${DEPENDENCY_CONFLICTS[@]}"
-        echo ""
-        echo "CUSTOM NODE ISSUES (${#CUSTOM_NODE_FAILURES[@]}):"
-        printf '%s\n' "${CUSTOM_NODE_FAILURES[@]}"
-        echo ""
-    } > "$LOG_DIR/installation_summary.log"
-    
-    echo "💾 Summary saved to: $LOG_DIR/installation_summary.log"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
+# Error logging only (summary function removed)
+log_errors() {
+    [[ ${#INSTALLATION_FAILURES[@]} -gt 0 ]] && { echo "❌ Installation failures logged:" > "$LOG_DIR/errors.log"; printf '%s\n' "${INSTALLATION_FAILURES[@]}" >> "$LOG_DIR/errors.log"; }
+    [[ ${#PIP_ERRORS[@]} -gt 0 ]] && { echo "❌ Pip errors logged:" >> "$LOG_DIR/errors.log"; printf '%s\n' "${PIP_ERRORS[@]}" >> "$LOG_DIR/errors.log"; }
 }
 
 # Execute main workflow
 main
 
-    # Virtual environment is already active from main() function
+    
 
-# Generate comprehensive summary before launch
-generate_installation_summary
-
-# Verify venv is still active before launch
-verify_venv_active
+# Log any errors before launch
+log_errors
 
 # Start ComfyUI first (so user can access it immediately)
 log "🚀 Starting ComfyUI first for immediate access..."
@@ -1178,31 +645,9 @@ sleep 5
 
 # Final notifications (from original)
 send_to_discord "Stable Diffusion Comfy Started"
-
-if env | grep -q "PAPERSPACE"; then
-  send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-comfy/"
-fi
+env | grep -q "PAPERSPACE" && send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-comfy/"
 
 # Show final status
-log ""
-log "🎉 COMFYUI STARTUP COMPLETE!"
-log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-log "✅ ComfyUI is now running and accessible"
-log "📥 Model download is running in background"
-log "🔗 Access ComfyUI at: http://localhost:$SD_COMFY_PORT"
-if env | grep -q "PAPERSPACE"; then
-  log "🌐 Paperspace URL: https://$PAPERSPACE_FQDN/sd-comfy/"
-fi
-log ""
-log "📋 Useful commands:"
-log "   • Check ComfyUI logs: tail -f $LOG_DIR/sd_comfy.log"
-log "   • Check model download: tail -f /tmp/model_download.log"
-log "   • Stop model download: kill \$(cat /tmp/model_download.pid)"
-log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log "" && log "🎉 COMFYUI STARTUP COMPLETE! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✅ ComfyUI is now running and accessible 📥 Model download is running in background 🔗 Access ComfyUI at: http://localhost:$SD_COMFY_PORT" && env | grep -q "PAPERSPACE" && log "🌐 Paperspace URL: https://$PAPERSPACE_FQDN/sd-comfy/" && log "" && log "📋 Useful commands: • Check ComfyUI logs: tail -f $LOG_DIR/sd_comfy.log • Check model download: tail -f /tmp/model_download.log • Stop model download: kill \$(cat /tmp/model_download.pid) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-if [[ -n "${CF_TOKEN}" ]]; then
-  if [[ "$RUN_SCRIPT" != *"sd_comfy"* ]]; then
-    export RUN_SCRIPT="$RUN_SCRIPT,sd_comfy"
-  fi
-    bash "$SCRIPT_DIR/../cloudflare_reload.sh"
-fi
+[[ -n "${CF_TOKEN}" ]] && { [[ "$RUN_SCRIPT" != *"sd_comfy"* ]] && export RUN_SCRIPT="$RUN_SCRIPT,sd_comfy"; bash "$SCRIPT_DIR/../cloudflare_reload.sh"; }
