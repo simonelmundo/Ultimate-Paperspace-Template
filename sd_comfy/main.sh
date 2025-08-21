@@ -30,10 +30,11 @@ if [ -f ".env" ]; then
         # Try to source again but ignore errors
         source .env 2>/dev/null || true
     }
-    # Restore LOG_DIR if it was unset
-    readonly LOG_DIR="${LOG_DIR:-/tmp/log}"
+    # Restore LOG_DIR if it was unset (don't make it readonly to avoid conflicts)
+    LOG_DIR="${LOG_DIR:-/tmp/log}"
 else
     echo "Warning: .env file not found, using defaults"
+    LOG_DIR="/tmp/log"
 fi
 
 mkdir -p "$LOG_DIR"
@@ -240,7 +241,35 @@ install_cuda() {
     # Check if already installed with robust verification
     if [[ -f "$marker" ]]; then
         setup_cuda_env && hash -r
-        if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.6"* ]]; then
+        # More robust CUDA verification with multiple fallback checks
+        local cuda_verified=false
+        
+        # Method 1: Check nvcc command and version
+        if command -v nvcc &>/dev/null; then
+            local nvcc_version=$(nvcc --version 2>&1 | grep -i 'release' | head -1)
+            if [[ "$nvcc_version" =~ 12\.6 ]]; then
+                cuda_verified=true
+                log "✅ CUDA 12.6 verified via nvcc: $nvcc_version"
+            fi
+        fi
+        
+        # Method 2: Check CUDA installation directory
+        if [[ ! "$cuda_verified" == "true" ]] && [[ -d "/usr/local/cuda-12.6" ]]; then
+            if [[ -f "/usr/local/cuda-12.6/bin/nvcc" ]]; then
+                cuda_verified=true
+                log "✅ CUDA 12.6 verified via installation directory"
+            fi
+        fi
+        
+        # Method 3: Check environment variables
+        if [[ ! "$cuda_verified" == "true" ]] && [[ -n "$CUDA_HOME" ]]; then
+            if [[ "$CUDA_HOME" =~ 12\.6 ]] && [[ -f "$CUDA_HOME/bin/nvcc" ]]; then
+                cuda_verified=true
+                log "✅ CUDA 12.6 verified via CUDA_HOME: $CUDA_HOME"
+            fi
+        fi
+        
+        if [[ "$cuda_verified" == "true" ]]; then
             log "✅ CUDA 12.6 already installed and verified, skipping"
             return 0
         else
@@ -305,8 +334,35 @@ EOF
     # Configure environment and verify
     setup_cuda_env && hash -r
     
-    # Robust verification before creating marker
-    if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.6"* ]]; then
+    # Robust verification before creating marker with multiple fallback checks
+    local cuda_verified=false
+    
+    # Method 1: Check nvcc command and version
+    if command -v nvcc &>/dev/null; then
+        local nvcc_version=$(nvcc --version 2>&1 | grep -i 'release' | head -1)
+        if [[ "$nvcc_version" =~ 12\.6 ]]; then
+            cuda_verified=true
+            log "✅ CUDA 12.6 verified via nvcc: $nvcc_version"
+        fi
+    fi
+    
+    # Method 2: Check CUDA installation directory
+    if [[ ! "$cuda_verified" == "true" ]] && [[ -d "/usr/local/cuda-12.6" ]]; then
+        if [[ -f "/usr/local/cuda-12.6/bin/nvcc" ]]; then
+            cuda_verified=true
+            log "✅ CUDA 12.6 verified via installation directory"
+        fi
+    fi
+    
+    # Method 3: Check environment variables
+    if [[ ! "$cuda_verified" == "true" ]] && [[ -n "$CUDA_HOME" ]]; then
+        if [[ "$CUDA_HOME" =~ 12\.6 ]] && [[ -f "$CUDA_HOME/bin/nvcc" ]]; then
+            cuda_verified=true
+            log "✅ CUDA 12.6 verified via CUDA_HOME: $CUDA_HOME"
+        fi
+    fi
+    
+    if [[ "$cuda_verified" == "true" ]]; then
         # Create persistent environment configuration
         cat > /etc/profile.d/cuda12.sh << 'EOL'
 export CUDA_HOME=/usr/local/cuda-12.6
@@ -596,19 +652,52 @@ def is_package_importable(package_name):
     except (ImportError, ValueError, AttributeError):
         return False
 
+def clean_package_name(pkg):
+    # Clean up common malformed package names
+    pkg = pkg.strip()
+    
+    # Skip editable installs
+    if pkg.startswith('-e'):
+        return None
+    
+    # Fix common malformed names
+    if 'accelerateopencv-python' in pkg:
+        return 'accelerate opencv-python'
+    
+    # Remove comments and extra whitespace
+    pkg = re.sub(r'#.*$', '', pkg).strip()
+    
+    # Skip empty lines
+    if not pkg:
+        return None
+    
+    return pkg
+
 # Get list of packages to check
 with open(sys.argv[1], 'r') as f:
     packages = [line.strip() for line in f if line.strip() and not line.startswith(('git+', 'http'))]
 
+# Clean and filter packages
+cleaned_packages = []
+for pkg in packages:
+    cleaned = clean_package_name(pkg)
+    if cleaned:
+        cleaned_packages.append(cleaned)
+
 # Check which packages are missing
 missing_packages = []
-for pkg in packages:
+for pkg in cleaned_packages:
     if not is_package_importable(pkg):
         missing_packages.append(pkg)
 
 # Write missing packages to output file
 with open(sys.argv[2], 'w') as f:
     for pkg in missing_packages:
+        f.write(f"{pkg}\n")
+
+# Also write cleaned packages for reference
+with open(sys.argv[2] + '.cleaned', 'w') as f:
+    for pkg in cleaned_packages:
         f.write(f"{pkg}\n")
 EOF
     
@@ -620,34 +709,77 @@ EOF
     if [[ -s "/tmp/missing_packages.txt" ]]; then
         log "📦 Installing missing packages in batches..."
         
-        # Split into smaller batches of 10 packages each
-        split -l 10 "/tmp/missing_packages.txt" "/tmp/pkg_batch_"
+        # Clean and validate packages before batching
+        log "🧹 Cleaning and validating package names..."
+        local cleaned_packages="/tmp/cleaned_packages.txt"
+        > "$cleaned_packages"
         
-        # Install each batch separately
-        for batch in /tmp/pkg_batch_*; do
-            log "📦 Installing batch $(basename "$batch")..."
+        while read -r pkg; do
+            [[ -z "$pkg" ]] && continue
             
-            # Try batch installation first (faster) - suppress verbose output
-            if ! timeout 60s pip install --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_$(basename "$batch").log" 2>&1; then
-                log "⚠️ Batch installation failed or timed out, falling back to individual installation..."
-                
-                # Fallback: install packages one by one
-                while read -r pkg; do
-                    [[ -z "$pkg" ]] && continue
-                    log "  📦 Installing: $pkg"
-                    if pip install --no-cache-dir --disable-pip-version-check --quiet "$pkg" >"/tmp/pip_individual_${pkg//[^a-zA-Z0-9]/_}.log" 2>&1; then
-                        log "✅ Successfully installed: $pkg"
-                    else
-                        log_error "❌ Failed to install: $pkg (continuing)"
-                    fi
-                done < "$batch"
-            else
-                log "✅ Batch installation successful for $(basename "$batch")"
+            # Clean up common malformed package names
+            local cleaned_pkg="$pkg"
+            
+            # Skip editable installs
+            if [[ "$pkg" =~ ^-e ]]; then
+                log "⏭️ Skipping editable install: $pkg"
+                continue
             fi
-        done
+            
+            # Fix common malformed names
+            if [[ "$pkg" == *"accelerateopencv-python"* ]]; then
+                cleaned_pkg="accelerate opencv-python"
+                log "🔧 Fixed malformed package name: $pkg -> $cleaned_pkg"
+            fi
+            
+            # Remove comments and extra whitespace
+            cleaned_pkg=$(echo "$cleaned_pkg" | sed 's/#.*$//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            
+            # Skip empty lines
+            [[ -z "$cleaned_pkg" ]] && continue
+            
+            # Add to cleaned packages
+            echo "$cleaned_pkg" >> "$cleaned_packages"
+        done < "/tmp/missing_packages.txt"
+        
+        # Split cleaned packages into smaller batches
+        if [[ -s "$cleaned_packages" ]]; then
+            split -l 8 "$cleaned_packages" "/tmp/pkg_batch_"
+            
+            # Install each batch separately
+            for batch in /tmp/pkg_batch_*; do
+                log "📦 Installing batch $(basename "$batch")..."
+                
+                # Try batch installation first (faster) - suppress verbose output
+                if ! timeout 90s pip install --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_$(basename "$batch").log" 2>&1; then
+                    log "⚠️ Batch installation failed or timed out, falling back to individual installation..."
+                    
+                    # Fallback: install packages one by one with better error handling
+                    while read -r pkg; do
+                        [[ -z "$pkg" ]] && continue
+                        log "  📦 Installing: $pkg"
+                        
+                        # Try to install with timeout
+                        if timeout 60s pip install --no-cache-dir --disable-pip-version-check --quiet "$pkg" >"/tmp/pip_individual_${pkg//[^a-zA-Z0-9]/_}.log" 2>&1; then
+                            log "✅ Successfully installed: $pkg"
+                        else
+                            log_error "❌ Failed to install: $pkg (continuing)"
+                            # Log the error for debugging
+                            if [[ -f "/tmp/pip_individual_${pkg//[^a-zA-Z0-9]/_}.log" ]]; then
+                                log_error "  Error details: $(tail -1 "/tmp/pip_individual_${pkg//[^a-zA-Z0-9]/_}.log")"
+                            fi
+                        fi
+                    done < "$batch"
+                else
+                    log "✅ Batch installation successful for $(basename "$batch")"
+                fi
+            done
+        else
+            log "✅ No valid packages to install after cleaning"
+        fi
         
         # Clean up batch files
-        rm -f /tmp/pkg_batch_* /tmp/pip_batch_* /tmp/pip_individual_*
+        rm -f /tmp/pkg_batch_* /tmp/pip_batch_* /tmp/pip_individual_* "$cleaned_packages"
     else
         log "✅ All requirements already satisfied"
     fi
@@ -745,22 +877,67 @@ install_component() {
 
     install_sageattention() {
     python -c "import sageattention" 2>/dev/null && return 0
+    
+    log "🔧 Installing SageAttention..."
     local cache_dir="/storage/.sageattention_cache" wheel_cache="/storage/.wheel_cache"
     mkdir -p "$cache_dir" "$wheel_cache"
+    
+    # Try cached wheel first
     local cached_wheel=$(find "$wheel_cache" -name "sageattention*.whl" 2>/dev/null | head -1)
-    [[ -n "$cached_wheel" ]] && { pip_install "$cached_wheel" && return 0 || rm -f "$cached_wheel"; }
-    [[ ! -d "$cache_dir/src" ]] && git clone https://github.com/thu-ml/SageAttention.git "$cache_dir/src" || return 1
+    if [[ -n "$cached_wheel" ]]; then
+        log "🔄 Found cached SageAttention wheel, trying installation..."
+        if install_package "$cached_wheel"; then
+            log "✅ SageAttention installed from cached wheel"
+            return 0
+        else
+            log "⚠️ Cached wheel installation failed, removing and rebuilding..."
+            rm -f "$cached_wheel"
+        fi
+    fi
+    
+    # Clone repository if needed
+    if [[ ! -d "$cache_dir/src" ]]; then
+        log "📥 Cloning SageAttention repository..."
+        if ! git clone https://github.com/thu-ml/SageAttention.git "$cache_dir/src"; then
+            log_error "❌ Failed to clone SageAttention repository"
+            return 1
+        fi
+    fi
+    
+    # Build from source
     export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions" MAX_JOBS=$(nproc) USE_NINJA=1
-    cd "$cache_dir/src" || return 1
+    cd "$cache_dir/src" || { log_error "❌ Failed to access SageAttention source directory"; return 1; }
+    
+    # Clean previous builds
     rm -rf build dist *.egg-info
     
-    # Build with suppressed warnings - redirect verbose compilation output
+    # Build with suppressed warnings
     log "🔧 Building SageAttention (this may take a moment)..."
-    python setup.py bdist_wheel >/tmp/sageattention_build.log 2>&1 || { log_error "SageAttention build failed - check /tmp/sageattention_build.log"; return 1; }
+    if ! python setup.py bdist_wheel >/tmp/sageattention_build.log 2>&1; then
+        log_error "❌ SageAttention build failed - check /tmp/sageattention_build.log"
+        cd - > /dev/null
+        return 1
+    fi
     
+    # Find and install the built wheel
     local wheel=$(find dist -name "*.whl" | head -1)
-    [[ -n "$wheel" ]] && cp "$wheel" "$wheel_cache/" && pip_install "$wheel" || return 1
-    cd - > /dev/null
+    if [[ -n "$wheel" ]]; then
+        log "📦 Installing built SageAttention wheel..."
+        cp "$wheel" "$wheel_cache/"
+        if install_package "$wheel"; then
+            log "✅ SageAttention built and installed successfully"
+            cd - > /dev/null
+            return 0
+        else
+            log_error "❌ Failed to install built SageAttention wheel"
+            cd - > /dev/null
+            return 1
+        fi
+    else
+        log_error "❌ No wheel found after SageAttention build"
+        cd - > /dev/null
+        return 1
+    fi
 }
 
     install_nunchaku() {
@@ -854,11 +1031,69 @@ except Exception as e:
         log "Downloading Nunchaku wheel from: $nunchaku_wheel_url"
         log "Caching to: $cached_wheel"
         
+        # Try multiple download methods
+        local download_success=false
+        
+        # Method 1: wget
         if wget -q --show-progress -O "$cached_wheel" "$nunchaku_wheel_url" 2>/dev/null; then
+            download_success=true
+            log "✅ Nunchaku wheel downloaded with wget"
+        fi
+        
+        # Method 2: curl (fallback)
+        if [[ "$download_success" != "true" ]]; then
+            log "🔄 wget failed, trying curl..."
+            if curl -L -s -o "$cached_wheel" "$nunchaku_wheel_url" 2>/dev/null; then
+                download_success=true
+                log "✅ Nunchaku wheel downloaded with curl"
+            fi
+        fi
+        
+        # Method 3: pip direct install (last resort)
+        if [[ "$download_success" != "true" ]]; then
+            log "🔄 Download failed, trying pip direct install..."
+            if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku" 2>/dev/null; then
+                download_success=true
+                log "✅ Nunchaku installed directly via pip"
+                return 0
+            fi
+        fi
+        
+        if [[ "$download_success" == "true" ]]; then
             log "✅ Nunchaku wheel downloaded and cached successfully"
             
             if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>/dev/null; then
-                if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully')" 2>/dev/null; then
+                # Enhanced verification with multiple checks
+                local verification_success=false
+                
+                # Check 1: Basic import
+                if python -c "import nunchaku" 2>/dev/null; then
+                    verification_success=true
+                    log "✅ Nunchaku basic import successful"
+                fi
+                
+                # Check 2: Version check
+                if [[ "$verification_success" == "true" ]]; then
+                    if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully')" 2>/dev/null; then
+                        log "✅ Nunchaku version verification successful"
+                    else
+                        log "⚠️ Nunchaku imported but version check failed"
+                    fi
+                fi
+                
+                # Check 3: Verify in virtual environment
+                if [[ "$verification_success" == "true" ]]; then
+                    local venv_python="${VENV_DIR:-/tmp}/sd_comfy-env/bin/python"
+                    if [[ -f "$venv_python" ]]; then
+                        if "$venv_python" -c "import nunchaku" 2>/dev/null; then
+                            log "✅ Nunchaku verified in virtual environment"
+                        else
+                            log "⚠️ Nunchaku not accessible in virtual environment"
+                        fi
+                    fi
+                fi
+                
+                if [[ "$verification_success" == "true" ]]; then
                     log "✅ Nunchaku installation verified successfully"
                     return 0
                 else
@@ -871,8 +1106,9 @@ except Exception as e:
                 return 1
             fi
         else
-            log_error "❌ Failed to download Nunchaku wheel from $nunchaku_wheel_url"
+            log_error "❌ All download methods failed for Nunchaku wheel"
             log_error "This could be due to network issues or no wheel available for PyTorch ${torch_version_major_minor}"
+            log "⚠️ Continuing without Nunchaku - some custom nodes may not work"
             return 1
         fi
     }
@@ -880,8 +1116,8 @@ except Exception as e:
     install_hunyuan3d_texture_components() {
         local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
     [[ ! -d "$hunyuan3d_path" ]] && return 1
-    pip_install "pybind11"
-    pip_install "ninja"
+    install_package "pybind11"
+    install_package "ninja"
     for component in custom_rasterizer DifferentiableRenderer; do
         local comp_path="$hunyuan3d_path/hy3dpaint/$component"
         if [[ -d "$comp_path" ]]; then
@@ -926,6 +1162,176 @@ send_to_discord() {
     [[ -n "$DISCORD_WEBHOOK_URL" ]] && curl -X POST -H "Content-Type: application/json" -d "{\"content\":\"$1\"}" "$DISCORD_WEBHOOK_URL" &>/dev/null || true
 }
 
+# Fix PyTorch version alignment between installation and runtime
+fix_pytorch_version_alignment() {
+    log "🔧 Checking PyTorch version alignment..."
+    
+    # Check if there's a version mismatch
+    local installed_version=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
+    local target_version="$TORCH_VERSION"
+    
+    if [[ "$installed_version" != "none" && "$installed_version" != "$target_version" ]]; then
+        log "⚠️ PyTorch version mismatch detected:"
+        log "   Installed: $installed_version"
+        log "   Target:    $target_version"
+        log "🔄 Aligning PyTorch versions..."
+        
+        # Remove existing PyTorch installation
+        pip uninstall -y torch torchvision torchaudio xformers 2>/dev/null || true
+        
+        # Clear PyTorch cache
+        rm -rf /storage/.torch_extensions 2>/dev/null || true
+        rm -rf ~/.cache/torch 2>/dev/null || true
+        
+        # Force reinstall with correct version
+        pip install --no-cache-dir --disable-pip-version-check --force-reinstall --quiet \
+            torch==$target_version torchvision==$TORCHVISION_VERSION torchaudio==$TORCHAUDIO_VERSION \
+            --extra-index-url "https://download.pytorch.org/whl/cu126" 2>/dev/null || log_error "PyTorch reinstall failed"
+        
+        # Verify alignment
+        local new_version=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
+        if [[ "$new_version" == "$target_version" ]]; then
+            log "✅ PyTorch version aligned successfully: $new_version"
+        else
+            log_error "❌ PyTorch version alignment failed: $new_version"
+        fi
+    else
+        log "✅ PyTorch version already aligned: $installed_version"
+    fi
+}
+
+# Create combined requirements file from all custom nodes
+create_combined_requirements_file() {
+    local combined_req_file="/tmp/all_custom_node_requirements.txt"
+    local nodes_dir="$REPO_DIR/custom_nodes"
+    
+    # Clear previous file
+    > "$combined_req_file"
+    
+    log "🔍 Scanning custom nodes for requirements.txt files..."
+    local req_files_found=0
+    
+    # Find all requirements.txt files in custom nodes
+    if [[ -d "$nodes_dir" ]]; then
+        while IFS= read -r -d '' req_file; do
+            local node_name=$(basename "$(dirname "$req_file")")
+            log "📦 Found requirements.txt in $node_name"
+            
+            # Process each line to clean up common issues
+            while IFS= read -r line; do
+                # Skip empty lines and comments
+                [[ -z "$line" ]] && continue
+                [[ "$line" =~ ^[[:space:]]*# ]] && continue
+                
+                # Clean up common malformed entries
+                local cleaned_line="$line"
+                
+                # Skip editable installs
+                [[ "$line" =~ ^[[:space:]]*-e ]] && continue
+                
+                # Fix common malformed names
+                if [[ "$line" == *"accelerateopencv-python"* ]]; then
+                    cleaned_line="accelerate opencv-python"
+                    log "🔧 Fixed malformed package in $node_name: $line -> $cleaned_line"
+                fi
+                
+                # Remove trailing comments and whitespace
+                cleaned_line=$(echo "$cleaned_line" | sed 's/#.*$//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                
+                # Skip if empty after cleaning
+                [[ -z "$cleaned_line" ]] && continue
+                
+                # Add cleaned line to combined file
+                echo "$cleaned_line" >> "$combined_req_file"
+            done < "$req_file"
+            
+            ((req_files_found++))
+        done < <(find "$nodes_dir" -name "requirements.txt" -print0 2>/dev/null)
+    fi
+    
+    log "📋 Combined requirements file created: $combined_req_file ($req_files_found nodes)"
+    
+    # Remove duplicates and clean up
+    if [[ -s "$combined_req_file" ]]; then
+        sort -u "$combined_req_file" -o "$combined_req_file"
+        log "🧹 Cleaned up duplicate requirements"
+        
+        # Show summary of cleaned requirements
+        local total_packages=$(wc -l < "$combined_req_file")
+        log "📊 Total unique packages to process: $total_packages"
+    fi
+}
+
+# Install critical dependencies AFTER batch requirements processing
+install_critical_dependencies() {
+    log "📦 Installing Critical Custom Node Dependencies (AFTER batch requirements)..."
+    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub==0.20.3")
+    local installed_count=0
+    local failed_count=0
+    
+    for pkg in "${critical_packages[@]}"; do
+        local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
+        
+        # Skip if already installed
+        if python -c "import $pkg_name" 2>/dev/null; then
+            log "✅ $pkg_name already installed"
+            ((installed_count++))
+            continue
+        fi
+        
+        # Install package using unified function
+        if install_package "$pkg"; then
+            ((installed_count++))
+        else
+            ((failed_count++))
+        fi
+    done
+    
+    log "📊 Critical packages summary: $installed_count installed, $failed_count failed"
+    [[ $failed_count -gt 0 ]] && log_error "⚠️ Some critical packages failed to install - custom nodes may not work properly"
+    
+    # Final verification of critical dependencies
+    log "🔍 Final verification of critical dependencies..."
+    verify_critical_dependencies
+}
+
+# Verify critical dependencies are working
+verify_critical_dependencies() {
+    log "🔍 Verifying critical dependencies..."
+    local verification_failures=0
+    
+    # Critical packages to verify
+    local critical_packages=("torch" "diffusers" "gguf" "nunchaku" "huggingface_hub")
+    
+    for pkg in "${critical_packages[@]}"; do
+        local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
+        
+        if python -c "import $pkg_name" 2>/dev/null; then
+            log "✅ $pkg_name: Import successful"
+        else
+            log_error "❌ $pkg_name: Import failed"
+            ((verification_failures++))
+        fi
+    done
+    
+    # Special verification for PyTorch CUDA
+    if python -c "import torch; print(f'PyTorch {torch.__version__} CUDA: {torch.cuda.is_available()}')" 2>/dev/null; then
+        log "✅ PyTorch CUDA verification successful"
+    else
+        log_error "❌ PyTorch CUDA verification failed"
+        ((verification_failures++))
+    fi
+    
+    if [[ $verification_failures -gt 0 ]]; then
+        log_error "⚠️ $verification_failures critical dependency verification(s) failed"
+        log_error "Custom nodes may not work properly"
+    else
+        log "✅ All critical dependencies verified successfully"
+    fi
+    
+    return $verification_failures
+}
+
 #######################################
 # MAIN EXECUTION FLOW
 #######################################
@@ -960,6 +1366,9 @@ main() {
     # Enhanced system dependencies installation with caching
     install_system_dependencies
     
+    # Fix PyTorch version alignment issues
+    fix_pytorch_version_alignment
+    
     setup_pytorch
     for component in "sageattention" "nunchaku" "hunyuan3d_texture_components"; do install_component "$component"; done
     
@@ -974,6 +1383,16 @@ main() {
     
     # Process core ComfyUI requirements
     process_requirements "$REPO_DIR/requirements.txt" || log_error "Core requirements had issues (continuing)"
+    
+    # Process combined custom node requirements (this was missing!)
+    log "🔧 Processing combined custom node requirements..."
+    
+    # Create combined requirements file from all custom nodes
+    log "📋 Collecting requirements from all custom nodes..."
+    create_combined_requirements_file
+    
+    # Process the combined requirements
+    process_combined_requirements "/tmp/all_custom_node_requirements.txt" || log_error "Combined requirements processing had issues (continuing)"
     
     # Handle specific dependency conflicts AFTER all requirements are processed
     log "🔧 Handling specific dependency conflicts..."
@@ -999,33 +1418,9 @@ main() {
     pip install --quiet "huggingface_hub==0.20.3" 2>/dev/null || log_error "huggingface_hub fix failed"
     pip install --quiet "diffusers" 2>/dev/null || log_error "diffusers fix failed"
     
-    # Fallback installation for critical custom node packages (including all missing dependencies)
-    echo "=== Installing Critical Custom Node Dependencies (Fallback) ==="
-    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub==0.20.3")
-    log "📦 Installing critical packages for custom nodes..."
-    local installed_count=0
-    local failed_count=0
-    
-    for pkg in "${critical_packages[@]}"; do
-        local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
-        
-        # Skip if already installed
-        if python -c "import $pkg_name" 2>/dev/null; then
-            log "✅ $pkg_name already installed"
-            ((installed_count++))
-            continue
-        fi
-        
-        # Install package using unified function
-        if install_package "$pkg"; then
-            ((installed_count++))
-        else
-            ((failed_count++))
-        fi
-    done
-    
-    log "📊 Critical packages summary: $installed_count installed, $failed_count failed"
-    [[ $failed_count -gt 0 ]] && log_error "⚠️ Some critical packages failed to install - custom nodes may not work properly"
+    # CRITICAL: Install missing dependencies AFTER batch requirements processing
+    log "🚀 Installing Critical Custom Node Dependencies (AFTER batch requirements)..."
+    install_critical_dependencies
     
     touch "/tmp/sd_comfy.prepared"
 }
