@@ -9,14 +9,14 @@
 
 # Global Configuration
 readonly SCRIPT_DIR=$(dirname "$(realpath "$0")")
-readonly LOG_DIR="/tmp/log"
+LOG_DIR="/tmp/log"
 
-# Package Versions (from original script)
-readonly TORCH_VERSION="2.7.1+cu126"
-readonly TORCHVISION_VERSION="0.22.1+cu126" 
-readonly TORCHAUDIO_VERSION="2.7.1+cu126"
-readonly XFORMERS_VERSION="0.0.30"
-readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
+# Package Versions (updated to latest stable)
+readonly TORCH_VERSION="2.8.0+cu128"
+readonly TORCHVISION_VERSION="0.23.0+cu128" 
+readonly TORCHAUDIO_VERSION="2.8.0+cu128"
+readonly XFORMERS_VERSION="0.0.32.post2"
+readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 
 # Initialize environment
 cd "$SCRIPT_DIR" || { echo "Failed to change directory"; exit 1; }
@@ -82,7 +82,7 @@ log_detail() { echo "  $1"; }
 
 # Single CUDA environment setup (replaces 6+ duplicate functions)
 setup_cuda_env() {
-    export CUDA_HOME=/usr/local/cuda-12.6 PATH=$CUDA_HOME/bin:$PATH LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH FORCE_CUDA=1 CUDA_VISIBLE_DEVICES=0 PYOPENGL_PLATFORM="osmesa" WINDOW_BACKEND="headless" TORCH_CUDA_ARCH_LIST="8.6" PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8" CUDA_LAUNCH_BLOCKING=0 CUDA_DEVICE_MAX_CONNECTIONS=32 TORCH_CUDNN_V8_API_ENABLED=1
+    export CUDA_HOME=/usr/local/cuda-12.8 PATH=$CUDA_HOME/bin:$PATH LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH FORCE_CUDA=1 CUDA_VISIBLE_DEVICES=0 PYOPENGL_PLATFORM="osmesa" WINDOW_BACKEND="headless" TORCH_CUDA_ARCH_LIST="8.6" PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8" CUDA_LAUNCH_BLOCKING=0 CUDA_DEVICE_MAX_CONNECTIONS=32 TORCH_CUDNN_V8_API_ENABLED=1
     
     # Comprehensive warning suppression for CUDA compilation
     export CFLAGS="-Wno-deprecated-declarations -w"
@@ -98,7 +98,7 @@ setup_cuda_env() {
     
     # Suppress compiler warnings during PyTorch extensions compilation
     export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions"
-    export PYTORCH_BUILD_VERSION="2.7.1"
+    export PYTORCH_BUILD_VERSION="2.8.0"
     export PYTORCH_BUILD_NUMBER="1"
     
     # Ninja build system optimizations (reduces verbose output)
@@ -231,7 +231,7 @@ EOF
 
 # Enhanced CUDA installation with comprehensive caching
 install_cuda() {
-    local marker="/storage/.cuda_12.6_installed"
+    local marker="/storage/.cuda_12.8_installed"
     local apt_cache_dir="/storage/.apt_cache"
     local cuda_packages_cache="/storage/.cuda_packages_cache"
     
@@ -240,7 +240,13 @@ install_cuda() {
     
     # Check if already installed with robust verification
     if [[ -f "$marker" ]]; then
-        setup_cuda_env && hash -r
+        # Setup CUDA environment (don't fail if it has issues)
+        setup_cuda_env || true
+        hash -r || true
+        
+        # Give environment a moment to settle
+        sleep 1
+        
         # More robust CUDA verification with multiple fallback checks
         local cuda_verified=false
         
@@ -254,18 +260,24 @@ install_cuda() {
         fi
         
         # Method 2: Check CUDA installation directory
-        if [[ ! "$cuda_verified" == "true" ]] && [[ -d "/usr/local/cuda-12.6" ]]; then
-            if [[ -f "/usr/local/cuda-12.6/bin/nvcc" ]]; then
-                cuda_verified=true
-                log "✅ CUDA 12.6 verified via installation directory"
+        if [[ ! "$cuda_verified" == "true" ]] && [[ -d "/usr/local/cuda-12.8" ]]; then
+            if [[ -f "/usr/local/cuda-12.8/bin/nvcc" ]]; then
+                # Try direct execution
+                if /usr/local/cuda-12.8/bin/nvcc --version 2>&1 | grep -q "12\.8"; then
+                    cuda_verified=true
+                    log "✅ CUDA 12.8 verified via installation directory"
+                fi
             fi
         fi
         
         # Method 3: Check environment variables
         if [[ ! "$cuda_verified" == "true" ]] && [[ -n "$CUDA_HOME" ]]; then
             if [[ "$CUDA_HOME" =~ 12\.6 ]] && [[ -f "$CUDA_HOME/bin/nvcc" ]]; then
-                cuda_verified=true
-                log "✅ CUDA 12.6 verified via CUDA_HOME: $CUDA_HOME"
+                # Try direct execution via CUDA_HOME
+                if "$CUDA_HOME/bin/nvcc" --version 2>&1 | grep -q "12\.6"; then
+                    cuda_verified=true
+                    log "✅ CUDA 12.6 verified via CUDA_HOME: $CUDA_HOME"
+                fi
             fi
         fi
         
@@ -278,7 +290,7 @@ install_cuda() {
         fi
     fi
     
-    log "🚀 Installing CUDA 12.6 with enhanced caching..."
+    log "🚀 Installing CUDA 12.8 with enhanced caching..."
     
     # Configure APT for aggressive caching
     export DEBIAN_FRONTEND=noninteractive
@@ -346,13 +358,13 @@ EOF
         fi
     fi
     
-    # Method 2: Check CUDA installation directory
-    if [[ ! "$cuda_verified" == "true" ]] && [[ -d "/usr/local/cuda-12.6" ]]; then
-        if [[ -f "/usr/local/cuda-12.6/bin/nvcc" ]]; then
-            cuda_verified=true
-            log "✅ CUDA 12.6 verified via installation directory"
+            # Method 2: Check CUDA installation directory
+        if [[ ! "$cuda_verified" == "true" ]] && [[ -d "/usr/local/cuda-12.8" ]]; then
+            if [[ -f "/usr/local/cuda-12.8/bin/nvcc" ]]; then
+                cuda_verified=true
+                log "✅ CUDA 12.8 verified via installation directory"
+            fi
         fi
-    fi
     
     # Method 3: Check environment variables
     if [[ ! "$cuda_verified" == "true" ]] && [[ -n "$CUDA_HOME" ]]; then
@@ -365,7 +377,7 @@ EOF
     if [[ "$cuda_verified" == "true" ]]; then
         # Create persistent environment configuration
         cat > /etc/profile.d/cuda12.sh << 'EOL'
-export CUDA_HOME=/usr/local/cuda-12.6
+export CUDA_HOME=/usr/local/cuda-12.8
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export FORCE_CUDA=1
@@ -380,7 +392,7 @@ EOL
 # Packages cached in: $apt_cache_dir
 CUDA_VERIFIED=true
 EOF
-        log "✅ CUDA 12.6 installation completed and verified"
+        log "✅ CUDA 12.8 installation completed and verified"
         return 0
     else
         log_error "❌ CUDA 12.6 installation verification failed"
@@ -392,8 +404,27 @@ EOF
 setup_pytorch() {
     log "🚀 ULTIMATE PyTorch Installation - Beating Dependency Hell..."
     
+    # Ensure virtual environment is activated
+    if [[ -z "$VIRTUAL_ENV" ]]; then
+        log "⚠️ Virtual environment not detected, activating..."
+        activate_global_venv
+    fi
+    
     # SMART CHECK: Skip if PyTorch is already working perfectly
     log "🔍 Checking existing PyTorch installation..."
+    
+    # Debug: Show which Python we're using and PyTorch details
+    log "🔍 Debug: Using Python: $(which python)"
+    log "🔍 Debug: Python version: $(python --version 2>&1)"
+    log "🔍 Debug: Virtual env: $VIRTUAL_ENV"
+    log "🔍 Debug: PyTorch version: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo 'not found')"
+    log "🔍 Debug: PyTorch CUDA: $(python -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null || echo 'not found')"
+    log "🔍 Debug: Expected version: $TORCH_VERSION"
+    
+    # Check for multiple PyTorch installations
+    log "🔍 Debug: Checking for multiple PyTorch installations..."
+    pip list | grep -E "torch|torchvision|torchaudio" | head -5 || log "No PyTorch packages found via pip"
+    
     if python -c "import torch; import torchvision; import torchaudio; print(f'PyTorch {torch.__version__} working'); assert torch.cuda.is_available(), 'CUDA required'; print('✅ CUDA available')" 2>/dev/null; then
         local torch_version=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
         log_success "PyTorch ecosystem already working perfectly: $torch_version"
@@ -408,7 +439,15 @@ setup_pytorch() {
     local cuda_available=$(python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
     
     # Skip if already correct
-    [[ "$torch_ver" == "$TORCH_VERSION" && "$cuda_available" == "True" ]] && return 0
+    if [[ "$torch_ver" == "$TORCH_VERSION" && "$cuda_available" == "True" ]]; then
+        log "✅ PyTorch version already correct: $torch_ver"
+        return 0
+    fi
+    
+    # Force reinstall if version mismatch
+    if [[ "$torch_ver" != "$TORCH_VERSION" ]]; then
+        log "⚠️ PyTorch version mismatch: $torch_ver != $TORCH_VERSION (forcing reinstall)"
+    fi
     
     log "🔥 NUCLEAR CLEANUP: Removing all PyTorch traces..."
     
@@ -427,13 +466,13 @@ setup_pytorch() {
     
     # Strategy 1: Install with --no-deps (bypasses ALL dependency checking)
     pip install --no-cache-dir --disable-pip-version-check --no-deps --quiet \
-        torch==2.7.1+cu126 --extra-index-url "https://download.pytorch.org/whl/cu126" 2>/dev/null
+        torch==2.8.0+cu128 --extra-index-url "https://download.pytorch.org/whl/cu128" 2>/dev/null
     
     pip install --no-cache-dir --disable-pip-version-check --no-deps --quiet \
-        torchvision==0.22.1+cu126 --extra-index-url "https://download.pytorch.org/whl/cu126" 2>/dev/null
+        torchvision==0.23.0+cu128 --extra-index-url "https://download.pytorch.org/whl/cu128" 2>/dev/null
     
     pip install --no-cache-dir --disable-pip-version-check --no-deps --quiet \
-        torchaudio==2.7.1+cu126 --extra-index-url "https://download.pytorch.org/whl/cu126" 2>/dev/null
+        torchaudio==2.8.0+cu128 --extra-index-url "https://download.pytorch.org/whl/cu128" 2>/dev/null
     
     # Verify Strategy 1
     if python -c "import torch; print('Strategy 1 SUCCESS')" 2>/dev/null; then
@@ -443,14 +482,14 @@ setup_pytorch() {
         
         # Strategy 2: Use requirements.txt with --force-reinstall
         cat > /tmp/pytorch_requirements.txt << 'EOF'
-torch==2.7.1+cu126
-torchvision==0.22.1+cu126
-torchaudio==2.7.1+cu126
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+torchaudio==2.8.0+cu128
 EOF
         
         pip install --no-cache-dir --disable-pip-version-check --force-reinstall --quiet \
             -r /tmp/pytorch_requirements.txt \
-            --extra-index-url "https://download.pytorch.org/whl/cu126" 2>/dev/null || {
+            --extra-index-url "https://download.pytorch.org/whl/cu128" 2>/dev/null || {
             
             log "❌ Strategy 2 failed, trying Strategy 3..."
             
@@ -461,9 +500,9 @@ EOF
             cd /tmp/pytorch_wheels
             
             # Download wheels manually
-            wget -q "https://download.pytorch.org/whl/cu126/torch-2.7.1%2Bcu126-cp310-cp310-linux_x86_64.whl" -O torch.whl 2>/dev/null || true
-            wget -q "https://download.pytorch.org/whl/cu126/torchvision-0.22.1%2Bcu126-cp310-cp310-linux_x86_64.whl" -O torchvision.whl 2>/dev/null || true
-            wget -q "https://download.pytorch.org/whl/cu126/torchaudio-2.7.1%2Bcu126-cp310-cp310-linux_x86_64.whl" -O torchaudio.whl 2>/dev/null || true
+            wget -q "https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp310-cp310-linux_x86_64.whl" -O torch.whl 2>/dev/null || true
+            wget -q "https://download.pytorch.org/whl/cu128/torchvision-0.23.0%2Bcu128-cp310-cp310-linux_x86_64.whl" -O torchvision.whl 2>/dev/null || true
+            wget -q "https://download.pytorch.org/whl/cu128/torchaudio-2.8.0%2Bcu128-cp310-cp310-linux_x86_64.whl" -O torchaudio.whl 2>/dev/null || true
             
             # Install manually downloaded wheels
             pip install --no-cache-dir --disable-pip-version-check --force-reinstall --quiet \
@@ -480,9 +519,9 @@ EOF
     log "Installing xformers with conflict bypassing..."
     
     pip install --no-cache-dir --disable-pip-version-check --no-deps --quiet \
-        xformers==0.0.30 --extra-index-url "https://download.pytorch.org/whl/cu126" 2>/dev/null || \
+        xformers==0.0.32.post2 --extra-index-url "https://download.pytorch.org/whl/cu128" 2>/dev/null || \
     pip install --no-cache-dir --disable-pip-version-check --force-reinstall --quiet \
-        xformers --index-url "https://download.pytorch.org/whl/cu121" 2>/dev/null || \
+        xformers --index-url "https://download.pytorch.org/whl/cu128" 2>/dev/null || \
     pip install --no-cache-dir --disable-pip-version-check --force-reinstall --quiet \
         xformers 2>/dev/null || \
     log_error "⚠️ All xformers installation strategies failed, continuing without"
@@ -872,15 +911,35 @@ EOF
 
 install_component() {
     local component="$1" install_func="install_${component}"
-    declare -f "$install_func" >/dev/null && "$install_func" || log_error "$component installation failed"
+    if declare -f "$install_func" >/dev/null; then
+        log "🔧 Installing component: $component"
+        if "$install_func"; then
+            log "✅ Component $component installed successfully"
+        else
+            log_error "❌ Component $component installation failed (continuing anyway)"
+        fi
+    else
+        log_error "❌ No installation function found for component: $component"
+    fi
 }
 
     install_sageattention() {
-    python -c "import sageattention" 2>/dev/null && return 0
+    # Check if already installed
+    if python -c "import sageattention" 2>/dev/null; then
+        log "✅ SageAttention already installed and working"
+        return 0
+    fi
     
     log "🔧 Installing SageAttention..."
     local cache_dir="/storage/.sageattention_cache" wheel_cache="/storage/.wheel_cache"
     mkdir -p "$cache_dir" "$wheel_cache"
+    
+    # Check if we can build SageAttention (requires CUDA and proper environment)
+    if ! command -v nvcc &>/dev/null; then
+        log_error "❌ NVCC not found - SageAttention requires CUDA compiler"
+        log "⚠️ Skipping SageAttention installation - remove --use-sage-attention from launch args"
+        return 1
+    fi
     
     # Try cached wheel first
     local cached_wheel=$(find "$wheel_cache" -name "sageattention*.whl" 2>/dev/null | head -1)
@@ -1011,7 +1070,8 @@ except Exception as e:
         if [ -f "$cached_wheel" ]; then
             log "Found cached Nunchaku wheel: $cached_wheel"
             
-            if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>/dev/null; then
+            log "🔄 Installing cached wheel: $(basename "$cached_wheel")"
+            if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>&1; then
                 if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully from cached wheel')" 2>/dev/null; then
                     log "✅ Nunchaku installation from cached wheel verified successfully"
                     return 0
@@ -1062,7 +1122,8 @@ except Exception as e:
         if [[ "$download_success" == "true" ]]; then
             log "✅ Nunchaku wheel downloaded and cached successfully"
             
-            if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>/dev/null; then
+            log "🔄 Installing downloaded wheel: $(basename "$cached_wheel")"
+            if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>&1; then
                 # Enhanced verification with multiple checks
                 local verification_success=false
                 
@@ -1400,7 +1461,7 @@ main() {
     # Fix xformers conflicts
     log "🔄 Fixing xformers conflicts..."
     pip uninstall -y xformers 2>/dev/null || true
-    pip install --quiet -U xformers --index-url https://download.pytorch.org/whl/cu121 --index-url https://pypi.org/simple 2>/dev/null || log_error "xformers fix failed"
+    pip install --quiet -U xformers --index-url https://download.pytorch.org/whl/cu128 --index-url https://pypi.org/simple 2>/dev/null || log_error "xformers fix failed"
     
     # Fix other common conflicts
     log "🔧 Fixing other dependency conflicts..."
@@ -1452,8 +1513,17 @@ launch() {
     # Runtime PyTorch verification (skip if fresh install)
     [[ ! -f "/tmp/pytorch_ecosystem_fresh_install" ]] && setup_pytorch || rm -f "/tmp/pytorch_ecosystem_fresh_install"
     
+    # Check if SageAttention is available and adjust launch parameters accordingly
+    local sage_attention_arg=""
+    if python -c "import sageattention" 2>/dev/null; then
+        sage_attention_arg="--use-sage-attention"
+        log "✅ SageAttention detected - enabling in ComfyUI"
+    else
+        log "⚠️ SageAttention not available - launching without it"
+    fi
+    
     # Launch ComfyUI with optimized parameters (using globally activated venv Python)
-    PYTHONUNBUFFERED=1 service_loop "python main.py --dont-print-server --port $SD_COMFY_PORT --cuda-malloc --use-sage-attention --preview-method auto --bf16-vae --fp16-unet --cache-lru 5 --reserve-vram 0.5 --fast --enable-compress-response-body ${EXTRA_SD_COMFY_ARGS}" > "$LOG_DIR/sd_comfy.log" 2>&1 &
+    PYTHONUNBUFFERED=1 service_loop "python main.py --dont-print-server --port $SD_COMFY_PORT --cuda-malloc $sage_attention_arg --preview-method auto --bf16-vae --fp16-unet --cache-lru 5 --reserve-vram 0.5 --fast --enable-compress-response-body ${EXTRA_SD_COMFY_ARGS}" > "$LOG_DIR/sd_comfy.log" 2>&1 &
   echo $! > /tmp/sd_comfy.pid
 }
 
