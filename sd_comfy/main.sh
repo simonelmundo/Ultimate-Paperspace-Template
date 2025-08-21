@@ -23,6 +23,55 @@ cd "$SCRIPT_DIR" || { echo "Failed to change directory"; exit 1; }
 source .env || { echo "Failed to source .env"; exit 1; }
 mkdir -p "$LOG_DIR"
 
+# GLOBAL VIRTUAL ENVIRONMENT ACTIVATION - Activate once, keep active
+activate_global_venv() {
+    local venv_path="${VENV_DIR:-/tmp}/sd_comfy-env"
+    
+    # If venv doesn't exist, create it
+    if [[ ! -d "$venv_path" ]]; then
+        log "🔧 Creating virtual environment: $venv_path"
+        python3.10 -m venv "$venv_path" || {
+            log_error "Failed to create virtual environment"
+            exit 1
+        }
+    fi
+    
+    # Activate the virtual environment
+    log "🔧 Activating virtual environment: $venv_path"
+    source "$venv_path/bin/activate" || {
+        log_error "Failed to activate virtual environment"
+        exit 1
+    }
+    
+    # Verify activation worked
+    if [[ "$VIRTUAL_ENV" != "$venv_path" ]]; then
+        log_error "Virtual environment activation failed - VIRTUAL_ENV=$VIRTUAL_ENV"
+        exit 1
+    fi
+    
+    log "✅ Virtual environment activated: $VIRTUAL_ENV"
+    log "✅ Python executable: $(which python)"
+    log "✅ Python version: $(python --version)"
+}
+
+# Verify virtual environment is still active
+verify_venv_active() {
+    if [[ -z "$VIRTUAL_ENV" ]]; then
+        log_error "❌ Virtual environment is not active! Re-activating..."
+        activate_global_venv
+        return 1
+    fi
+    
+    local expected_venv="${VENV_DIR:-/tmp}/sd_comfy-env"
+    if [[ "$VIRTUAL_ENV" != "$expected_venv" ]]; then
+        log_error "❌ Wrong virtual environment active! Expected: $expected_venv, Got: $VIRTUAL_ENV"
+        activate_global_venv
+        return 1
+    fi
+    
+    return 0
+}
+
 # Test network connectivity
 test_connectivity() {
     log "Testing network connectivity..."
@@ -423,8 +472,8 @@ update_custom_nodes() {
         (
             cd "$node_dir" || return 1
             if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
-                return 0
-            else
+                    return 0
+                else
                 log_node_failure "$node_name" "Git update failed"
                 return 1
             fi
@@ -549,7 +598,7 @@ EOF
         
         for batch_file in /tmp/batch_*; do
             if timeout 180 pip install --no-cache-dir --disable-pip-version-check -r "$batch_file" 2>&1 | tee "/tmp/pip_batch_$(basename "$batch_file").log"; then
-                continue
+            continue
             else
                 while IFS= read -r package; do
                     [[ -z "$package" ]] && continue
@@ -560,9 +609,9 @@ EOF
                         log_pip_error "$package" "$error_msg" "individual install"
                     fi
                 done < "$batch_file"
-            fi
-        done
-        
+        fi
+    done
+    
         rm -f /tmp/batch_* /tmp/pip_batch_* /tmp/pip_individual_*
     fi
     
@@ -572,8 +621,8 @@ EOF
                 log_pip_success "$repo" "git repository"
             else
                 log_pip_error "$repo" "Git installation timeout or failure" "git repository"
-            fi
-        done
+        fi
+    done
     fi
     
     rm -f "$resolved_reqs" "$verify_script" "/tmp/missing_packages.txt" "/tmp/resolve_conflicts.py"
@@ -620,7 +669,7 @@ install_component() {
     fi
 }
 
-install_sageattention() {
+    install_sageattention() {
     python -c "import sageattention" 2>/dev/null && return 0
     
     local cache_dir="/storage/.sageattention_cache"
@@ -630,8 +679,8 @@ install_sageattention() {
     local cached_wheel=$(find "$wheel_cache" -name "sageattention*.whl" 2>/dev/null | head -1)
     if [[ -n "$cached_wheel" ]]; then
         if pip install --no-cache-dir --disable-pip-version-check "$cached_wheel" 2>/dev/null; then
-            return 0
-        else
+                return 0
+            else
             rm -f "$cached_wheel"
         fi
     fi
@@ -641,8 +690,8 @@ install_sageattention() {
     fi
     
     export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions"
-    export MAX_JOBS=$(nproc)
-    export USE_NINJA=1
+        export MAX_JOBS=$(nproc)
+        export USE_NINJA=1
     
     (
         cd "$cache_dir/src" &&
@@ -654,11 +703,11 @@ install_sageattention() {
     ) || return 1
 }
 
-install_nunchaku() {
+    install_nunchaku() {
     python -c "import nunchaku" 2>/dev/null && return 0
     
-    local torch_check_output
-    torch_check_output=$(python -c "
+        local torch_check_output
+        torch_check_output=$(python -c "
 import sys
 try:
     import torch
@@ -677,23 +726,23 @@ except Exception as e:
     
     if [[ "$torch_check_output" != "compatible" ]]; then
         log_error "PyTorch version incompatible for Nunchaku: $torch_check_output"
-        return 1
-    fi
-    
+            return 1
+        fi
+        
     pip uninstall -y nunchaku 2>/dev/null || true
     
     if pip install "nunchaku==0.3.1" 2>&1 | tee /tmp/nunchaku_install.log; then
         log_pip_success "nunchaku" "version 0.3.1"
-        return 0
-    else
+                return 0
+            else
         local install_error=$(tail -n 5 /tmp/nunchaku_install.log 2>/dev/null | tr '\n' ' ')
         log_pip_error "nunchaku" "$install_error" "version 0.3.1"
-        return 1
+                    return 1
     fi
 }
             
-install_hunyuan3d_texture_components() {
-    local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
+    install_hunyuan3d_texture_components() {
+        local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
     [[ ! -d "$hunyuan3d_path" ]] && return 1
     
     pip_install "pybind11 ninja"
@@ -706,8 +755,8 @@ install_hunyuan3d_texture_components() {
     done
 }
 
-process_requirements() {
-    local req_file="$1"
+    process_requirements() {
+        local req_file="$1"
     [[ ! -f "$req_file" ]] && return 0
     
     timeout 120s pip_install "-r $req_file" || {
@@ -738,8 +787,8 @@ main() {
     }
     
     if [[ -f "/tmp/sd_comfy.prepared" && -z "$REINSTALL_SD_COMFY" ]]; then
-        source "${VENV_DIR:-/tmp}/sd_comfy-env/bin/activate" || exit 1
-        return 0
+        activate_global_venv
+                    return 0
     fi
     
     setup_cuda_env
@@ -769,16 +818,17 @@ main() {
                  "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO" \
                  "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
     
-    local venv_path="${VENV_DIR:-/tmp}/sd_comfy-env"
-    rm -rf "$venv_path"
-    python3.10 -m venv "$venv_path"
-    source "$venv_path/bin/activate"
+    # Activate global virtual environment (will create if needed)
+    activate_global_venv
     
     apt-get update -qq
     apt-get install -y \
         libatlas-base-dev libblas-dev liblapack-dev \
         libjpeg-dev libpng-dev python3-dev build-essential \
         libgl1-mesa-dev espeak-ng 2>/dev/null || true
+    
+    # Verify venv is still active before installations
+    verify_venv_active
     
     setup_pytorch
     install_component "sageattention"
@@ -839,7 +889,57 @@ launch() {
         rm -f "/tmp/pytorch_ecosystem_fresh_install"
     fi
     
-    # Launch ComfyUI with optimized parameters
+    # Verify virtual environment is working correctly
+    log "🔍 Verifying virtual environment packages..."
+    if ! python -c "
+import sys
+print(f'Python executable: {sys.executable}')
+print(f'Python path: {sys.path[0]}')
+try:
+    import nunchaku
+    print('✅ nunchaku: OK')
+except ImportError as e:
+    print(f'❌ nunchaku: {e}')
+try:
+    import blend_modes
+    print('✅ blend_modes: OK')
+except ImportError as e:
+    print(f'❌ blend_modes: {e}')
+try:
+    import deepdiff
+    print('✅ deepdiff: OK')
+except ImportError as e:
+    print(f'❌ deepdiff: {e}')
+try:
+    import rembg
+    print('✅ rembg: OK')
+except ImportError as e:
+    print(f'❌ rembg: {e}')
+try:
+    import webcolors
+    print('✅ webcolors: OK')
+except ImportError as e:
+    print(f'❌ webcolors: {e}')
+try:
+    import ultralytics
+    print('✅ ultralytics: OK')
+except ImportError as e:
+    print(f'❌ ultralytics: {e}')
+try:
+    import inflect
+    print('✅ inflect: OK')
+except ImportError as e:
+    print(f'❌ inflect: {e}')
+try:
+    import soxr
+    print('✅ soxr: OK')
+except ImportError as e:
+    print(f'❌ soxr: {e}')
+" 2>&1 | tee -a "$LOG_DIR/sd_comfy.log"; then
+        log_error "Virtual environment verification failed - some packages are missing!"
+    fi
+    
+    # Launch ComfyUI with optimized parameters (using globally activated venv Python)
   PYTHONUNBUFFERED=1 service_loop "python main.py \
     --dont-print-server \
     --port $SD_COMFY_PORT \
@@ -1057,8 +1157,13 @@ generate_installation_summary() {
 # Execute main workflow
 main
 
+    # Virtual environment is already active from main() function
+
 # Generate comprehensive summary before launch
 generate_installation_summary
+
+# Verify venv is still active before launch
+verify_venv_active
 
 # Start ComfyUI first (so user can access it immediately)
 log "🚀 Starting ComfyUI first for immediate access..."
