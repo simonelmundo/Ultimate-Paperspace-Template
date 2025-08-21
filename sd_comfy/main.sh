@@ -206,6 +206,7 @@ EOF
         "libatlas-base-dev" "libblas-dev" "liblapack-dev"
         "libjpeg-dev" "libpng-dev" "python3-dev" "build-essential"
         "libgl1-mesa-dev" "espeak-ng" "portaudio19-dev" "libportaudio2"
+        "libportaudio-dev" "libasound2-dev" "libsndfile1-dev"
     )
     
     # Update and install with caching
@@ -611,8 +612,10 @@ process_combined_requirements() {
     
     log "🔧 Processing combined requirements file: $req_file"
     
-    # Enhanced caching - pre-download and cache wheels
-    enhanced_requirements_cache "$req_file"
+    # Enhanced caching - pre-download and cache wheels (optional, won't break if it fails)
+    if [[ "${ENABLE_ENHANCED_CACHE:-true}" == "true" ]]; then
+        enhanced_requirements_cache "$req_file" || log "⚠️ Enhanced caching failed but continuing with standard installation"
+    fi
     
     mkdir -p "$cache_dir"
     export PIP_CACHE_DIR="$cache_dir"
@@ -923,6 +926,7 @@ resolve_dependencies() {
         "urllib3==1.21" "requests==2.31.0" "fastapi==0.103.2"
         "gradio_client==0.6.0" "peewee==3.16.3" "psutil==5.9.5"
         "uvicorn==0.23.2" "pynvml==11.5.0" "python-multipart==0.0.6"
+        "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0"
     )
     
     for dep in "${core_deps[@]}"; do 
@@ -1093,8 +1097,12 @@ except Exception as e:
             return 1
         fi
         
-        # Setup variables for wheel download
+        # Setup variables for wheel download - ensure correct version for ComfyUI nodes
         local nunchaku_version="0.3.1"
+        
+        # Force uninstall any existing nunchaku version first
+        log "🔄 Removing any existing nunchaku installation..."
+        pip uninstall -y nunchaku 2>/dev/null || true
         local python_version
         python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
         local arch=$(uname -m)
@@ -1188,24 +1196,38 @@ except Exception as e:
             if [[ "$file_size" -lt 1000000 ]]; then
                 log "⚠️ Downloaded wheel too small ($file_size bytes) - likely download failed"
                 rm -f "$temp_wheel"
-                log "🔄 Trying pip direct install instead..."
-                if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku" 2>/dev/null; then
-                    log "✅ Nunchaku installed directly via pip (bypassing failed download)"
+                log "🔄 Trying pip direct install with specific version..."
+                if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku==$nunchaku_version" 2>/dev/null; then
+                    log "✅ Nunchaku $nunchaku_version installed directly via pip (bypassing failed download)"
                     return 0
                 else
-                    log_error "❌ Direct pip install also failed"
-                    return 1
+                    log_error "❌ Direct pip install also failed, trying fallback installation..."
+                    # Final fallback - try installing from git if version is not available
+                    if pip install --no-cache-dir --disable-pip-version-check --quiet "git+https://github.com/mit-han-lab/nunchaku.git@v$nunchaku_version" 2>/dev/null; then
+                        log "✅ Nunchaku installed from git repository"
+                        return 0
+                    else
+                        log_error "❌ All nunchaku installation methods failed"
+                        return 1
+                    fi
                 fi
             elif ! python -c "import zipfile; zipfile.ZipFile('$temp_wheel').testzip()" 2>/dev/null; then
                 log "⚠️ Downloaded wheel verification failed - wheel is corrupted"
                 rm -f "$temp_wheel"
-                log "🔄 Trying pip direct install instead..."
-                if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku" 2>/dev/null; then
-                    log "✅ Nunchaku installed directly via pip (bypassing corrupted wheel)"
+                log "🔄 Trying pip direct install with specific version..."
+                if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku==$nunchaku_version" 2>/dev/null; then
+                    log "✅ Nunchaku $nunchaku_version installed directly via pip (bypassing corrupted wheel)"
                     return 0
                 else
-                    log_error "❌ Direct pip install also failed"
-                    return 1
+                    log_error "❌ Direct pip install also failed, trying fallback installation..."
+                    # Final fallback - try installing from git if version is not available
+                    if pip install --no-cache-dir --disable-pip-version-check --quiet "git+https://github.com/mit-han-lab/nunchaku.git@v$nunchaku_version" 2>/dev/null; then
+                        log "✅ Nunchaku installed from git repository"
+                        return 0
+                    else
+                        log_error "❌ All nunchaku installation methods failed"
+                        return 1
+                    fi
                 fi
             fi
             
@@ -1287,8 +1309,10 @@ except Exception as e:
         [[ ! -f "$req_file" ]] && return 0
         log "📋 Processing requirements with enhanced caching: $req_file"
         
-        # Use enhanced caching first
-        enhanced_requirements_cache "$req_file"
+        # Use enhanced caching first (optional)
+        if [[ "${ENABLE_ENHANCED_CACHE:-true}" == "true" ]]; then
+            enhanced_requirements_cache "$req_file" || log "⚠️ Enhanced caching failed for $(basename "$req_file") but continuing"
+        fi
         
         # Try batch installation first with wheel cache
         if pip install --quiet --find-links "/storage/.wheel_cache" -r "$req_file" 2>/dev/null; then
@@ -1345,6 +1369,37 @@ except Exception as e:
 service_loop() { while true; do eval "$1"; sleep 1; done; }
 
 # Prepare symlinks (simplified from original)
+# Fix directory and filesystem issues
+fix_directory_issues() {
+    log "🔧 Fixing directory and filesystem issues..."
+    
+    # Ensure model directories exist and have correct permissions
+    local model_dirs=(
+        "$REPO_DIR/models/LLM"
+        "$REPO_DIR/models/ultralytics/bbox"
+        "$REPO_DIR/models/ultralytics/segm"
+        "$REPO_DIR/models/checkpoints"
+        "$REPO_DIR/models/loras"
+        "$REPO_DIR/models/vae"
+        "$REPO_DIR/models/controlnet"
+        "$REPO_DIR/models/embeddings"
+    )
+    
+    for dir in "${model_dirs[@]}"; do
+        if [[ -f "$dir" ]]; then
+            log "⚠️ Removing file blocking directory creation: $dir"
+            rm -f "$dir"
+        fi
+        mkdir -p "$dir" 2>/dev/null || true
+        chmod 755 "$dir" 2>/dev/null || true
+    done
+    
+    # Fix common permission issues
+    chmod -R 755 "$REPO_DIR/custom_nodes" 2>/dev/null || true
+    
+    log "✅ Directory issues fixed"
+}
+
 prepare_link() {
     for link_pair in "$@"; do
         [[ "$link_pair" =~ ^(.+):(.+)$ ]] && {
@@ -1410,47 +1465,95 @@ enhanced_requirements_cache() {
     # Check if this exact requirements set is already cached
     if [[ -f "$cache_marker" ]]; then
         log "✅ Requirements already cached (hash: $req_hash), using cached packages..."
-        
-        # Install from cached packages using find and pip install with local wheels
-        local cached_count=0
-        while read -r pkg_name; do
-            [[ -z "$pkg_name" ]] && continue
-            local cached_wheels=$(find "$wheel_cache" -name "${pkg_name}*.whl" 2>/dev/null | head -1)
-            if [[ -n "$cached_wheels" ]]; then
-                log "💾 Using cached wheel for: $pkg_name"
-                pip install --no-cache-dir --disable-pip-version-check --quiet --find-links "$wheel_cache" "$pkg_name" 2>/dev/null && ((cached_count++))
-            fi
-        done < <(grep -v '^[[:space:]]*#' "$req_file" | grep -v '^[[:space:]]*$' | sed 's/[<>=!].*//' | sed 's/\[.*\]//' | sort -u)
-        
-        log "💾 Used $cached_count cached packages"
         return 0
     fi
     
-    # Pre-download all wheels to cache
-    log "📥 Pre-downloading and caching wheels..."
+    # Pre-download wheels in smaller batches to avoid failures
+    log "📥 Pre-downloading and caching wheels in batches..."
     local download_temp="/tmp/req_download_$$"
     mkdir -p "$download_temp"
     
-    # Download wheels without installing
-    if pip download --no-cache-dir --dest "$download_temp" -r "$req_file" --quiet 2>/dev/null; then
-        # Move downloaded wheels to cache
-        local wheels_cached=0
+    # Debug info if enabled
+    if [[ "${DEBUG_CACHE:-false}" == "true" ]]; then
+        log "🔍 Debug: Requirements file has $(wc -l < "$req_file") lines"
+        log "🔍 Debug: Download temp dir: $download_temp"
+        log "🔍 Debug: Wheel cache dir: $wheel_cache"
+        log "🔍 Debug: Available disk space: $(df -h /tmp | tail -1 | awk '{print $4}')"
+    fi
+    
+    # Create clean requirements file (remove git+, comments, empty lines)
+    local clean_req="/tmp/clean_req_$$.txt"
+    grep -v '^[[:space:]]*#' "$req_file" | \
+    grep -v '^[[:space:]]*$' | \
+    grep -v '^[[:space:]]*-e' | \
+    grep -v 'git+http' | \
+    grep -v '^[[:space:]]*--' > "$clean_req"
+    
+    local total_wheels=0
+    local failed_downloads=0
+    
+    # Split into smaller batches of 10 packages each
+    split -l 10 "$clean_req" "/tmp/req_batch_"
+    
+    for batch_file in /tmp/req_batch_*; do
+        [[ ! -f "$batch_file" ]] && continue
+        
+        log "📦 Pre-downloading batch: $(basename "$batch_file")"
+        
+        # Try downloading this batch
+        local batch_log="/tmp/pip_download_$(basename "$batch_file").log"
+        if timeout 60s pip download --dest "$download_temp" --no-deps -r "$batch_file" 2>"$batch_log"; then
+            log "✅ Batch download successful: $(basename "$batch_file")"
+        else
+            if [[ "${DEBUG_CACHE:-false}" == "true" ]]; then
+                log "🔍 Debug: Batch download error for $(basename "$batch_file"):"
+                [[ -f "$batch_log" ]] && tail -3 "$batch_log" | while read line; do log "    $line"; done
+            fi
+            log "⚠️ Batch download failed: $(basename "$batch_file") (trying individual packages)"
+            ((failed_downloads++))
+            
+            # Try individual packages in failed batch
+            while read -r pkg; do
+                [[ -z "$pkg" ]] && continue
+                local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
+                
+                if timeout 30s pip download --dest "$download_temp" --quiet --no-deps "$pkg" 2>/dev/null; then
+                    log "  ✅ Individual download: $pkg_name"
+                else
+                    log "  ⚠️ Failed individual download: $pkg_name"
+                fi
+            done < "$batch_file"
+        fi
+    done
+    
+    # Move downloaded wheels to cache
+    local wheels_cached=0
+    if [[ -d "$download_temp" ]]; then
         for wheel in "$download_temp"/*.whl; do
             [[ -f "$wheel" ]] && cp "$wheel" "$wheel_cache/" && ((wheels_cached++))
         done
         
-        log "💾 Cached $wheels_cached wheels for future use"
+        # Also try to find any tar.gz files and note them
+        local source_packages=$(find "$download_temp" -name "*.tar.gz" | wc -l)
         
-        # Create cache marker
-        echo "Cached requirements on $(date)" > "$cache_marker"
-        echo "Requirements hash: $req_hash" >> "$cache_marker"
-        echo "Wheels cached: $wheels_cached" >> "$cache_marker"
+        if [[ $wheels_cached -gt 0 ]]; then
+            log "💾 Cached $wheels_cached wheels for future use"
+            
+            # Create cache marker only if we got some wheels
+            echo "Cached requirements on $(date)" > "$cache_marker"
+            echo "Requirements hash: $req_hash" >> "$cache_marker"
+            echo "Wheels cached: $wheels_cached" >> "$cache_marker"
+            echo "Source packages found: $source_packages" >> "$cache_marker"
+            echo "Failed batches: $failed_downloads" >> "$cache_marker"
+        else
+            log "⚠️ No wheels downloaded - packages may need compilation or be unavailable"
+        fi
     else
-        log "⚠️ Pre-download failed, will use standard installation"
+        log "⚠️ Download directory not created - pre-download completely failed"
     fi
     
-    # Clean up temp directory
-    rm -rf "$download_temp"
+    # Clean up temp files
+    rm -rf "$download_temp" "$clean_req" /tmp/req_batch_* /tmp/pip_download_*.log
 }
 
 # Send to Discord (simplified)
@@ -1561,14 +1664,16 @@ create_combined_requirements_file() {
 # Fast batch installer for critical dependencies with enhanced caching
 install_critical_dependencies() {
     log "📦 Installing Critical Custom Node Dependencies with Enhanced Caching..."
-    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub>=0.34.0")
+    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate")
     
     # Create temporary requirements file for enhanced caching
     local temp_critical_req="/tmp/critical_deps_$(date +%s).txt"
     printf "%s\n" "${critical_packages[@]}" > "$temp_critical_req"
     
-    # Use enhanced caching for critical dependencies
-    enhanced_requirements_cache "$temp_critical_req"
+    # Use enhanced caching for critical dependencies (optional)
+    if [[ "${ENABLE_ENHANCED_CACHE:-true}" == "true" ]]; then
+        enhanced_requirements_cache "$temp_critical_req" || log "⚠️ Enhanced caching failed for critical dependencies but continuing"
+    fi
     
     # Fast check for already installed packages using pip list
     log "🔍 Fast-checking already installed packages..."
@@ -1698,6 +1803,9 @@ main() {
     
     [[ -d ".git" ]] && { [[ -n "$(git status --porcelain requirements.txt 2>/dev/null)" ]] && git checkout -- requirements.txt; git symbolic-ref -q HEAD >/dev/null || git checkout main || git checkout master || git checkout -b main; git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; }
     
+    # Fix directory and filesystem issues first
+    fix_directory_issues
+    
     prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy" "$MODEL_DIR:$WORKING_DIR/models" "$MODEL_DIR/sd:$LINK_MODEL_TO" "$MODEL_DIR/lora:$LINK_LORA_TO" "$MODEL_DIR/vae:$LINK_VAE_TO" "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO" "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO" "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO" "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
     
     # Activate global virtual environment (will create if needed)
@@ -1712,6 +1820,12 @@ main() {
     
     # Manage cache sizes to stay under 7GB limit
     manage_cache_size 7
+    
+    # Enhanced caching can be disabled by setting ENABLE_ENHANCED_CACHE=false
+    # Debug caching issues by setting DEBUG_CACHE=true
+    if [[ "${ENABLE_ENHANCED_CACHE:-true}" == "false" ]]; then
+        log "⚠️ Enhanced caching disabled (ENABLE_ENHANCED_CACHE=false)"
+    fi
     
     # Enhanced system dependencies installation with caching
     install_system_dependencies
@@ -1768,6 +1882,20 @@ main() {
     pip uninstall -y huggingface_hub diffusers 2>/dev/null || true
     pip install --quiet "huggingface_hub>=0.34.0" 2>/dev/null || log_error "huggingface_hub fix failed"
     pip install --quiet "diffusers" 2>/dev/null || log_error "diffusers fix failed"
+    
+    # Fix PyAV version issues for API nodes
+    log "🔧 Fixing PyAV version for API nodes..."
+    pip uninstall -y av 2>/dev/null || true
+    pip install --quiet "av>=12.0.0,<14.0.0" 2>/dev/null || log_error "PyAV fix failed"
+    
+    # Ensure correct nunchaku version is installed
+    log "🔧 Ensuring correct nunchaku version..."
+    local current_nunchaku=$(pip show nunchaku 2>/dev/null | grep Version | cut -d' ' -f2)
+    if [[ "$current_nunchaku" != "0.3.1" ]]; then
+        log "⚠️ Wrong nunchaku version detected: $current_nunchaku, fixing..."
+        pip uninstall -y nunchaku 2>/dev/null || true
+        pip install --quiet "nunchaku==0.3.1" 2>/dev/null || log_error "nunchaku version fix failed"
+    fi
     
     # CRITICAL: Install missing dependencies AFTER batch requirements processing
     log "🚀 Installing Critical Custom Node Dependencies (AFTER batch requirements)..."
