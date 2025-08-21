@@ -306,9 +306,9 @@ DPkg::Options {
 EOF
     
     # Clean up old CUDA versions efficiently 
-    if dpkg -l 2>/dev/null | grep -q "cuda-11"; then
-        log "Removing old CUDA 11.x installations..."
-        apt-get remove --purge -y 'cuda-11-*' 2>/dev/null || true
+    if dpkg -l 2>/dev/null | grep -q "cuda-11\|cuda-12-6"; then
+        log "Removing old CUDA 11.x and 12.6 installations..."
+        apt-get remove --purge -y 'cuda-11-*' 'cuda-12-6-*' 2>/dev/null || true
         apt-get autoremove -y 2>/dev/null || true
     fi
     
@@ -330,13 +330,13 @@ EOF
     log "Installing CUDA packages (this will cache ~1.7GB for future use)..."
     local cuda_packages=(
         "build-essential" "python3-dev"
-        "cuda-cudart-12-6" "cuda-nvcc-12-6" 
-        "libcublas-12-6" "libcublas-dev-12-6"
-        "libcufft-12-6" "libcufft-dev-12-6"
-        "libcurand-12-6" "libcurand-dev-12-6"
-        "libcusolver-12-6" "libcusolver-dev-12-6"
-        "libcusparse-12-6" "libcusparse-dev-12-6"
-        "libnpp-12-6" "libnpp-dev-12-6"
+        "cuda-cudart-12-8" "cuda-nvcc-12-8" 
+        "libcublas-12-8" "libcublas-dev-12-8"
+        "libcufft-12-8" "libcufft-dev-12-8"
+        "libcurand-12-8" "libcurand-dev-12-8"
+        "libcusolver-12-8" "libcusolver-dev-12-8"
+        "libcusparse-12-8" "libcusparse-dev-12-8"
+        "libnpp-12-8" "libnpp-dev-12-8"
     )
     
     # Install with cache directory and parallel downloads
@@ -352,9 +352,9 @@ EOF
     # Method 1: Check nvcc command and version
     if command -v nvcc &>/dev/null; then
         local nvcc_version=$(nvcc --version 2>&1 | grep -i 'release' | head -1)
-        if [[ "$nvcc_version" =~ 12\.6 ]]; then
+        if [[ "$nvcc_version" =~ 12\.8 ]]; then
             cuda_verified=true
-            log "✅ CUDA 12.6 verified via nvcc: $nvcc_version"
+            log "✅ CUDA 12.8 verified via nvcc: $nvcc_version"
         fi
     fi
     
@@ -368,9 +368,9 @@ EOF
     
     # Method 3: Check environment variables
     if [[ ! "$cuda_verified" == "true" ]] && [[ -n "$CUDA_HOME" ]]; then
-        if [[ "$CUDA_HOME" =~ 12\.6 ]] && [[ -f "$CUDA_HOME/bin/nvcc" ]]; then
+        if [[ "$CUDA_HOME" =~ 12\.8 ]] && [[ -f "$CUDA_HOME/bin/nvcc" ]]; then
             cuda_verified=true
-            log "✅ CUDA 12.6 verified via CUDA_HOME: $CUDA_HOME"
+            log "✅ CUDA 12.8 verified via CUDA_HOME: $CUDA_HOME"
         fi
     fi
     
@@ -386,7 +386,7 @@ EOL
         
         # Create success marker with metadata
         cat > "$marker" << EOF
-# CUDA 12.6 Installation Marker
+# CUDA 12.8 Installation Marker
 # Installed: $(date)
 # NVCC Version: $(nvcc --version | grep 'release' | awk '{print $6}')
 # Packages cached in: $apt_cache_dir
@@ -395,7 +395,7 @@ EOF
         log "✅ CUDA 12.8 installation completed and verified"
         return 0
     else
-        log_error "❌ CUDA 12.6 installation verification failed"
+        log_error "❌ CUDA 12.8 installation verification failed"
         return 1
     fi
 }
@@ -1070,18 +1070,26 @@ except Exception as e:
         if [ -f "$cached_wheel" ]; then
             log "Found cached Nunchaku wheel: $cached_wheel"
             
-            log "🔄 Installing cached wheel: $(basename "$cached_wheel")"
-            if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>&1; then
-                if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully from cached wheel')" 2>/dev/null; then
-                    log "✅ Nunchaku installation from cached wheel verified successfully"
-                    return 0
+            # Verify cached wheel integrity before using
+            log "🔍 Verifying cached wheel integrity..."
+            if ! python -c "import wheel; wheel.verify_wheel('$cached_wheel')" 2>/dev/null; then
+                log "⚠️ Cached wheel is corrupted, removing and downloading fresh..."
+                rm -f "$cached_wheel"
+            else
+                log "✅ Cached wheel verification successful"
+                log "🔄 Installing cached wheel: $(basename "$cached_wheel")"
+                if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>&1; then
+                    if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully from cached wheel')" 2>/dev/null; then
+                        log "✅ Nunchaku installation from cached wheel verified successfully"
+                        return 0
+                    else
+                        log_error "❌ Cached wheel verification failed, removing and trying fresh download"
+                        rm -f "$cached_wheel"
+                    fi
                 else
-                    log_error "❌ Cached wheel verification failed, removing and trying fresh download"
+                    log_error "❌ Failed to install from cached wheel, removing and trying fresh download"
                     rm -f "$cached_wheel"
                 fi
-            else
-                log_error "❌ Failed to install from cached wheel, removing and trying fresh download"
-                rm -f "$cached_wheel"
             fi
         fi
         
@@ -1093,9 +1101,10 @@ except Exception as e:
         
         # Try multiple download methods
         local download_success=false
+        local temp_wheel="/tmp/nunchaku_temp.whl"
         
         # Method 1: wget
-        if wget -q --show-progress -O "$cached_wheel" "$nunchaku_wheel_url" 2>/dev/null; then
+        if wget -q --show-progress -O "$temp_wheel" "$nunchaku_wheel_url" 2>/dev/null; then
             download_success=true
             log "✅ Nunchaku wheel downloaded with wget"
         fi
@@ -1103,7 +1112,7 @@ except Exception as e:
         # Method 2: curl (fallback)
         if [[ "$download_success" != "true" ]]; then
             log "🔄 wget failed, trying curl..."
-            if curl -L -s -o "$cached_wheel" "$nunchaku_wheel_url" 2>/dev/null; then
+            if curl -L -s -o "$temp_wheel" "$nunchaku_wheel_url" 2>/dev/null; then
                 download_success=true
                 log "✅ Nunchaku wheel downloaded with curl"
             fi
@@ -1120,9 +1129,29 @@ except Exception as e:
         fi
         
         if [[ "$download_success" == "true" ]]; then
-            log "✅ Nunchaku wheel downloaded and cached successfully"
+            log "✅ Nunchaku wheel downloaded to temporary location"
             
-            log "🔄 Installing downloaded wheel: $(basename "$cached_wheel")"
+            # Verify wheel file integrity BEFORE caching
+            log "🔍 Verifying wheel file integrity before caching..."
+            if ! python -c "import wheel; wheel.verify_wheel('$temp_wheel')" 2>/dev/null; then
+                log "⚠️ Downloaded wheel verification failed - wheel is corrupted"
+                log "🔄 Trying pip direct install instead..."
+                rm -f "$temp_wheel"  # Clean up corrupted temp file
+                if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku" 2>/dev/null; then
+                    log "✅ Nunchaku installed directly via pip (bypassing corrupted wheel)"
+                    return 0
+                else
+                    log_error "❌ Direct pip install also failed"
+                    return 1
+                fi
+            fi
+            
+            # Wheel is valid - now cache it and install
+            log "✅ Wheel verification successful - caching valid wheel"
+            cp "$temp_wheel" "$cached_wheel"
+            rm -f "$temp_wheel"  # Clean up temp file
+            
+            log "🔄 Installing verified wheel: $(basename "$cached_wheel")"
             if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>&1; then
                 # Enhanced verification with multiple checks
                 local verification_success=false
@@ -1551,6 +1580,23 @@ send_to_discord "Stable Diffusion Comfy Started"
 env | grep -q "PAPERSPACE" && send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-comfy/"
 
 # Show final status
-log "" && log "🎉 COMFYUI STARTUP COMPLETE! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✅ ComfyUI is now running and accessible 📥 Model download is running in background 🔗 Access ComfyUI at: http://localhost:$SD_COMFY_PORT" && env | grep -q "PAPERSPACE" && log "🌐 Paperspace URL: https://$PAPERSPACE_FQDN/sd-comfy/" && log "" && log "📋 Useful commands: • Check ComfyUI logs: tail -f $LOG_DIR/sd_comfy.log • Check model download: tail -f /tmp/model_download.log • Stop model download: kill \$(cat /tmp/model_download.pid) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log ""
+log "🎉 COMFYUI STARTUP COMPLETE!"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log "✅ ComfyUI is now running and accessible"
+log "📥 Model download is running in background"
+log "🔗 Access ComfyUI at: http://localhost:$SD_COMFY_PORT"
+
+# Show Paperspace URL if available
+if env | grep -q "PAPERSPACE"; then
+    log "🌐 Paperspace URL: https://$PAPERSPACE_FQDN/sd-comfy/"
+fi
+
+log ""
+log "📋 Useful commands:"
+log "  • Check ComfyUI logs: tail -f $LOG_DIR/sd_comfy.log"
+log "  • Check model download: tail -f /tmp/model_download.log"
+log "  • Stop model download: kill \$(cat /tmp/model_download.pid)"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 [[ -n "${CF_TOKEN}" ]] && { [[ "$RUN_SCRIPT" != *"sd_comfy"* ]] && export RUN_SCRIPT="$RUN_SCRIPT,sd_comfy"; bash "$SCRIPT_DIR/../cloudflare_reload.sh"; }
