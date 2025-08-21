@@ -53,61 +53,27 @@ test_connectivity() {
     ping -c 1 8.8.8.8 &>/dev/null && { log "✅ Network connectivity OK"; return 0; } || { log_error "❌ Network connectivity failed"; return 1; }
 }
 
-# Enhanced logging with error tracking
-declare -a INSTALLATION_SUCCESSES=()
-declare -a INSTALLATION_FAILURES=()
-declare -a DEPENDENCY_CONFLICTS=()
-declare -a CUSTOM_NODE_FAILURES=()
-declare -a CUSTOM_NODE_DETAILS=()
-declare -a CUSTOM_NODE_FAILED_DETAILS=()
-declare -a DETAILED_LOGS=()
-declare -a PIP_ERRORS=()
-declare -a PIP_SUCCESSES=()
+# Setup APT caching (unified function)
+setup_apt_cache() {
+    local cache_dir="$1"
+    mkdir -p "$cache_dir"
+    cat > /etc/apt/apt.conf.d/99cache << EOF
+Dir::Cache::Archives "$cache_dir";
+Acquire::Retries "3";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+DPkg::Options {
+    "--force-confdef";
+    "--force-confold";
+}
+EOF
+}
 
+# Simplified logging system
 log() { echo "$1"; }
-
-# Collect detailed logs for final summary (silent during execution)
-log_detail() {
-    local message="$1"
-    DETAILED_LOGS+=("$message")
-}
-
-# Capture pip installation results for final summary
-log_pip_success() {
-    local package="$1"
-    local method="$2"
-    PIP_SUCCESSES+=("✅ $package ($method)")
-}
-
-log_pip_error() {
-    local package="$1"
-    local error="$2"
-    local method="$3"
-    PIP_ERRORS+=("❌ $package ($method): $error")
-}
-
-log_error() {
-    echo "ERROR: $1" >&2
-    INSTALLATION_FAILURES+=("$1")
-}
-
-log_success() {
-    local component="$1"
-    echo "✅ SUCCESS: $component"
-    INSTALLATION_SUCCESSES+=("$component")
-}
-
-log_conflict() {
-    local conflict="$1"
-    echo "⚠️ CONFLICT: $conflict"
-    DEPENDENCY_CONFLICTS+=("$conflict")
-}
-
-log_node_failure() {
-    local node="$1"
-    local error="$2"
-    CUSTOM_NODE_FAILURES+=("$node: $error")
-}
+log_error() { echo "ERROR: $1" >&2; }
+log_success() { echo "✅ SUCCESS: $1"; }
+log_detail() { echo "  $1"; }
 
 #######################################
 # UNIFIED CORE FUNCTIONS
@@ -139,19 +105,19 @@ setup_cuda_env() {
     export MAKEFLAGS="-j$(nproc) --quiet"
 }
 
-# SMART pip installer - avoids unnecessary reinstalls
-pip_install() {
-    local package="$1" flags="${2:---no-cache-dir --disable-pip-version-check --quiet}" force="${3:-false}"
+# Unified package installer with caching
+install_package() {
+    local package="$1" force="${2:-false}"
     local pkg_name=$(echo "$package" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
     
     # Check if package is already installed (unless forcing)
     [[ "$force" != "true" ]] && python -c "import $pkg_name" 2>/dev/null && { log "⏭️ Already installed: $pkg_name (skipping)"; return 0; }
     
     log "📦 Installing: $package"
-    local install_flags="$flags"; [[ "$force" == "true" ]] && install_flags="$flags --force-reinstall"
+    local install_flags="--no-cache-dir --disable-pip-version-check --quiet"
+    [[ "$force" == "true" ]] && install_flags="$install_flags --force-reinstall"
     
-    # Use --quiet to suppress verbose output, only show errors
-    pip install $install_flags "$package" 2>/tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log && { log "✅ Successfully installed: $package"; log_pip_success "$package" "pip_install function"; return 0; } || { local pip_error=$(tail -n 5 /tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log 2>/dev/null | tr '\n' ' '); log_error "❌ Failed to install: $package"; log_pip_error "$package" "$pip_error" "pip_install function"; return 1; }
+    pip install $install_flags "$package" 2>/dev/null && { log "✅ Successfully installed: $package"; return 0; } || { log_error "❌ Failed to install: $package"; return 1; }
 }
 
 # Enhanced package installer with aggressive caching
@@ -500,40 +466,6 @@ update_custom_nodes() {
     local nodes_dir="$REPO_DIR/custom_nodes"
     [[ ! -d "$nodes_dir" ]] && return 0
     
-    log "🚀 Starting comprehensive custom node update and dependency installation..."
-    
-    # Step 1: Update pip first for better dependency resolution
-    log "📦 Updating pip for better dependency resolution..."
-    python -m pip install --quiet --upgrade pip 2>/dev/null || log_error "pip upgrade failed"
-    
-    # Step 2: Collect ALL requirements from custom nodes (Git and non-Git)
-    log "🔍 Collecting requirements from all custom nodes..."
-    local combined_reqs="/tmp/all_custom_node_requirements.txt"
-    echo -n > "$combined_reqs"
-    
-    # Process ALL custom nodes, not just git ones
-    for node_dir in "$nodes_dir"/*; do
-        [[ ! -d "$node_dir" ]] && continue
-        local node_name=$(basename "$node_dir")
-        
-        # Check if this node has requirements.txt
-        if [[ -f "$node_dir/requirements.txt" && -s "$node_dir/requirements.txt" ]]; then
-            echo "# From $node_name" >> "$combined_reqs"
-            grep -v "^[[:space:]]*#\|^[[:space:]]*$" "$node_dir/requirements.txt" >> "$combined_reqs"
-            echo "" >> "$combined_reqs"
-            log "📦 Found requirements.txt in $node_name"
-        fi
-    done
-    
-    # Step 3: Process combined requirements with intelligent conflict resolution
-    if [[ -s "$combined_reqs" ]]; then
-        log "🔧 Processing combined custom node requirements with conflict resolution..."
-        process_combined_requirements "$combined_reqs"
-    else
-        log "⚠️ No requirements.txt files found in custom nodes"
-    fi
-    
-    # Step 4: Update all git repositories
     log "🔄 Updating all custom nodes from Git repositories..."
     local updated_nodes=0
     local failed_nodes=0
@@ -565,10 +497,7 @@ update_custom_nodes() {
     log "📊 Custom node update summary: $updated_nodes successful, $failed_nodes failed"
     [[ $failed_nodes -gt 0 ]] && log_error "⚠️ Some custom nodes had issues - check logs above"
     
-    # Clean up
-    rm -f "$combined_reqs"
-    
-    log "✅ Comprehensive custom node update complete!"
+    log "✅ Custom node Git updates complete!"
 }
 
 # Sophisticated requirements processing with conflict resolution and batch installation
@@ -966,9 +895,15 @@ except Exception as e:
 
     process_requirements() {
         local req_file="$1"
-    [[ ! -f "$req_file" ]] && return 0
-    pip install --quiet -r "$req_file" || { while read -r pkg; do [[ "$pkg" =~ ^[[:space:]]*# ]] || [[ -z "$pkg" ]] || pip_install "$pkg" || true; done < "$req_file"; }
-}
+        [[ ! -f "$req_file" ]] && return 0
+        log "📋 Processing requirements: $req_file"
+        pip install --quiet -r "$req_file" || { 
+            log "⚠️ Batch install failed, trying individual packages..."
+            while read -r pkg; do 
+                [[ "$pkg" =~ ^[[:space:]]*# ]] || [[ -z "$pkg" ]] || install_package "$pkg" || true
+            done < "$req_file"
+        }
+    }
 
 # Service loop function (from original)
 service_loop() { while true; do eval "$1"; sleep 1; done; }
@@ -1028,11 +963,19 @@ main() {
     setup_pytorch
     for component in "sageattention" "nunchaku" "hunyuan3d_texture_components"; do install_component "$component"; done
     
-    # Update and install components with error handling
+    # Update ComfyUI components FIRST - before any dependency installation
+    log "🚀 Updating ComfyUI components FIRST (before dependencies)..."
     update_comfyui_manager || log_error "ComfyUI Manager update had issues (continuing)"
     update_custom_nodes || log_error "Custom nodes update had issues (continuing)"
     
-    # Handle specific dependency conflicts (similar to your script)
+    # NOW install dependencies AFTER nodes are updated
+    log "📦 Installing dependencies AFTER node updates..."
+    resolve_dependencies || log_error "Some dependencies failed (continuing)"
+    
+    # Process core ComfyUI requirements
+    process_requirements "$REPO_DIR/requirements.txt" || log_error "Core requirements had issues (continuing)"
+    
+    # Handle specific dependency conflicts AFTER all requirements are processed
     log "🔧 Handling specific dependency conflicts..."
     
     # Fix xformers conflicts
@@ -1050,14 +993,15 @@ main() {
     pip uninstall -y flet 2>/dev/null || true
     pip install --quiet flet==0.23.2 2>/dev/null || log_error "flet fix failed"
     
-    resolve_dependencies || log_error "Some dependencies failed (continuing)"
+    # Fix critical huggingface_hub compatibility issues
+    log "🔧 Fixing huggingface_hub compatibility issues..."
+    pip uninstall -y huggingface_hub diffusers 2>/dev/null || true
+    pip install --quiet "huggingface_hub==0.20.3" 2>/dev/null || log_error "huggingface_hub fix failed"
+    pip install --quiet "diffusers" 2>/dev/null || log_error "diffusers fix failed"
     
-    # Process core ComfyUI requirements
-    process_requirements "$REPO_DIR/requirements.txt" || log_error "Core requirements had issues (continuing)"
-    
-    # Fallback installation for critical custom node packages (excluding nunchaku for now)
+    # Fallback installation for critical custom node packages (including all missing dependencies)
     echo "=== Installing Critical Custom Node Dependencies (Fallback) ==="
-    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2")
+    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub==0.20.3")
     log "📦 Installing critical packages for custom nodes..."
     local installed_count=0
     local failed_count=0
@@ -1072,13 +1016,10 @@ main() {
             continue
         fi
         
-        # Install package
-        log "📦 Installing: $pkg"
-        if pip install --no-cache-dir --disable-pip-version-check --quiet "$pkg" 2>/dev/null; then
-            log "✅ Successfully installed: $pkg"
+        # Install package using unified function
+        if install_package "$pkg"; then
             ((installed_count++))
         else
-            log_error "❌ Failed to install: $pkg"
             ((failed_count++))
         fi
     done
@@ -1121,10 +1062,9 @@ launch() {
   echo $! > /tmp/sd_comfy.pid
 }
 
-# Error logging only (summary function removed)
+# Error logging (simplified)
 log_errors() {
-    [[ ${#INSTALLATION_FAILURES[@]} -gt 0 ]] && { echo "❌ Installation failures logged:" > "$LOG_DIR/errors.log"; printf '%s\n' "${INSTALLATION_FAILURES[@]}" >> "$LOG_DIR/errors.log"; }
-    [[ ${#PIP_ERRORS[@]} -gt 0 ]] && { echo "❌ Pip errors logged:" >> "$LOG_DIR/errors.log"; printf '%s\n' "${PIP_ERRORS[@]}" >> "$LOG_DIR/errors.log"; }
+    log "📝 Installation completed - check logs above for any errors"
 }
 
 # Log any errors before launch
