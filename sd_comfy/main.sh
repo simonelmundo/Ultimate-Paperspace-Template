@@ -106,16 +106,21 @@ setup_cuda_env() {
     export MAKEFLAGS="-j$(nproc) --quiet"
 }
 
-# Unified package installer with caching
+# Fast package installer with optimized checks
 install_package() {
     local package="$1" force="${2:-false}"
     local pkg_name=$(echo "$package" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
     
-    # Check if package is already installed (unless forcing)
-    [[ "$force" != "true" ]] && python -c "import $pkg_name" 2>/dev/null && { log "⏭️ Already installed: $pkg_name (skipping)"; return 0; }
+    # Fast check if package is already installed (using pip list instead of Python import)
+    if [[ "$force" != "true" ]]; then
+        if pip list --quiet | grep -q "^$pkg_name "; then
+            log "⏭️ Already installed: $pkg_name (skipping)"
+            return 0
+        fi
+    fi
     
     log "📦 Installing: $package"
-    local install_flags="--no-cache-dir --disable-pip-version-check --quiet"
+    local install_flags="--no-cache-dir --disable-pip-version-check --quiet --progress-bar off"
     [[ "$force" == "true" ]] && install_flags="$install_flags --force-reinstall"
     
     pip install $install_flags "$package" 2>/dev/null && { log "✅ Successfully installed: $package"; return 0; } || { log_error "❌ Failed to install: $package"; return 1; }
@@ -791,9 +796,38 @@ EOF
                 
                 # Try batch installation first (faster) - suppress verbose output
                 if ! timeout 90s pip install --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_$(basename "$batch").log" 2>&1; then
-                    log "⚠️ Batch installation failed or timed out, falling back to individual installation..."
+                    log "⚠️ Batch installation failed or timed out, trying optimized batch strategies..."
                     
-                    # Fallback: install packages one by one with better error handling
+                    # Strategy 1: Try with --no-deps
+                    log "🔄 Strategy 1: Installing batch with --no-deps..."
+                    if timeout 90s pip install --no-deps --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_nodeps_$(basename "$batch").log" 2>&1; then
+                        log "✅ Strategy 1 successful (--no-deps) for $(basename "$batch")"
+                        continue
+                    fi
+                    
+                    # Strategy 2: Try with --force-reinstall
+                    log "🔄 Strategy 2: Installing batch with --force-reinstall..."
+                    if timeout 90s pip install --force-reinstall --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_force_$(basename "$batch").log" 2>&1; then
+                        log "✅ Strategy 2 successful (--force-reinstall) for $(basename "$batch")"
+                        continue
+                    fi
+                    
+                    # Strategy 3: Try with --ignore-installed
+                    log "🔄 Strategy 3: Installing batch with --ignore-installed..."
+                    if timeout 90s pip install --ignore-installed --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_ignore_$(basename "$batch").log" 2>&1; then
+                        log "✅ Strategy 2 successful (--ignore-installed) for $(basename "$batch")"
+                        continue
+                    fi
+                    
+                    # Strategy 4: Try with --pre (include pre-releases)
+                    log "🔄 Strategy 4: Installing batch with --pre..."
+                    if timeout 90s pip install --pre --no-cache-dir --disable-pip-version-check --quiet -r "$batch" >"/tmp/pip_batch_pre_$(basename "$batch").log" 2>&1; then
+                        log "✅ Strategy 4 successful (--pre) for $(basename "$batch")"
+                        continue
+                    fi
+                    
+                    # Final fallback: individual packages (only if all batch strategies fail)
+                    log "⚠️ All batch strategies failed for $(basename "$batch"), falling back to individual installation..."
                     while read -r pkg; do
                         [[ -z "$pkg" ]] && continue
                         log "  📦 Installing: $pkg"
@@ -818,7 +852,7 @@ EOF
         fi
         
         # Clean up batch files
-        rm -f /tmp/pkg_batch_* /tmp/pip_batch_* /tmp/pip_individual_* "$cleaned_packages"
+        rm -f /tmp/pkg_batch_* /tmp/pip_batch_* /tmp/pip_batch_nodeps_* /tmp/pip_batch_force_* /tmp/pip_batch_ignore_* /tmp/pip_batch_pre_* /tmp/pip_individual_* "$cleaned_packages"
     else
         log "✅ All requirements already satisfied"
     fi
@@ -1043,7 +1077,7 @@ except Exception as e:
         fi
         
         # Setup variables for wheel download
-        local nunchaku_version="0.3.2"
+        local nunchaku_version="0.3.1"
         local python_version
         python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
         local arch=$(uname -m)
@@ -1223,12 +1257,56 @@ except Exception as e:
         local req_file="$1"
         [[ ! -f "$req_file" ]] && return 0
         log "📋 Processing requirements: $req_file"
-        pip install --quiet -r "$req_file" || { 
-            log "⚠️ Batch install failed, trying individual packages..."
-            while read -r pkg; do 
-                [[ "$pkg" =~ ^[[:space:]]*# ]] || [[ -z "$pkg" ]] || install_package "$pkg" || true
-            done < "$req_file"
-        }
+        
+        # Try batch installation first
+        if pip install --quiet -r "$req_file" 2>/dev/null; then
+            log "✅ Batch installation successful"
+            return 0
+        fi
+        
+        # If batch fails, try with different strategies instead of individual packages
+        log "⚠️ Batch install failed, trying optimized batch strategies..."
+        
+        # Strategy 1: Try with --no-deps to bypass dependency resolver
+        log "🔄 Strategy 1: Installing with --no-deps..."
+        if pip install --no-deps --quiet -r "$req_file" 2>/dev/null; then
+            log "✅ Strategy 1 successful (--no-deps)"
+            return 0
+        fi
+        
+        # Strategy 2: Try with --force-reinstall
+        log "🔄 Strategy 2: Installing with --force-reinstall..."
+        if pip install --force-reinstall --quiet -r "$req_file" 2>/dev/null; then
+            log "✅ Strategy 2 successful (--force-reinstall)"
+            return 0
+        fi
+        
+        # Strategy 3: Try with --ignore-installed
+        log "🔄 Strategy 3: Installing with --ignore-installed..."
+        if pip install --ignore-installed --quiet -r "$req_file" 2>/dev/null; then
+            log "✅ Strategy 3 successful (--ignore-installed)"
+            return 0
+        fi
+        
+        # Strategy 4: Try with --no-cache-dir
+        log "🔄 Strategy 4: Installing with --no-cache-dir..."
+        if pip install --no-cache-dir --quiet -r "$req_file" 2>/dev/null; then
+            log "✅ Strategy 4 successful (--no-cache-dir)"
+            return 0
+        fi
+        
+        # Strategy 5: Try with --pre (include pre-releases)
+        log "🔄 Strategy 5: Installing with --pre (including pre-releases)..."
+        if pip install --pre --quiet -r "$req_file" 2>/dev/null; then
+            log "✅ Strategy 5 successful (--pre)"
+            return 0
+        fi
+        
+        # Final fallback: individual packages (only if all batch strategies fail)
+        log "⚠️ All batch strategies failed, falling back to individual packages..."
+        while read -r pkg; do 
+            [[ "$pkg" =~ ^[[:space:]]*# ]] || [[ -z "$pkg" ]] || install_package "$pkg" || true
+        done < "$req_file"
     }
 
 # Service loop function (from original)
@@ -1352,40 +1430,67 @@ create_combined_requirements_file() {
     fi
 }
 
-# Install critical dependencies AFTER batch requirements processing
+# Fast batch installer for critical dependencies
 install_critical_dependencies() {
     log "📦 Installing Critical Custom Node Dependencies (AFTER batch requirements)..."
     local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub==0.20.3")
-    local installed_count=0
-    local failed_count=0
     
+    # Fast check for already installed packages using pip list
+    log "🔍 Fast-checking already installed packages..."
+    local installed_packages=$(pip list --quiet | grep -E "^($(echo "${critical_packages[@]}" | tr ' ' '|' | sed 's/[<>=!].*//g')) " | cut -d' ' -f1)
+    local already_installed=($installed_packages)
+    
+    # Filter out already installed packages
+    local packages_to_install=()
     for pkg in "${critical_packages[@]}"; do
         local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
-        
-        # Skip if already installed
-        if python -c "import $pkg_name" 2>/dev/null; then
-            log "✅ $pkg_name already installed"
-            ((installed_count++))
-            continue
-        fi
-        
-        # Install package using unified function
-        if install_package "$pkg"; then
-            ((installed_count++))
+        if [[ ! " ${already_installed[@]} " =~ " ${pkg_name} " ]]; then
+            packages_to_install+=("$pkg")
         else
-            ((failed_count++))
+            log "✅ $pkg_name already installed (skipping)"
         fi
     done
     
-    log "📊 Critical packages summary: $installed_count installed, $failed_count failed"
-    [[ $failed_count -gt 0 ]] && log_error "⚠️ Some critical packages failed to install - custom nodes may not work properly"
+    # Batch install remaining packages
+    if [[ ${#packages_to_install[@]} -gt 0 ]]; then
+        log "📦 Installing ${#packages_to_install[@]} packages in batch..."
+        
+        # Create temporary requirements file for batch installation
+        local temp_req_file="/tmp/critical_deps_$(date +%s).txt"
+        printf "%s\n" "${packages_to_install[@]}" > "$temp_req_file"
+        
+        # Batch install with optimized flags
+        if pip install --no-cache-dir --disable-pip-version-check --quiet --progress-bar off -r "$temp_req_file" 2>/dev/null; then
+            log "✅ Batch installation successful for ${#packages_to_install[@]} packages"
+        else
+            log "⚠️ Batch installation failed, falling back to individual installation..."
+            # Fallback to individual installation
+            local installed_count=0
+            local failed_count=0
+            
+            for pkg in "${packages_to_install[@]}"; do
+                if install_package "$pkg"; then
+                    ((installed_count++))
+                else
+                    ((failed_count++))
+                fi
+            done
+            
+            log "📊 Fallback installation summary: $installed_count installed, $failed_count failed"
+        fi
+        
+        # Clean up
+        rm -f "$temp_req_file"
+    else
+        log "✅ All critical packages already installed"
+    fi
     
     # Final verification of critical dependencies
     log "🔍 Final verification of critical dependencies..."
     verify_critical_dependencies
 }
 
-# Verify critical dependencies are working
+# Fast verification of critical dependencies
 verify_critical_dependencies() {
     log "🔍 Verifying critical dependencies..."
     local verification_failures=0
@@ -1393,22 +1498,31 @@ verify_critical_dependencies() {
     # Critical packages to verify
     local critical_packages=("torch" "diffusers" "gguf" "nunchaku" "huggingface_hub")
     
+    # Fast batch verification using pip list
+    log "🔍 Fast-verifying package installations..."
+    local installed_packages=$(pip list --quiet | grep -E "^($(echo "${critical_packages[@]}" | tr ' ' '|')) " | cut -d' ' -f1)
+    
     for pkg in "${critical_packages[@]}"; do
         local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
         
-        if python -c "import $pkg_name" 2>/dev/null; then
-            log "✅ $pkg_name: Import successful"
+        if echo "$installed_packages" | grep -q "^$pkg_name$"; then
+            log "✅ $pkg_name: Installation verified"
         else
-            log_error "❌ $pkg_name: Import failed"
+            log_error "❌ $pkg_name: Installation failed"
             ((verification_failures++))
         fi
     done
     
-    # Special verification for PyTorch CUDA
-    if python -c "import torch; print(f'PyTorch {torch.__version__} CUDA: {torch.cuda.is_available()}')" 2>/dev/null; then
-        log "✅ PyTorch CUDA verification successful"
+    # Special verification for PyTorch CUDA (only if torch is installed)
+    if echo "$installed_packages" | grep -q "^torch$"; then
+        if python -c "import torch; print(f'PyTorch {torch.__version__} CUDA: {torch.cuda.is_available()}')" 2>/dev/null; then
+            log "✅ PyTorch CUDA verification successful"
+        else
+            log_error "❌ PyTorch CUDA verification failed"
+            ((verification_failures++))
+        fi
     else
-        log_error "❌ PyTorch CUDA verification failed"
+        log_error "❌ PyTorch not installed for CUDA verification"
         ((verification_failures++))
     fi
     
@@ -1452,6 +1566,13 @@ main() {
     
     # Activate global virtual environment (will create if needed)
     activate_global_venv
+    
+    # Optimize pip for speed
+    log "⚡ Optimizing pip for maximum speed..."
+    pip config set global.progress_bar off 2>/dev/null || true
+    pip config set global.quiet true 2>/dev/null || true
+    pip config set global.disable_pip_version_check true 2>/dev/null || true
+    pip config set global.no_cache_dir true 2>/dev/null || true
     
     # Enhanced system dependencies installation with caching
     install_system_dependencies
