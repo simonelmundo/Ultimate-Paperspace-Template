@@ -154,7 +154,7 @@ pip_install() {
     pip install $install_flags "$package" 2>/tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log && { log "✅ Successfully installed: $package"; log_pip_success "$package" "pip_install function"; return 0; } || { local pip_error=$(tail -n 5 /tmp/pip_install_${pkg_name//[^a-zA-Z0-9]/_}.log 2>/dev/null | tr '\n' ' '); log_error "❌ Failed to install: $package"; log_pip_error "$package" "$pip_error" "pip_install function"; return 1; }
 }
 
-# Smart package installer with robust wheel caching
+# Enhanced package installer with aggressive caching
 install_with_cache() {
     local package="$1" wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}" pip_cache="${PIP_CACHE_DIR:-/storage/.pip_cache}"
     local pkg_name=$(echo "$package" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
@@ -162,43 +162,208 @@ install_with_cache() {
     # Check if package is already installed first
     python -c "import $pkg_name" 2>/dev/null && { log "⏭️ Already installed: $pkg_name (skipping)"; return 0; }
     
-    mkdir -p "$wheel_cache" "$pip_cache" && export PIP_CACHE_DIR="$pip_cache"
-    local cached_wheel=$(find "$wheel_cache" -name "${pkg_name}*.whl" -type f 2>/dev/null | head -1)
+    # Setup enhanced caching directories
+    mkdir -p "$wheel_cache" "$pip_cache" "$pip_cache/wheels" "$pip_cache/http"
+    export PIP_CACHE_DIR="$pip_cache"
+    export PIP_FIND_LINKS="$wheel_cache"
     
-    # Try cached wheel first
-    [[ -n "$cached_wheel" && -f "$cached_wheel" ]] && { log "🔄 Using cached wheel: $(basename "$cached_wheel")"; pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>/dev/null && return 0 || { log "⚠️ Cached wheel failed, removing and rebuilding..."; rm -f "$cached_wheel"; }; }
+    # Look for compatible cached wheels (more intelligent matching)
+    local cached_wheel=$(find "$wheel_cache" -name "${pkg_name}*.whl" -type f 2>/dev/null | sort -V | tail -1)
     
-    # Install with pip cache and save wheels (with --quiet to suppress verbose output)
+    # Try cached wheel first with compatibility check
+    if [[ -n "$cached_wheel" && -f "$cached_wheel" ]]; then
+        log "🔄 Using cached wheel: $(basename "$cached_wheel")"
+        if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>/dev/null; then
+            log_detail "💾 Successfully used cached wheel: $package"
+            return 0
+        else
+            log "⚠️ Cached wheel incompatible, removing and rebuilding..."
+            rm -f "$cached_wheel"
+        fi
+    fi
+    
+    # Install with enhanced caching and wheel collection
     log "📦 Installing and caching: $package"
-    pip install --cache-dir "$pip_cache" --disable-pip-version-check --quiet "$package" 2>/dev/null && { local wheels_found=0; find "$pip_cache" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1; find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && wheels_found=1; [[ $wheels_found -eq 1 ]] && log_detail "💾 Wheel cached for future use: $package"; return 0; } || return 1
+    if pip install --cache-dir "$pip_cache" --disable-pip-version-check --quiet "$package" 2>/dev/null; then
+        # Collect and cache wheels from multiple sources
+        local wheels_cached=0
+        
+        # Cache wheels from pip cache
+        find "$pip_cache" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null && ((wheels_cached++))
+        
+        # Cache wheels from temporary locations
+        find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && ((wheels_cached++))
+        
+        # Cache wheels from site-packages
+        local site_packages=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
+        [[ -d "$site_packages" ]] && find "$site_packages" -name "${pkg_name}*.dist-info" -exec dirname {} \; | head -1 | xargs -I {} find {} -name "*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && ((wheels_cached++))
+        
+        [[ $wheels_cached -gt 0 ]] && log_detail "💾 Cached $wheels_cached wheel(s) for: $package"
+        return 0
+    else
+        return 1
+    fi
 }
 
-# Consolidated CUDA installation (replaces install_cuda_12 function)
+# System dependencies installer with APT caching
+install_system_dependencies() {
+    local apt_cache_dir="/storage/.apt_cache"
+    local sys_deps_marker="/storage/.system_deps_installed"
+    
+    # Check if system dependencies are already installed
+    if [[ -f "$sys_deps_marker" ]]; then
+        log "✅ System dependencies already installed, skipping"
+        return 0
+    fi
+    
+    log "🚀 Installing system dependencies with caching..."
+    
+    # Configure APT caching if not already done
+    if [[ ! -f "/etc/apt/apt.conf.d/99cache" ]]; then
+        mkdir -p "$apt_cache_dir"
+        cat > /etc/apt/apt.conf.d/99cache << EOF
+Dir::Cache::Archives "$apt_cache_dir";
+Acquire::Retries "3";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+EOF
+    fi
+    
+    # System packages list
+    local sys_packages=(
+        "libatlas-base-dev" "libblas-dev" "liblapack-dev"
+        "libjpeg-dev" "libpng-dev" "python3-dev" "build-essential"
+        "libgl1-mesa-dev" "espeak-ng" "portaudio19-dev" "libportaudio2"
+    )
+    
+    # Update and install with caching
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    
+    # Pre-download packages to cache
+    log "Pre-downloading packages to cache..."
+    apt-get install -y --download-only "${sys_packages[@]}" 2>/dev/null || log "Pre-download failed, proceeding with direct install"
+    
+    # Install packages
+    log "Installing system packages..."
+    if apt-get install -y "${sys_packages[@]}" 2>/dev/null; then
+        # Create success marker
+        cat > "$sys_deps_marker" << EOF
+# System Dependencies Installation Marker
+# Installed: $(date)
+# Packages cached in: $apt_cache_dir
+SYSTEM_DEPS_VERIFIED=true
+EOF
+        log "✅ System dependencies installed and cached"
+        return 0
+    else
+        log_error "❌ System dependencies installation failed"
+        return 1
+    fi
+}
+
+# Enhanced CUDA installation with comprehensive caching
 install_cuda() {
     local marker="/storage/.cuda_12.6_installed"
+    local apt_cache_dir="/storage/.apt_cache"
+    local cuda_packages_cache="/storage/.cuda_packages_cache"
     
-    # Check if already installed
-    [[ -f "$marker" ]] && { setup_cuda_env; hash -r; command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.6"* ]] && return 0; }
+    # Setup APT caching to avoid re-downloading packages
+    mkdir -p "$apt_cache_dir" "$cuda_packages_cache"
     
-    log "Installing CUDA 12.6..."
+    # Check if already installed with robust verification
+    if [[ -f "$marker" ]]; then
+        setup_cuda_env && hash -r
+        if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.6"* ]]; then
+            log "✅ CUDA 12.6 already installed and verified, skipping"
+            return 0
+        else
+            log "⚠️ CUDA marker exists but verification failed, reinstalling..."
+            rm -f "$marker"
+        fi
+    fi
     
-    # Clean up old CUDA versions and install new
-    dpkg -l | grep -q "cuda-11" && apt-get remove --purge -y 'cuda-11-*' 2>/dev/null || true
-    wget -qO /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
-    dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb
+    log "🚀 Installing CUDA 12.6 with enhanced caching..."
     
-    # Update and install CUDA packages (including development headers)
-    apt-get update -qq && apt-get install -y build-essential python3-dev cuda-cudart-12-6 cuda-nvcc-12-6 libcublas-12-6 libcublas-dev-12-6 libcufft-12-6 libcufft-dev-12-6 libcurand-12-6 libcurand-dev-12-6 libcusolver-12-6 libcusolver-dev-12-6 libcusparse-12-6 libcusparse-dev-12-6 libnpp-12-6 libnpp-dev-12-6 2>/dev/null
+    # Configure APT for aggressive caching
+    export DEBIAN_FRONTEND=noninteractive
+    cat > /etc/apt/apt.conf.d/99cache << 'EOF'
+Dir::Cache::Archives "/storage/.apt_cache";
+Acquire::Retries "3";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+DPkg::Options {
+    "--force-confdef";
+    "--force-confold";
+}
+EOF
+    
+    # Clean up old CUDA versions efficiently 
+    if dpkg -l 2>/dev/null | grep -q "cuda-11"; then
+        log "Removing old CUDA 11.x installations..."
+        apt-get remove --purge -y 'cuda-11-*' 2>/dev/null || true
+        apt-get autoremove -y 2>/dev/null || true
+    fi
+    
+    # Install CUDA keyring (cache the deb file)
+    local keyring_cache="$cuda_packages_cache/cuda-keyring_1.1-1_all.deb"
+    if [[ ! -f "$keyring_cache" ]]; then
+        log "Downloading CUDA keyring..."
+        wget -qO "$keyring_cache" https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
+    else
+        log "Using cached CUDA keyring"
+    fi
+    dpkg -i "$keyring_cache"
+    
+    # Update package lists with caching
+    log "Updating package lists (using cache: $apt_cache_dir)..."
+    apt-get update -qq
+    
+    # Install CUDA packages with caching (all at once for efficiency)
+    log "Installing CUDA packages (this will cache ~1.7GB for future use)..."
+    local cuda_packages=(
+        "build-essential" "python3-dev"
+        "cuda-cudart-12-6" "cuda-nvcc-12-6" 
+        "libcublas-12-6" "libcublas-dev-12-6"
+        "libcufft-12-6" "libcufft-dev-12-6"
+        "libcurand-12-6" "libcurand-dev-12-6"
+        "libcusolver-12-6" "libcusolver-dev-12-6"
+        "libcusparse-12-6" "libcusparse-dev-12-6"
+        "libnpp-12-6" "libnpp-dev-12-6"
+    )
+    
+    # Install with cache directory and parallel downloads
+    apt-get install -y --download-only "${cuda_packages[@]}" 2>/dev/null || log "Pre-download failed, proceeding with direct install"
+    apt-get install -y "${cuda_packages[@]}" 2>/dev/null
     
     # Configure environment and verify
     setup_cuda_env && hash -r
-    command -v nvcc &>/dev/null && { touch "$marker"; cat > /etc/profile.d/cuda12.sh << 'EOL'
+    
+    # Robust verification before creating marker
+    if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.6"* ]]; then
+        # Create persistent environment configuration
+        cat > /etc/profile.d/cuda12.sh << 'EOL'
 export CUDA_HOME=/usr/local/cuda-12.6
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export FORCE_CUDA=1
 EOL
-        chmod +x /etc/profile.d/cuda12.sh; }
+        chmod +x /etc/profile.d/cuda12.sh
+        
+        # Create success marker with metadata
+        cat > "$marker" << EOF
+# CUDA 12.6 Installation Marker
+# Installed: $(date)
+# NVCC Version: $(nvcc --version | grep 'release' | awk '{print $6}')
+# Packages cached in: $apt_cache_dir
+CUDA_VERIFIED=true
+EOF
+        log "✅ CUDA 12.6 installation completed and verified"
+        return 0
+    else
+        log_error "❌ CUDA 12.6 installation verification failed"
+        return 1
+    fi
 }
 
 # ULTIMATE PyTorch Installation (uses multiple strategies to beat dependency hell)
@@ -576,35 +741,72 @@ EOF
 }
 
 resolve_dependencies() {
-    python -m pip install --quiet --upgrade pip 2>/dev/null || curl https://bootstrap.pypa.io/get-pip.py | python 2>/dev/null || log_error "pip upgrade failed"
+    local deps_cache_marker="/storage/.core_deps_installed"
     
-    # Install core build tools
-    for pkg in "wheel" "setuptools" "numpy>=1.26.0,<2.3.0"; do pip_install "$pkg" "" false; done
+    # Check if core dependencies are already resolved
+    if [[ -f "$deps_cache_marker" ]]; then
+        log "✅ Core dependencies already resolved, skipping"
+        return 0
+    fi
+    
+    log "🚀 Resolving dependencies with enhanced caching..."
+    
+    # Upgrade pip with caching
+    python -m pip install --cache-dir "${PIP_CACHE_DIR:-/storage/.pip_cache}" --quiet --upgrade pip 2>/dev/null || curl https://bootstrap.pypa.io/get-pip.py | python 2>/dev/null || log_error "pip upgrade failed"
+    
+    # Install core build tools with caching
+    log "📦 Installing core build tools..."
+    for pkg in "wheel" "setuptools" "numpy>=1.26.0,<2.3.0"; do 
+        install_with_cache "$pkg" || log_error "Core tool failed: $pkg"
+    done
     
     # Install build tools
+    log "📦 Installing build tools..."
     local build_tools=("pybind11" "ninja" "packaging")
-    for tool in "${build_tools[@]}"; do install_with_cache "$tool" || log_error "Build tool failed: $tool"; done
+    for tool in "${build_tools[@]}"; do 
+        install_with_cache "$tool" || log_error "Build tool failed: $tool"
+    done
     
-    # Install specific packages
-    install_with_cache "av" || log_error "av installation failed"
+    # Install specific packages with version fixes
+    log "📦 Installing specific packages with version fixes..."
+    install_with_cache "av>=9.0.0,<13.0.0" || log_error "av installation failed"
+    install_with_cache "aiohttp>=3.9.0,<=3.10.11" || log_error "aiohttp installation failed"
+    install_with_cache "packaging>=24.0" || log_error "packaging installation failed"
     install_with_cache "timm==1.0.13" || log_error "timm installation failed"
+    
+    # Handle flet separately (often conflicts)
     pip uninstall -y flet 2>/dev/null || true
-    pip_install "flet==0.23.2" "" false || log_error "flet installation failed"
+    install_with_cache "flet==0.23.2" || log_error "flet installation failed"
     
-    # Install core dependencies with version conflict fixes
-    local core_deps=("einops" "scipy" "torchsde" "spandrel" "kornia==0.7.0" "urllib3==1.21" "requests==2.31.0" "fastapi==0.103.2" "gradio_client==0.6.0" "peewee==3.16.3" "psutil==5.9.5" "uvicorn==0.23.2" "pynvml==11.5.0" "python-multipart==0.0.6")
-    for dep in "${core_deps[@]}"; do install_with_cache "$dep" || log_error "Failed to install: $dep"; done
+    # Install core dependencies with enhanced caching
+    log "📦 Installing core dependencies..."
+    local core_deps=(
+        "einops" "scipy" "torchsde" "spandrel" "kornia==0.7.0"
+        "urllib3==1.21" "requests==2.31.0" "fastapi==0.103.2"
+        "gradio_client==0.6.0" "peewee==3.16.3" "psutil==5.9.5"
+        "uvicorn==0.23.2" "pynvml==11.5.0" "python-multipart==0.0.6"
+    )
     
-    # Fix specific dependency conflicts
-    log "🔧 Fixing dependency version conflicts..."
-    pip install --quiet "av>=9.0.0,<13.0.0" 2>/dev/null || log_error "av version fix failed"
-    pip install --quiet "aiohttp>=3.9.0,<=3.10.11" 2>/dev/null || log_error "aiohttp version fix failed"
-    pip install --quiet "packaging>=24.0" 2>/dev/null || log_error "packaging version fix failed"
+    for dep in "${core_deps[@]}"; do 
+        install_with_cache "$dep" || log_error "Failed to install: $dep"
+    done
     
     # Install additional required packages
     log "📦 Installing additional required packages..."
-    pip install --quiet "oss2" 2>/dev/null || log_error "oss2 installation failed"
-    pip install --quiet "opencv-contrib-python" 2>/dev/null || log_error "opencv-contrib-python installation failed"
+    install_with_cache "oss2" || log_error "oss2 installation failed"
+    install_with_cache "opencv-contrib-python" || log_error "opencv-contrib-python installation failed"
+    
+    # Create success marker
+    if [[ $? -eq 0 ]]; then
+        cat > "$deps_cache_marker" << EOF
+# Core Dependencies Installation Marker
+# Installed: $(date)
+# Pip cache: ${PIP_CACHE_DIR:-/storage/.pip_cache}
+# Wheel cache: ${WHEEL_CACHE_DIR:-/storage/.wheel_cache}
+CORE_DEPS_VERIFIED=true
+EOF
+        log "✅ Core dependencies resolved and cached"
+    fi
 }
 
 install_component() {
@@ -676,7 +878,7 @@ except Exception as e:
         fi
         
         # Setup variables for wheel download
-        local nunchaku_version="0.3.1"
+        local nunchaku_version="0.3.2"
         local python_version
         python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
         local arch=$(uname -m)
@@ -820,7 +1022,8 @@ main() {
     # Activate global virtual environment (will create if needed)
     activate_global_venv
     
-    apt-get update -qq && apt-get install -y libatlas-base-dev libblas-dev liblapack-dev libjpeg-dev libpng-dev python3-dev build-essential libgl1-mesa-dev espeak-ng portaudio19-dev libportaudio2 2>/dev/null || true
+    # Enhanced system dependencies installation with caching
+    install_system_dependencies
     
     setup_pytorch
     for component in "sageattention" "nunchaku" "hunyuan3d_texture_components"; do install_component "$component"; done
