@@ -1450,28 +1450,9 @@ EOF
         rm -f "$combined_reqs" "$verify_script" "/tmp/missing_packages.txt" "/tmp/resolve_conflicts.py" /tmp/pkg_batch_*
     }
 
-        # Define ComfyUI repository directory
-        REPO_DIR="/storage/stable-diffusion-comfy"
-        
-        # Create a temporary combined requirements file to avoid duplicate processing
-        local temp_combined_reqs="/tmp/combined_comfy_requirements.txt"
-        echo "# Combined ComfyUI requirements" > "$temp_combined_reqs"
-        
-        # Add main requirements if it exists
-        if [[ -f "$REPO_DIR/requirements.txt" ]]; then
-            echo "-r $REPO_DIR/requirements.txt" >> "$temp_combined_reqs"
-        fi
-        
-        # Add additional requirements
-        if [[ -f "/notebooks/sd_comfy/additional_requirements.txt" ]]; then
-            echo "-r /notebooks/sd_comfy/additional_requirements.txt" >> "$temp_combined_reqs"
-        fi
-        
-        # Process the combined requirements file (only once to avoid duplication)
-        process_requirements "$temp_combined_reqs"
-        
-        # Clean up temporary file
-        rm -f "$temp_combined_reqs"
+        # Call the function with the requirements file
+    process_requirements "$REPO_DIR/requirements.txt"
+    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
     # Note: All SageAttention helper functions are defined earlier in the script to avoid duplication
 
