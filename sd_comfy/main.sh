@@ -106,76 +106,120 @@ setup_cuda_env() {
     export MAKEFLAGS="-j$(nproc) --quiet"
 }
 
-# Fast package installer with optimized checks
-install_package() {
-    local package="$1" force="${2:-false}"
-    local pkg_name=$(echo "$package" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
-    
-    # Fast check if package is already installed (using pip list instead of Python import)
-    if [[ "$force" != "true" ]]; then
-        if pip list --quiet | grep -q "^$pkg_name "; then
-            log "⏭️ Already installed: $pkg_name (skipping)"
-            return 0
-        fi
-    fi
-    
-    log "📦 Installing: $package"
-    local install_flags="--no-cache-dir --disable-pip-version-check --quiet --progress-bar off"
-    [[ "$force" == "true" ]] && install_flags="$install_flags --force-reinstall"
-    
-    pip install $install_flags "$package" 2>/dev/null && { log "✅ Successfully installed: $package"; return 0; } || { log_error "❌ Failed to install: $package"; return 1; }
+#######################################
+# UNIFIED PACKAGE MANAGEMENT SYSTEM
+#######################################
+
+# Extract clean package name from requirement string
+get_package_name() {
+    echo "$1" | sed 's/[<>=!].*//' | sed 's/\[.*\]//' | tr '[:upper:]' '[:lower:]'
 }
 
-# Enhanced package installer with aggressive caching
-install_with_cache() {
-    local package="$1" wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}" pip_cache="${PIP_CACHE_DIR:-/storage/.pip_cache}"
-    local pkg_name=$(echo "$package" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
+# Check if package is installed using multiple methods
+is_package_installed() {
+    local package="$1"
+    local pkg_name=$(get_package_name "$package")
     
-    # Check if package is already installed first
-    python -c "import $pkg_name" 2>/dev/null && { log "⏭️ Already installed: $pkg_name (skipping)"; return 0; }
+    # Method 1: Fast pip list check
+    pip list --quiet | grep -q "^$pkg_name " && return 0
     
-    # Setup enhanced caching directories
+    # Method 2: Python import check (fallback)
+    python -c "import $pkg_name" 2>/dev/null && return 0
+    
+    return 1
+}
+
+# Setup cache directories with optimal structure
+setup_package_cache() {
+    local wheel_cache="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
+    local pip_cache="${PIP_CACHE_DIR:-/storage/.pip_cache}"
+    
     mkdir -p "$wheel_cache" "$pip_cache" "$pip_cache/wheels" "$pip_cache/http"
     export PIP_CACHE_DIR="$pip_cache"
     export PIP_FIND_LINKS="$wheel_cache"
     
-    # Look for compatible cached wheels (more intelligent matching)
+    echo "$wheel_cache"  # Return wheel cache path
+}
+
+# Unified pip installation with smart strategy selection
+pip_install_smart() {
+    local package="$1"
+    local strategy="${2:-auto}"  # auto, simple, cache, force, nodeps
+    local wheel_cache=$(setup_package_cache)
+    
+    local base_flags="--disable-pip-version-check --quiet --progress-bar off"
+    
+    case "$strategy" in
+        "simple")
+            pip install $base_flags --no-cache-dir "$package" 2>/dev/null
+            ;;
+        "cache")
+            pip install $base_flags --cache-dir "$PIP_CACHE_DIR" --find-links "$wheel_cache" "$package" 2>/dev/null
+            ;;
+        "force")
+            pip install $base_flags --force-reinstall --no-cache-dir "$package" 2>/dev/null
+            ;;
+        "nodeps")
+            pip install $base_flags --no-deps --find-links "$wheel_cache" "$package" 2>/dev/null
+            ;;
+        "auto"|*)
+            # Try strategies in order of preference
+            pip_install_smart "$package" "cache" || \
+            pip_install_smart "$package" "simple" || \
+            pip_install_smart "$package" "nodeps" || \
+            pip_install_smart "$package" "force"
+            ;;
+    esac
+}
+
+# UNIFIED PACKAGE INSTALLER - Replaces install_package and install_with_cache
+install_package_unified() {
+    local package="$1" 
+    local force="${2:-false}"
+    local strategy="${3:-auto}"
+    local pkg_name=$(get_package_name "$package")
+    
+    # Skip if already installed (unless forced)
+    if [[ "$force" != "true" ]] && is_package_installed "$package"; then
+        log "⏭️ Already installed: $pkg_name (skipping)"
+        return 0
+    fi
+    
+    log "📦 Installing: $package"
+    
+    # Try cached wheel first if available
+    local wheel_cache=$(setup_package_cache)
     local cached_wheel=$(find "$wheel_cache" -name "${pkg_name}*.whl" -type f 2>/dev/null | sort -V | tail -1)
     
-    # Try cached wheel first with compatibility check
-    if [[ -n "$cached_wheel" && -f "$cached_wheel" ]]; then
+    if [[ -n "$cached_wheel" && -f "$cached_wheel" ]] && [[ "$force" != "true" ]]; then
         log "🔄 Using cached wheel: $(basename "$cached_wheel")"
         if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>/dev/null; then
-            log_detail "💾 Successfully used cached wheel: $package"
+            log "✅ Successfully installed from cache: $package"
             return 0
         else
-            log "⚠️ Cached wheel incompatible, removing and rebuilding..."
+            log "⚠️ Cached wheel failed, trying fresh install..."
             rm -f "$cached_wheel"
         fi
     fi
     
-    # Install with enhanced caching and wheel collection
-    log "📦 Installing and caching: $package"
-    if pip install --cache-dir "$pip_cache" --disable-pip-version-check --quiet "$package" 2>/dev/null; then
-        # Collect and cache wheels from multiple sources
-        local wheels_cached=0
+    # Use smart pip installation
+    if pip_install_smart "$package" "$strategy"; then
+        log "✅ Successfully installed: $package"
         
-        # Cache wheels from pip cache
-        find "$pip_cache" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null && ((wheels_cached++))
+        # Cache any new wheels for future use
+        find "$PIP_CACHE_DIR" -name "${pkg_name}*.whl" -newer "$wheel_cache" -exec cp {} "$wheel_cache/" \; 2>/dev/null || true
+        find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null || true
         
-        # Cache wheels from temporary locations
-        find /tmp -name "${pkg_name}*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && ((wheels_cached++))
-        
-        # Cache wheels from site-packages
-        local site_packages=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
-        [[ -d "$site_packages" ]] && find "$site_packages" -name "${pkg_name}*.dist-info" -exec dirname {} \; | head -1 | xargs -I {} find {} -name "*.whl" -exec cp {} "$wheel_cache/" \; 2>/dev/null && ((wheels_cached++))
-        
-        [[ $wheels_cached -gt 0 ]] && log_detail "💾 Cached $wheels_cached wheel(s) for: $package"
         return 0
     else
+        log_error "❌ Failed to install: $package"
         return 1
     fi
 }
+
+# Legacy function aliases for compatibility
+install_package() { install_package_unified "$@"; }
+install_with_cache() { install_package_unified "$1" false cache; }
 
 # System dependencies installer with APT caching
 install_system_dependencies() {
@@ -416,12 +460,37 @@ setup_pytorch() {
         activate_global_venv
     fi
     
-    # SUPER SMART CHECK: Try to restore PyTorch from binary cache first
+    # SMART CHECK: Skip binary cache if environment snapshot was used
+    if [[ -f "/tmp/env_snapshot_restored" ]]; then
+        log "⏭️ Skipping PyTorch binary cache - environment snapshot was used"
+        log "🔍 Verifying PyTorch from snapshot..."
+        if python -c "import torch; print(f'PyTorch {torch.__version__} CUDA: {torch.cuda.is_available()}')" 2>/dev/null; then
+            local torch_version=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+            log "✅ SNAPSHOT PYTORCH VERIFIED: $torch_version ready to use!"
+            return 0
+        else
+            log "⚠️ Snapshot PyTorch verification failed, proceeding with fresh installation..."
+        fi
+    fi
+    
+    # SUPER SMART CHECK: Try to restore PyTorch from binary cache (with version verification)
     local pytorch_cache="/storage/.pytorch_binary_cache"
     local pytorch_snapshot="$pytorch_cache/pytorch_2.8.0_cu128.tar.gz"
     
     if [[ -f "$pytorch_snapshot" ]]; then
-        log "⚡ LIGHTNING MODE: Found PyTorch binary cache, extracting..."
+        log "⚡ LIGHTNING MODE: Found PyTorch binary cache, verifying version compatibility..."
+        
+        # Check if binary cache version matches expected version
+        local cache_metadata="$pytorch_cache/pytorch_2.8.0_cu128.metadata"
+        local expected_version="$TORCH_VERSION"
+        local cache_version=""
+        
+        if [[ -f "$cache_metadata" ]]; then
+            cache_version=$(grep "PYTORCH_VERSION=" "$cache_metadata" | cut -d'=' -f2)
+        fi
+        
+        if [[ "$cache_version" == "$expected_version" ]]; then
+            log "✅ Binary cache version matches expected: $cache_version"
         local site_packages=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
         if [[ -n "$site_packages" ]]; then
             if tar -xzf "$pytorch_snapshot" -C "$site_packages" 2>/dev/null; then
@@ -434,6 +503,11 @@ setup_pytorch() {
                     rm -rf "$site_packages"/torch* "$site_packages"/xform* 2>/dev/null || true
                 fi
             fi
+            fi
+        else
+            log "⚠️ Binary cache version mismatch: $cache_version != $expected_version"
+            log "🧹 Removing outdated binary cache..."
+            rm -f "$pytorch_snapshot" "$cache_metadata"
         fi
     fi
     
@@ -567,6 +641,7 @@ EOF
             log "💾 Creating PyTorch binary cache for lightning-fast future installs..."
             local pytorch_cache="/storage/.pytorch_binary_cache"
             local pytorch_snapshot="$pytorch_cache/pytorch_2.8.0_cu128.tar.gz"
+            local cache_metadata="$pytorch_cache/pytorch_2.8.0_cu128.metadata"
             mkdir -p "$pytorch_cache"
             
             local site_packages=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
@@ -574,6 +649,19 @@ EOF
                 # Cache PyTorch, torchvision, torchaudio, and xformers binaries
                 if tar -czf "$pytorch_snapshot" -C "$site_packages" torch* xform* 2>/dev/null; then
                     local size=$(du -sh "$pytorch_snapshot" | cut -f1)
+                    
+                    # Create metadata file with version information
+                    cat > "$cache_metadata" << EOF
+# PyTorch Binary Cache Metadata
+CREATED=$(date)
+PYTORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "unknown")
+TORCHVISION_VERSION=$(python -c "import torchvision; print(torchvision.__version__)" 2>/dev/null || echo "unknown")
+TORCHAUDIO_VERSION=$(python -c "import torchaudio; print(torchaudio.__version__)" 2>/dev/null || echo "unknown")
+PYTHON_VERSION=$(python --version 2>&1)
+CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "unknown")
+CACHE_SIZE=$size
+EOF
+                    
                     log "⚡ BINARY CACHE CREATED: PyTorch cached ($size) - future installs will be instant!"
                 else
                     log "⚠️ Binary cache creation failed, but PyTorch is working"
@@ -582,7 +670,7 @@ EOF
             
             return 0
         else
-            log_conflict "PyTorch installed but CUDA not available (version mismatch)"
+            log_error "PyTorch installed but CUDA not available (version mismatch)"
                 return 0
         fi
             else
@@ -640,13 +728,13 @@ update_custom_nodes() {
     log "✅ Custom node Git updates complete!"
 }
 
-# LIGHTNING-FAST Requirements Processing - Skip slow caching, use smart installation
-process_combined_requirements() {
+# ADVANCED PARALLEL Requirements Processing - Uses parallel batching with smart fallback
+process_combined_requirements_advanced() {
     local req_file="$1"
     
     [[ ! -f "$req_file" ]] && return 0
     
-    log "⚡ LIGHTNING MODE: Ultra-fast requirements installation..."
+    log "⚡ ADVANCED PARALLEL MODE: Ultra-fast requirements installation with smart batching..."
     
     # Step 1: Fast check - what's already installed?
     log "🔍 SPEED CHECK: Analyzing already installed packages..."
@@ -675,7 +763,6 @@ process_combined_requirements() {
     
     local total_count=$(wc -l < "$req_file" || echo 0)
     local missing_count=$(wc -l < "$missing_packages" || echo 0)
-    # Use the count we calculated during the loop
     
     log "🚀 SPEED ANALYSIS: $already_installed_count/$total_count packages already installed! Only $missing_count to install."
     
@@ -692,35 +779,120 @@ EOF
         log "✅ PERFECT: All packages already installed - INSTANT COMPLETION!"
         rm -f "$missing_packages"
         return 0
-    elif [[ $missing_count -le 20 ]]; then
-        log "⚡ TURBO MODE: Only $missing_count packages needed - using ultra-fast installation"
-        # Use simple pip install with wheel cache
+    elif [[ $missing_count -le 10 ]]; then
+        log "⚡ TURBO MODE: Only $missing_count packages needed - using simple batch"
         if pip install --quiet --find-links "/storage/.wheel_cache" -r "$missing_packages" 2>/dev/null; then
             log "✅ TURBO SUCCESS: All $missing_count packages installed instantly!"
             rm -f "$missing_packages"
             return 0
         else
-            log "🔄 Turbo failed, using fallback installation..."
+            log "🔄 Simple batch failed, using advanced parallel processing..."
         fi
     fi
     
-    # Step 3: For larger sets, use optimized batch processing
-    log "📦 BATCH MODE: Installing $missing_count packages with optimization..."
+    # Step 3: ADVANCED PARALLEL BATCH PROCESSING for larger sets
+    log "🚀 PARALLEL MODE: Installing $missing_count packages with parallel processing..."
     
-    local cache_dir="/storage/.pip_cache"
-    mkdir -p "$cache_dir"
-    export PIP_CACHE_DIR="$cache_dir"
-    export PIP_DISABLE_PIP_VERSION_CHECK=1
-    export PIP_FIND_LINKS="/storage/.wheel_cache"
+    # Convert missing packages to array for parallel processing
+    local packages_to_install=()
+    while read -r pkg; do
+        [[ -n "$pkg" ]] && packages_to_install+=("$pkg")
+    done < "$missing_packages"
     
-    # Use the missing packages file directly for batch installation
-    log "⚡ SIMPLIFIED BATCH: Installing missing packages directly..."
-    if pip install --quiet --find-links "/storage/.wheel_cache" -r "$missing_packages" 2>/dev/null; then
-        log "✅ BATCH SUCCESS: All $missing_count packages installed!"
+    if [[ ${#packages_to_install[@]} -gt 0 ]]; then
+        # PARALLEL BATCH INSTALL with optimized flags and wheel cache
+        log "🚀 TURBO MODE: Installing ${#packages_to_install[@]} packages with parallel processing..."
+        
+        # Split packages into parallel batches for super-fast installation
+        local batch_size=8
+        local parallel_jobs=4
+        local pids=()
+        local temp_batch_dir="/tmp/parallel_batches_$$"
+        mkdir -p "$temp_batch_dir"
+        
+        # Create temporary requirements file for batch processing
+        local temp_req_file="/tmp/parallel_deps_$(date +%s).txt"
+        printf "%s\n" "${packages_to_install[@]}" > "$temp_req_file"
+        
+        # Split packages into parallel batches
+        split -l $batch_size "$temp_req_file" "$temp_batch_dir/batch_"
+        
+        # Install batches in parallel
+        local batch_count=0
+        for batch_file in "$temp_batch_dir"/batch_*; do
+            [[ ! -f "$batch_file" ]] && continue
+            
+            # Launch parallel pip install
+            (
+                pip install --no-cache-dir --disable-pip-version-check --quiet --progress-bar off --find-links "/storage/.wheel_cache" -r "$batch_file" 2>/dev/null
+                echo $? > "$temp_batch_dir/result_$(basename "$batch_file")"
+            ) &
+            
+            pids+=($!)
+            ((batch_count++))
+            
+            # Limit concurrent jobs
+            if [[ ${#pids[@]} -ge $parallel_jobs ]]; then
+                wait "${pids[0]}"
+                pids=("${pids[@]:1}")
+            fi
+        done
+        
+        # Wait for remaining jobs
+        for pid in "${pids[@]}"; do
+            wait "$pid"
+        done
+        
+        # Check results
+        local success_count=0
+        local failed_count=0
+        for result_file in "$temp_batch_dir"/result_*; do
+            [[ -f "$result_file" ]] && {
+                local result=$(cat "$result_file")
+                [[ "$result" == "0" ]] && ((success_count++)) || ((failed_count++))
+            }
+        done
+        
+        rm -rf "$temp_batch_dir" "$temp_req_file"
+        
+        if [[ $failed_count -eq 0 ]]; then
+            log "✅ PARALLEL SUCCESS: All ${success_count} parallel batches installed successfully!"
         rm -f "$missing_packages"
         return 0
     else
-        log "🔄 Batch install failed, trying individual packages..."
+            log "⚠️ Some parallel batches failed ($failed_count), trying fallback strategies..."
+        fi
+    fi
+    
+    # Step 4: Fallback strategies with better error handling
+    log "🔄 FALLBACK MODE: Trying alternative installation strategies..."
+    
+    # Strategy 1: Try with --no-deps to bypass dependency resolver
+    log "🔄 Strategy 1: Installing with --no-deps to bypass conflicts..."
+    if pip install --no-deps --quiet --find-links "/storage/.wheel_cache" -r "$missing_packages" 2>/dev/null; then
+        log "✅ Strategy 1 successful (--no-deps)"
+        rm -f "$missing_packages"
+        return 0
+    fi
+    
+    # Strategy 2: Try with --force-reinstall
+    log "🔄 Strategy 2: Installing with --force-reinstall..."
+    if pip install --force-reinstall --quiet --find-links "/storage/.wheel_cache" -r "$missing_packages" 2>/dev/null; then
+        log "✅ Strategy 2 successful (--force-reinstall)"
+        rm -f "$missing_packages"
+        return 0
+    fi
+    
+    # Strategy 3: Try without wheel cache
+    log "🔄 Strategy 3: Installing without wheel cache..."
+    if pip install --no-cache-dir --quiet -r "$missing_packages" 2>/dev/null; then
+        log "✅ Strategy 3 successful (no cache)"
+        rm -f "$missing_packages"
+        return 0
+    fi
+    
+    # Final fallback: individual packages (only if all else fails)
+    log "⚠️ All batch strategies failed, falling back to individual installation..."
         local installed_count=0
         local failed_count=0
         while read -r pkg; do
@@ -731,13 +903,11 @@ EOF
                 ((failed_count++))
             fi
         done < "$missing_packages"
-        log "📊 Individual install summary: $installed_count installed, $failed_count failed"
-        rm -f "$missing_packages"
-        return 0
-    fi
     
-    # Old complex conflict resolution - now replaced with simple approach above
-    log "✅ Lightning-fast requirements processing complete!"
+    log "📊 Final installation summary: $installed_count installed, $failed_count failed"
+        rm -f "$missing_packages"
+    
+    log "✅ Advanced parallel requirements processing complete!"
     return 0
     
     # Legacy code below - kept for reference but not executed
@@ -1074,421 +1244,211 @@ EOF
     fi
 }
 
-install_component() {
-    local component="$1" install_func="install_${component}"
-    if declare -f "$install_func" >/dev/null; then
-        log "🔧 Installing component: $component"
-        if "$install_func"; then
-            log "✅ Component $component installed successfully"
-        else
-            log_error "❌ Component $component installation failed (continuing anyway)"
-        fi
-    else
-        log_error "❌ No installation function found for component: $component"
-    fi
+#######################################
+# UNIFIED COMPONENT MANAGEMENT SYSTEM
+#######################################
+
+# Verify file integrity (wheels, tars, etc.)
+verify_file_integrity() {
+    local file="$1"
+    local file_type="${2:-auto}"  # auto, wheel, tar, zip
+    
+    [[ ! -f "$file" ]] && return 1
+    
+    case "$file_type" in
+        "wheel"|"*.whl")
+            python -c "import zipfile; zipfile.ZipFile('$file').testzip()" 2>/dev/null
+            ;;
+        "tar"|"*.tar.gz"|"*.tgz")
+            tar -tzf "$file" >/dev/null 2>&1
+            ;;
+        "zip"|"*.zip")
+            unzip -tq "$file" >/dev/null 2>&1
+            ;;
+        "auto"|*)
+            case "$file" in
+                *.whl) verify_file_integrity "$file" "wheel" ;;
+                *.tar.gz|*.tgz) verify_file_integrity "$file" "tar" ;;
+                *.zip) verify_file_integrity "$file" "zip" ;;
+                *) [[ -s "$file" ]] ;;  # Just check if file exists and not empty
+            esac
+            ;;
+    esac
 }
 
-    install_sageattention() {
+# Generic component installer with download, verify, install pattern
+install_component_generic() {
+    local component_name="$1"
+    local package_name="$2"
+    local download_url="$3"
+    local version="$4"
+    local install_method="${5:-pip}"  # pip, wheel, git, build
+    local extra_args="${6:-}"
+    
+    log "🔧 Installing $component_name..."
+    
     # Check if already installed
-    if python -c "import sageattention" 2>/dev/null; then
-        log "✅ SageAttention already installed and working"
+    if is_package_installed "$package_name"; then
+        log "✅ $component_name already installed and working"
         return 0
     fi
     
-    log "🔧 Installing SageAttention..."
-    local cache_dir="/storage/.sageattention_cache" wheel_cache="/storage/.wheel_cache"
-    mkdir -p "$cache_dir" "$wheel_cache"
+    local cache_dir="/storage/.${component_name}_cache"
+    local wheel_cache=$(setup_package_cache)
+    mkdir -p "$cache_dir"
     
-    # Check if we can build SageAttention (requires CUDA and proper environment)
-    if ! command -v nvcc &>/dev/null; then
-        log_error "❌ NVCC not found - SageAttention requires CUDA compiler"
-        log "⚠️ Skipping SageAttention installation - remove --use-sage-attention from launch args"
-        return 1
-    fi
-    
-    # Try cached wheel first with proper version/platform matching
-    local python_version=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null || echo "cp310")
-    local arch=$(uname -m)
-    local cached_wheel=$(find "$wheel_cache" -name "sageattention-*-${python_version}-${python_version}-linux_${arch}.whl" 2>/dev/null | sort -V | tail -1)
-    
-    if [[ -n "$cached_wheel" && -f "$cached_wheel" ]]; then
-        log "🔄 Found compatible cached SageAttention wheel: $(basename "$cached_wheel")"
-        
-        # Verify wheel integrity
-        if python -c "import zipfile; zipfile.ZipFile('$cached_wheel').testzip()" 2>/dev/null; then
-            log "✅ Cached wheel integrity verified"
-            if install_package "$cached_wheel"; then
-                log "✅ SageAttention installed from cached wheel"
-                return 0
+    case "$install_method" in
+        "pip")
+            # Direct pip installation
+            local pkg_spec="$package_name"
+            [[ -n "$version" ]] && pkg_spec="${package_name}==$version"
+            install_package_unified "$pkg_spec" false auto
+            ;;
+        "wheel")
+            # Download and install wheel
+            local wheel_name="${package_name}-${version}.whl"
+            [[ -n "$download_url" ]] && wheel_name=$(basename "$download_url")
+            local cached_wheel="$wheel_cache/$wheel_name"
+            
+            # Try cached wheel first
+            if [[ -f "$cached_wheel" ]] && verify_file_integrity "$cached_wheel" "wheel"; then
+                log "🔄 Using cached wheel: $(basename "$cached_wheel")"
+                install_package_unified "$cached_wheel" false simple
             else
-                log "⚠️ Cached wheel installation failed, removing and rebuilding..."
-                rm -f "$cached_wheel"
+                # Download fresh wheel
+                log "📥 Downloading $component_name wheel..."
+                local temp_wheel="/tmp/${component_name}_temp.whl"
+                
+                if wget -q -O "$temp_wheel" "$download_url" || curl -L -s -o "$temp_wheel" "$download_url"; then
+                    if verify_file_integrity "$temp_wheel" "wheel"; then
+                        cp "$temp_wheel" "$cached_wheel"
+                        install_package_unified "$cached_wheel" false simple
+                        rm -f "$temp_wheel"
+                    else
+                        log_error "❌ Downloaded wheel is corrupted"
+                        rm -f "$temp_wheel"
+                        return 1
             fi
         else
-            log "⚠️ Cached wheel corrupted, removing and rebuilding..."
-            rm -f "$cached_wheel"
-        fi
-    else
-        log "📦 No compatible cached SageAttention wheel found for ${python_version}-linux_${arch}"
-    fi
-    
-    # Clone repository if needed
-    if [[ ! -d "$cache_dir/src" ]]; then
-        log "📥 Cloning SageAttention repository..."
-        if ! git clone https://github.com/thu-ml/SageAttention.git "$cache_dir/src"; then
-            log_error "❌ Failed to clone SageAttention repository"
+                    log_error "❌ Failed to download wheel"
             return 1
         fi
     fi
-    
+            ;;
+        "git")
+            # Git repository installation
+            install_package_unified "git+${download_url}@v$version" false simple
+            ;;
+        "build")
     # Build from source
-    export TORCH_EXTENSIONS_DIR="/storage/.torch_extensions" MAX_JOBS=$(nproc) USE_NINJA=1
-    cd "$cache_dir/src" || { log_error "❌ Failed to access SageAttention source directory"; return 1; }
-    
-    # Clean previous builds
-    rm -rf build dist *.egg-info
-    
-    # Build with suppressed warnings
-    log "🔧 Building SageAttention (this may take a moment)..."
-    if ! python setup.py bdist_wheel >/tmp/sageattention_build.log 2>&1; then
-        log_error "❌ SageAttention build failed - check /tmp/sageattention_build.log"
+            local src_dir="$cache_dir/src"
+            if [[ ! -d "$src_dir" ]]; then
+                log "📥 Cloning $component_name repository..."
+                git clone "$download_url" "$src_dir" || return 1
+            fi
+            
+            cd "$src_dir" || return 1
+            [[ -n "$version" ]] && git checkout "v$version"
+            
+            log "🔧 Building $component_name..."
+            python setup.py bdist_wheel >/tmp/${component_name}_build.log 2>&1 || {
+                log_error "❌ Build failed - check /tmp/${component_name}_build.log"
         cd - > /dev/null
         return 1
-    fi
+            }
     
-    # Find and install the built wheel
     local wheel=$(find dist -name "*.whl" | head -1)
     if [[ -n "$wheel" ]]; then
-        log "📦 Installing built SageAttention wheel..."
         cp "$wheel" "$wheel_cache/"
-        if install_package "$wheel"; then
-            log "✅ SageAttention built and installed successfully"
-            cd - > /dev/null
-            return 0
+                install_package_unified "$wheel" false simple
         else
-            log_error "❌ Failed to install built SageAttention wheel"
+                log_error "❌ No wheel found after build"
             cd - > /dev/null
             return 1
         fi
-    else
-        log_error "❌ No wheel found after SageAttention build"
         cd - > /dev/null
-        return 1
-    fi
+            ;;
+    esac
+    
+    # Verify installation
+    if is_package_installed "$package_name"; then
+        log "✅ $component_name installed successfully"
+            return 0
+    else
+        log_error "❌ $component_name installation verification failed"
+            return 1
+        fi
 }
 
-    install_nunchaku() {
-        echo "Installing Nunchaku for enhanced machine learning capabilities..."
-        log "Starting Nunchaku installation process"
-        
-        # Check if already installed
-        if python -c "import nunchaku; print(f'Nunchaku {nunchaku.__version__} already installed and working')" 2>/dev/null; then
-            log "✅ Nunchaku already installed and working, skipping installation"
-            return 0
-        fi
-        
-        # Check PyTorch compatibility 
-        echo "Checking PyTorch compatibility for Nunchaku..."
-        local torch_check_output
-        torch_check_output=$(python -c "
-import sys
-try:
-    import torch
-    version = torch.__version__.split('+')[0]
-    major, minor = map(int, version.split('.')[:2])
-    if major > 2 or (major == 2 and minor >= 5):
-        print(f'PyTorch {version} meets Nunchaku requirements (>=2.5)')
-        sys.exit(0)
-    else:
-        print(f'PyTorch {version} below Nunchaku requirements (>=2.5)')
-        sys.exit(1)
-except ImportError:
-    print('PyTorch is not installed, cannot check version compatibility')
-    sys.exit(1)
-except Exception as e:
-    print(f'Error checking PyTorch version: {e}')
-    sys.exit(1)
-" 2>&1)
-        local torch_check_status=$?
-        
-        echo "PyTorch check output: $torch_check_output"
-        
-        if [[ $torch_check_status -ne 0 ]]; then
-            log_error "PyTorch version check failed for Nunchaku."
-            log_error "Output: $torch_check_output"
-            log_error "Nunchaku requires PyTorch >=2.5. Skipping Nunchaku installation."
+# Enhanced install_component that supports both old and new patterns
+install_component() {
+    local component="$1"
+    
+    # New streamlined component definitions
+    case "$component" in
+        "sageattention")
+            # Requires CUDA and proper environment
+            if ! command -v nvcc &>/dev/null; then
+                log_error "❌ NVCC not found - SageAttention requires CUDA compiler"
             return 1
         fi
-        
-        # Setup variables for wheel download - ensure correct version for ComfyUI nodes
-        local nunchaku_version="0.3.1"
-        
-        # Force uninstall any existing nunchaku version first
-        log "🔄 Removing any existing nunchaku installation..."
-        pip uninstall -y nunchaku 2>/dev/null || true
-        local python_version
-        python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-        local arch=$(uname -m)
-        
-        # Get PyTorch version for wheel naming
-        local torch_version_major_minor
-        torch_version_major_minor=$(python -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))" 2>/dev/null || echo "unknown")
-        
-        if [[ -z "$python_version" || "$torch_version_major_minor" == "unknown" ]]; then
-            log_error "Could not determine Python or PyTorch version for Nunchaku wheel selection"
-            return 1
-        fi
-        
-        log "Detected Python version for wheel: cp${python_version}"
-        log "Detected PyTorch version for wheel: ${torch_version_major_minor}"
-        
-        # Construct wheel name based on detected versions
-        local nunchaku_wheel_name="nunchaku-${nunchaku_version}+torch${torch_version_major_minor}-cp${python_version}-cp${python_version}-linux_${arch}.whl"
-        local wheel_cache_dir="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
-        mkdir -p "$wheel_cache_dir"
-        local cached_wheel="$wheel_cache_dir/$nunchaku_wheel_name"
-        
-        # Check for cached wheel
-        if [ -f "$cached_wheel" ]; then
-            log "Found cached Nunchaku wheel: $cached_wheel"
+            install_component_generic "SageAttention" "sageattention" "https://github.com/thu-ml/SageAttention.git" "" "build"
+            ;;
+        "nunchaku")
+            # Check PyTorch compatibility first
+            if ! python -c "import torch; v=torch.__version__.split('+')[0]; major,minor=map(int,v.split('.')[:2]); exit(0 if major>2 or (major==2 and minor>=5) else 1)" 2>/dev/null; then
+                log_error "❌ Nunchaku requires PyTorch >=2.5"
+                        return 1
+            fi
             
-            # Verify cached wheel integrity before using
-            log "🔍 Verifying cached wheel integrity..."
-            if ! python -c "import zipfile; zipfile.ZipFile('$cached_wheel').testzip()" 2>/dev/null; then
-                log "⚠️ Cached wheel is corrupted, removing and downloading fresh..."
-                rm -f "$cached_wheel"
+            # Detect versions for wheel URL
+            local python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')")
+            local torch_version=$(python -c "import torch; print('.'.join(torch.__version__.split('+')[0].split('.')[:2]))")
+            local arch=$(uname -m)
+            local wheel_name="nunchaku-0.3.1+torch${torch_version}-cp${python_version}-cp${python_version}-linux_${arch}.whl"
+            local wheel_url="https://huggingface.co/mit-han-lab/nunchaku/resolve/main/$wheel_name"
+            
+            install_component_generic "Nunchaku" "nunchaku" "$wheel_url" "0.3.1" "wheel"
+            ;;
+        "hunyuan3d_texture_components")
+            # Special build components
+            install_package_unified "pybind11" false auto
+            install_package_unified "ninja" false auto
+            
+            local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
+            [[ ! -d "$hunyuan3d_path" ]] && return 1
+            
+            for component_dir in custom_rasterizer DifferentiableRenderer; do
+                local comp_path="$hunyuan3d_path/hy3dpaint/$component_dir"
+                if [[ -d "$comp_path" ]]; then
+                    cd "$comp_path" || continue
+                    log "🔧 Building $component_dir..."
+                    python setup.py install >/tmp/${component_dir}_build.log 2>&1 || log_error "$component_dir build failed"
+                    cd - > /dev/null
+                fi
+            done
+            ;;
+        *)
+            # Legacy fallback for undefined components
+            local install_func="install_${component}"
+            if declare -f "$install_func" >/dev/null; then
+                log "🔧 Installing component: $component (legacy)"
+                if "$install_func"; then
+                    log "✅ Component $component installed successfully"
+                else
+                    log_error "❌ Component $component installation failed (continuing anyway)"
+                fi
             else
-                log "✅ Cached wheel verification successful"
-                log "🔄 Installing cached wheel: $(basename "$cached_wheel")"
-                if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>&1; then
-                    if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully from cached wheel')" 2>/dev/null; then
-                        log "✅ Nunchaku installation from cached wheel verified successfully"
-                        return 0
-                    else
-                        log_error "❌ Cached wheel verification failed, removing and trying fresh download"
-                        rm -f "$cached_wheel"
-                    fi
-                else
-                    log_error "❌ Failed to install from cached wheel, removing and trying fresh download"
-                    rm -f "$cached_wheel"
-                fi
-            fi
-        fi
-        
-        # Download wheel from HuggingFace (the correct source)
-        local nunchaku_wheel_url="https://huggingface.co/mit-han-lab/nunchaku/resolve/main/$nunchaku_wheel_name"
-        
-        log "Downloading Nunchaku wheel from: $nunchaku_wheel_url"
-        log "Caching to: $cached_wheel"
-        
-        # Try multiple download methods
-        local download_success=false
-        local temp_wheel="/tmp/nunchaku_temp.whl"
-        
-        # Method 1: wget
-        if wget -q --show-progress -O "$temp_wheel" "$nunchaku_wheel_url" 2>/dev/null; then
-            download_success=true
-            log "✅ Nunchaku wheel downloaded with wget"
-        fi
-        
-        # Method 2: curl (fallback)
-        if [[ "$download_success" != "true" ]]; then
-            log "🔄 wget failed, trying curl..."
-            if curl -L -s -o "$temp_wheel" "$nunchaku_wheel_url" 2>/dev/null; then
-                download_success=true
-                log "✅ Nunchaku wheel downloaded with curl"
-            fi
-        fi
-        
-        # Method 3: pip direct install (last resort)
-        if [[ "$download_success" != "true" ]]; then
-            log "🔄 Download failed, trying pip direct install..."
-            if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku" 2>/dev/null; then
-                download_success=true
-                log "✅ Nunchaku installed directly via pip"
-                return 0
-            fi
-        fi
-        
-        if [[ "$download_success" == "true" ]]; then
-            log "✅ Nunchaku wheel downloaded to temporary location"
-            
-            # Verify wheel file integrity BEFORE caching
-            log "🔍 Verifying wheel file integrity before caching..."
-            local file_size=$(stat -f%z "$temp_wheel" 2>/dev/null || stat -c%s "$temp_wheel" 2>/dev/null || echo "0")
-            if [[ "$file_size" -lt 1000000 ]]; then
-                log "⚠️ Downloaded wheel too small ($file_size bytes) - likely download failed"
-                rm -f "$temp_wheel"
-                log "🔄 Trying pip direct install with specific version..."
-                if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku==$nunchaku_version" 2>/dev/null; then
-                    log "✅ Nunchaku $nunchaku_version installed directly via pip (bypassing failed download)"
-                    return 0
-                else
-                    log_error "❌ Direct pip install also failed, trying fallback installation..."
-                    # Final fallback - try installing from git if version is not available
-                    if pip install --no-cache-dir --disable-pip-version-check --quiet "git+https://github.com/mit-han-lab/nunchaku.git@v$nunchaku_version" 2>/dev/null; then
-                        log "✅ Nunchaku installed from git repository"
-                        return 0
-                    else
-                        log_error "❌ All nunchaku installation methods failed"
-                        return 1
-                    fi
-                fi
-            elif ! python -c "import zipfile; zipfile.ZipFile('$temp_wheel').testzip()" 2>/dev/null; then
-                log "⚠️ Downloaded wheel verification failed - wheel is corrupted"
-                rm -f "$temp_wheel"
-                log "🔄 Trying pip direct install with specific version..."
-                if pip install --no-cache-dir --disable-pip-version-check --quiet "nunchaku==$nunchaku_version" 2>/dev/null; then
-                    log "✅ Nunchaku $nunchaku_version installed directly via pip (bypassing corrupted wheel)"
-                    return 0
-                else
-                    log_error "❌ Direct pip install also failed, trying fallback installation..."
-                    # Final fallback - try installing from git if version is not available
-                    if pip install --no-cache-dir --disable-pip-version-check --quiet "git+https://github.com/mit-han-lab/nunchaku.git@v$nunchaku_version" 2>/dev/null; then
-                        log "✅ Nunchaku installed from git repository"
-                        return 0
-                    else
-                        log_error "❌ All nunchaku installation methods failed"
-                        return 1
-                    fi
-                fi
-            fi
-            
-            # Wheel is valid - now cache it and install
-            log "✅ Wheel verification successful - caching valid wheel"
-            cp "$temp_wheel" "$cached_wheel"
-            rm -f "$temp_wheel"  # Clean up temp file
-            
-            log "🔄 Installing verified wheel: $(basename "$cached_wheel")"
-            if pip install --no-cache-dir --disable-pip-version-check --quiet "$cached_wheel" 2>&1; then
-                # Enhanced verification with multiple checks
-                local verification_success=false
-                
-                # Check 1: Basic import
-                if python -c "import nunchaku" 2>/dev/null; then
-                    verification_success=true
-                    log "✅ Nunchaku basic import successful"
-                fi
-                
-                # Check 2: Version check
-                if [[ "$verification_success" == "true" ]]; then
-                    if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} installed successfully')" 2>/dev/null; then
-                        log "✅ Nunchaku version verification successful"
-                    else
-                        log "⚠️ Nunchaku imported but version check failed"
-                    fi
-                fi
-                
-                # Check 3: Verify in virtual environment
-                if [[ "$verification_success" == "true" ]]; then
-                    local venv_python="${VENV_DIR:-/tmp}/sd_comfy-env/bin/python"
-                    if [[ -f "$venv_python" ]]; then
-                        if "$venv_python" -c "import nunchaku" 2>/dev/null; then
-                            log "✅ Nunchaku verified in virtual environment"
-                        else
-                            log "⚠️ Nunchaku not accessible in virtual environment"
-                        fi
-                    fi
-                fi
-                
-                if [[ "$verification_success" == "true" ]]; then
-                    log "✅ Nunchaku installation verified successfully"
-                    return 0
-                else
-                    log_error "❌ Nunchaku installation verification failed"
-                    log_error "⚠️ ABI compatibility issue detected"
+                log_error "❌ No installation method found for component: $component"
                     return 1
                 fi
-            else
-                log_error "❌ Nunchaku wheel installation failed"
-                return 1
-            fi
-        else
-            log_error "❌ All download methods failed for Nunchaku wheel"
-            log_error "This could be due to network issues or no wheel available for PyTorch ${torch_version_major_minor}"
-            log "⚠️ Continuing without Nunchaku - some custom nodes may not work"
-            return 1
-        fi
-    }
-            
-    install_hunyuan3d_texture_components() {
-        local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
-    [[ ! -d "$hunyuan3d_path" ]] && return 1
-    install_package "pybind11"
-    install_package "ninja"
-    for component in custom_rasterizer DifferentiableRenderer; do
-        local comp_path="$hunyuan3d_path/hy3dpaint/$component"
-        if [[ -d "$comp_path" ]]; then
-            cd "$comp_path" || { log_error "$component directory access failed"; continue; }
-            log "🔧 Building $component (suppressing verbose output)..."
-            python setup.py install >/tmp/${component}_build.log 2>&1 || log_error "$component installation failed - check /tmp/${component}_build.log"
-            cd - > /dev/null
-        fi
-    done
+            ;;
+    esac
 }
 
-    process_requirements() {
-        local req_file="$1"
-        [[ ! -f "$req_file" ]] && return 0
-        log "⚡ LIGHTNING: Processing requirements at maximum speed: $(basename "$req_file")"
-        
-        # Skip if file is empty
-        local pkg_count=$(grep -c . "$req_file" 2>/dev/null || echo 0)
-        if [[ $pkg_count -eq 0 ]]; then
-            log "✅ No requirements to process"
-            return 0
-        fi
-        
-        # Try lightning-fast batch installation first
-        if pip install --quiet --find-links "/storage/.wheel_cache" -r "$req_file" 2>/dev/null; then
-            log "✅ LIGHTNING SUCCESS: $pkg_count packages installed instantly!"
-            return 0
-        fi
-        
-        # If batch fails, try with different strategies instead of individual packages
-        log "⚠️ Batch install failed, trying optimized batch strategies..."
-        
-        # Strategy 1: Try with --no-deps to bypass dependency resolver
-        log "🔄 Strategy 1: Installing with --no-deps..."
-        if pip install --no-deps --quiet -r "$req_file" 2>/dev/null; then
-            log "✅ Strategy 1 successful (--no-deps)"
-            return 0
-        fi
-        
-        # Strategy 2: Try with --force-reinstall
-        log "🔄 Strategy 2: Installing with --force-reinstall..."
-        if pip install --force-reinstall --quiet -r "$req_file" 2>/dev/null; then
-            log "✅ Strategy 2 successful (--force-reinstall)"
-            return 0
-        fi
-        
-        # Strategy 3: Try with --ignore-installed
-        log "🔄 Strategy 3: Installing with --ignore-installed..."
-        if pip install --ignore-installed --quiet -r "$req_file" 2>/dev/null; then
-            log "✅ Strategy 3 successful (--ignore-installed)"
-            return 0
-        fi
-        
-        # Strategy 4: Try with --no-cache-dir
-        log "🔄 Strategy 4: Installing with --no-cache-dir..."
-        if pip install --no-cache-dir --quiet -r "$req_file" 2>/dev/null; then
-            log "✅ Strategy 4 successful (--no-cache-dir)"
-            return 0
-        fi
-        
-        # Strategy 5: Try with --pre (include pre-releases)
-        log "🔄 Strategy 5: Installing with --pre (including pre-releases)..."
-        if pip install --pre --quiet -r "$req_file" 2>/dev/null; then
-            log "✅ Strategy 5 successful (--pre)"
-            return 0
-        fi
-        
-        # Final fallback: individual packages (only if all batch strategies fail)
-        log "⚠️ All batch strategies failed, falling back to individual packages..."
-        while read -r pkg; do 
-            [[ "$pkg" =~ ^[[:space:]]*# ]] || [[ -z "$pkg" ]] || install_package "$pkg" || true
-        done < "$req_file"
-    }
+# Legacy individual component installers removed - replaced with unified component system above
+
+# Legacy process_requirements function removed - replaced with process_combined_requirements_advanced
 
 # Service loop function (from original)
 service_loop() { while true; do eval "$1"; sleep 1; done; }
@@ -1621,6 +1581,8 @@ restore_environment_snapshot() {
     # Restore from snapshot
     if tar -xzf "$snapshot_path" -C "$(dirname "$venv_path")" 2>/dev/null; then
         log "✅ Environment snapshot restored: $snapshot_name"
+        # Mark that environment snapshot was used to prevent conflicts with binary cache
+        touch "/tmp/env_snapshot_restored"
         return 0
     else
         log_error "❌ Failed to restore environment snapshot: $snapshot_name"
@@ -1645,10 +1607,10 @@ list_environment_snapshots() {
         if [[ -f "$snapshot_path" ]]; then
             # Verify snapshot file integrity
             if tar -tzf "$snapshot_path" >/dev/null 2>&1; then
-                local size=$(grep "COMPRESSED_SIZE=" "$metadata" | cut -d'=' -f2)
-                local created=$(grep "CREATED=" "$metadata" | cut -d'=' -f2-)
-                local pytorch=$(grep "PYTORCH_VERSION=" "$metadata" | cut -d'=' -f2)
-                log "  📦 $name: $size, PyTorch $pytorch, created $created"
+        local size=$(grep "COMPRESSED_SIZE=" "$metadata" | cut -d'=' -f2)
+        local created=$(grep "CREATED=" "$metadata" | cut -d'=' -f2-)
+        local pytorch=$(grep "PYTORCH_VERSION=" "$metadata" | cut -d'=' -f2)
+        log "  📦 $name: $size, PyTorch $pytorch, created $created"
                 ((valid_snapshots++))
             else
                 log "  ⚠️ $name: Corrupted snapshot file (removing...)"
@@ -1717,9 +1679,9 @@ manage_cache_size() {
             if [[ "$(basename "$cache_dir")" == ".apt_cache" && $current_size -gt $((6 * 1024 * 1024 * 1024)) ]]; then
                 log "⚠️ APT cache extremely large (>6GB), removing oldest files..."
                 while [[ $(du -sb "$cache_dir" 2>/dev/null | cut -f1 || echo "0") -gt $((4 * 1024 * 1024 * 1024)) ]]; do
-                    local oldest_file=$(find "$cache_dir" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -f2- -d' ')
-                    [[ -n "$oldest_file" ]] && rm -f "$oldest_file" 2>/dev/null || break
-                done
+                local oldest_file=$(find "$cache_dir" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -f2- -d' ')
+                [[ -n "$oldest_file" ]] && rm -f "$oldest_file" 2>/dev/null || break
+            done
             elif [[ "$(basename "$cache_dir")" != ".apt_cache" ]]; then
                 # For non-APT caches, be more aggressive if still over threshold
                 while [[ $(du -sb "$cache_dir" 2>/dev/null | cut -f1 || echo "0") -gt $threshold_bytes ]]; do
@@ -1924,138 +1886,7 @@ EOF
     fi
 }
 
-# Fast batch installer for critical dependencies with enhanced caching
-install_critical_dependencies() {
-    log "📦 Installing Critical Custom Node Dependencies with Enhanced Caching..."
-    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate")
-    
-    # Create temporary requirements file for enhanced caching
-    local temp_critical_req="/tmp/critical_deps_$(date +%s).txt"
-    printf "%s\n" "${critical_packages[@]}" > "$temp_critical_req"
-    
-    # Lightning-fast check: what's already installed?
-    log "🔍 LIGHTNING CHECK: Scanning already installed critical packages..."
-    local already_installed_count=0
-    local temp_needed="/tmp/critical_needed_$(date +%s).txt"
-    > "$temp_needed"
-    
-    for pkg in "${critical_packages[@]}"; do
-        local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
-        if pip show "$pkg_name" &>/dev/null; then
-            ((already_installed_count++))
-        else
-            echo "$pkg" >> "$temp_needed"
-        fi
-    done
-    
-    local needed_count=$(wc -l < "$temp_needed")
-    log "⚡ SPEED BOOST: $already_installed_count/${#critical_packages[@]} critical packages already installed! Only $needed_count needed."
-    
-    if [[ $needed_count -eq 0 ]]; then
-        log "✅ PERFECT: All critical packages already installed - INSTANT COMPLETION!"
-        rm -f "$temp_critical_req" "$temp_needed"
-        return 0
-    fi
-    
-    # Use the needed packages list instead of full list
-    cp "$temp_needed" "$temp_critical_req"
-    rm -f "$temp_needed"
-    
-    # Use the optimized list we already created
-    local packages_to_install=()
-    while read -r pkg; do
-        [[ -n "$pkg" ]] && packages_to_install+=("$pkg")
-    done < "$temp_critical_req"
-    
-    # Batch install remaining packages
-    if [[ ${#packages_to_install[@]} -gt 0 ]]; then
-        log "📦 Installing ${#packages_to_install[@]} packages in batch..."
-        
-        # Create temporary requirements file for batch installation
-        local temp_req_file="/tmp/critical_deps_$(date +%s).txt"
-        printf "%s\n" "${packages_to_install[@]}" > "$temp_req_file"
-        
-        # PARALLEL BATCH INSTALL with optimized flags and wheel cache
-        log "🚀 TURBO MODE: Installing ${#packages_to_install[@]} packages with parallel processing..."
-        
-        # Split packages into parallel batches for super-fast installation
-        local batch_size=8
-        local parallel_jobs=4
-        local pids=()
-        local temp_batch_dir="/tmp/parallel_batches_$$"
-        mkdir -p "$temp_batch_dir"
-        
-        # Split packages into parallel batches
-        split -l $batch_size "$temp_req_file" "$temp_batch_dir/batch_"
-        
-        # Install batches in parallel
-        local batch_count=0
-        for batch_file in "$temp_batch_dir"/batch_*; do
-            [[ ! -f "$batch_file" ]] && continue
-            
-            # Launch parallel pip install
-            (
-                pip install --no-cache-dir --disable-pip-version-check --quiet --progress-bar off --find-links "/storage/.wheel_cache" -r "$batch_file" 2>/dev/null
-                echo $? > "$temp_batch_dir/result_$(basename "$batch_file")"
-            ) &
-            
-            pids+=($!)
-            ((batch_count++))
-            
-            # Limit concurrent jobs
-            if [[ ${#pids[@]} -ge $parallel_jobs ]]; then
-                wait "${pids[0]}"
-                pids=("${pids[@]:1}")
-            fi
-        done
-        
-        # Wait for remaining jobs
-        for pid in "${pids[@]}"; do
-            wait "$pid"
-        done
-        
-        # Check results
-        local success_count=0
-        local failed_count=0
-        for result_file in "$temp_batch_dir"/result_*; do
-            [[ -f "$result_file" ]] && {
-                local result=$(cat "$result_file")
-                [[ "$result" == "0" ]] && ((success_count++)) || ((failed_count++))
-            }
-        done
-        
-        rm -rf "$temp_batch_dir"
-        
-        if [[ $failed_count -eq 0 ]]; then
-            log "✅ TURBO SUCCESS: All ${success_count} parallel batches installed successfully!"
-        else
-            log "⚠️ Batch installation failed, falling back to individual installation..."
-            # Fallback to individual installation
-            local installed_count=0
-            local failed_count=0
-            
-            for pkg in "${packages_to_install[@]}"; do
-                if install_package "$pkg"; then
-                    ((installed_count++))
-                else
-                    ((failed_count++))
-                fi
-            done
-            
-            log "📊 Fallback installation summary: $installed_count installed, $failed_count failed"
-        fi
-        
-        # Clean up
-        rm -f "$temp_req_file" "$temp_critical_req"
-    else
-        log "✅ All critical packages already installed"
-        rm -f "$temp_critical_req"
-    fi
-    
-    # Final verification of critical dependencies
-    log "🔍 Final verification of critical dependencies..."
-    verify_critical_dependencies
-}
+# Removed redundant install_critical_dependencies function - now merged into combined requirements
 
 # Fast verification of critical dependencies
 verify_critical_dependencies() {
@@ -2063,7 +1894,7 @@ verify_critical_dependencies() {
     local verification_failures=0
     
     # Critical packages to verify
-    local critical_packages=("torch" "diffusers" "gguf" "nunchaku" "huggingface_hub")
+    local critical_packages=("torch" "torchsde" "diffusers" "gguf" "nunchaku" "huggingface_hub")
     
     # Fast batch verification using pip list
     log "🔍 Fast-verifying package installations..."
@@ -2143,6 +1974,8 @@ main() {
     else
         log "📋 Environment snapshot restoration failed or not available, performing full installation..."
         log "ℹ️  This will create a new snapshot for faster future startups."
+        # Clear any existing snapshot marker since we're doing fresh installation
+        rm -f "/tmp/env_snapshot_restored"
         list_environment_snapshots
     fi
     
@@ -2209,8 +2042,9 @@ main() {
     log "📦 Installing dependencies AFTER node updates..."
     resolve_dependencies || log_error "Some dependencies failed (continuing)"
     
-    # Process core ComfyUI requirements
-    process_requirements "$REPO_DIR/requirements.txt" || log_error "Core requirements had issues (continuing)"
+    # Process core ComfyUI requirements with advanced parallel processing
+    log "📦 Processing core ComfyUI requirements with advanced parallel processing..."
+    process_combined_requirements_advanced "$REPO_DIR/requirements.txt" || log_error "Core requirements had issues (continuing)"
     
     # Process combined custom node requirements (this was missing!)
     log "🔧 Processing combined custom node requirements..."
@@ -2219,13 +2053,25 @@ main() {
     log "📋 Collecting requirements from all custom nodes..."
     create_combined_requirements_file
     
-    # Process the combined requirements with LIGHTNING speed
-    log "⚡ LIGHTNING MODE: Processing optimized requirements at maximum speed..."
+    # MERGE critical packages with combined requirements for efficiency
+    log "🔧 Merging critical packages with combined requirements..."
+    local critical_packages=("torchsde" "blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate")
+    
+    # Add critical packages to combined requirements (avoid duplicates)
+    for pkg in "${critical_packages[@]}"; do
+        local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | tr '[:upper:]' '[:lower:]')
+        if ! grep -i "^$pkg_name" "/tmp/all_custom_node_requirements.txt" 2>/dev/null; then
+            echo "$pkg" >> "/tmp/all_custom_node_requirements.txt"
+        fi
+    done
+    
+    # Process ALL requirements with ADVANCED PARALLEL BATCHING
+    log "⚡ LIGHTNING MODE: Processing ALL requirements with advanced parallel batching..."
     
     # Store stats for speed summary
     local original_count=$(wc -l < "/tmp/all_custom_node_requirements.txt" 2>/dev/null || echo 0)
     
-    process_combined_requirements "/tmp/all_custom_node_requirements.txt" || log_error "Requirements processing had issues (continuing)"
+    process_combined_requirements_advanced "/tmp/all_custom_node_requirements.txt" || log_error "Requirements processing had issues (continuing)"
     
     # Show speed optimization summary if available
     if [[ -f "/tmp/speed_stats.txt" ]]; then
@@ -2274,9 +2120,8 @@ main() {
         pip install --quiet "nunchaku==0.3.1" 2>/dev/null || log_error "nunchaku version fix failed"
     fi
     
-    # CRITICAL: Install missing dependencies AFTER batch requirements processing
-    log "🚀 Installing Critical Custom Node Dependencies (AFTER batch requirements)..."
-    install_critical_dependencies
+    # NOTE: Critical dependencies are now merged into combined requirements above
+    # No separate installation needed - eliminates redundancy and speeds up process
     
     # Final cache cleanup and optimization
     log "🧹 Final cache optimization..."
@@ -2353,8 +2198,20 @@ launch() {
     # A4000-specific optimizations
   export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
   
-    # Runtime PyTorch verification (skip if fresh install)
-    [[ ! -f "/tmp/pytorch_ecosystem_fresh_install" ]] && setup_pytorch || rm -f "/tmp/pytorch_ecosystem_fresh_install"
+    # Runtime PyTorch verification - skip if working correctly from snapshot
+    if [[ -f "/tmp/env_snapshot_restored" ]]; then
+        log "🔍 Quick PyTorch verification from snapshot..."
+        if python -c "import torch; print(f'PyTorch {torch.__version__} CUDA: {torch.cuda.is_available()}')" 2>/dev/null; then
+            log "✅ Snapshot PyTorch verified - ready to launch!"
+        else
+            log "⚠️ Snapshot PyTorch failed verification, running full setup..."
+            setup_pytorch
+        fi
+    elif [[ ! -f "/tmp/pytorch_ecosystem_fresh_install" ]]; then
+        setup_pytorch
+    else 
+        rm -f "/tmp/pytorch_ecosystem_fresh_install"
+    fi
     
     # Check if SageAttention is available and adjust launch parameters accordingly
     local sage_attention_arg=""
