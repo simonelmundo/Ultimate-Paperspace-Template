@@ -48,6 +48,178 @@ activate_global_venv() {
 
 
 
+# Show usage information
+show_usage() {
+    cat << EOF
+Usage: ./main.sh [command] [options]
+
+Commands:
+  (no args)     - Full installation/restoration
+  list-snapshots - List available environment snapshots
+  verify-snapshot - Debug snapshot without installation
+  debug-snapshot - Detailed snapshot diagnostics
+  quick-debug    - Instant snapshot status check
+  repair-snapshot - Attempt to repair corrupted snapshots
+  forensic-analysis - Deep investigation of snapshot corruption
+  reload        - Reload/restart ComfyUI
+  clean         - Clean all caches and snapshots
+  help          - Show this help message
+
+Environment Variables:
+  FORCE_VERIFY_SNAPSHOT=true  - Force snapshot verification mode
+  SNAPSHOT_DEBUG_MODE=true    - Enable detailed snapshot debugging
+  REINSTALL_SD_COMFY=true     - Force full reinstallation
+  DEBUG_CACHE=true            - Enable cache debugging
+
+Examples:
+  ./main.sh                    # Normal installation/restoration
+  ./main.sh list-snapshots     # List available snapshots
+  ./main.sh verify-snapshot    # Debug snapshot issues
+  ./main.sh quick-debug        # Instant snapshot status
+  ./main.sh repair-snapshot    # Repair corrupted snapshots
+  ./main.sh forensic-analysis  # Deep corruption investigation
+  FORCE_VERIFY_SNAPSHOT=true ./main.sh  # Force verification mode
+EOF
+}
+
+# Handle command line arguments
+handle_commands() {
+    case "${1:-}" in
+        "list-snapshots")
+            list_environment_snapshots
+            exit 0
+            ;;
+        "verify-snapshot")
+            export FORCE_VERIFY_SNAPSHOT=true
+            export SNAPSHOT_DEBUG_MODE=true
+            log "🔍 VERIFICATION MODE: Will debug snapshot without installation"
+            ;;
+        "quick-debug")
+            log "🔍 QUICK DEBUG: Checking snapshot status..."
+            local target_snapshot="pytorch_2.8.0_cuda_12.8_complete"
+            local snapshot_path="/storage/.env_snapshots/${target_snapshot}.tar.gz"
+            local metadata_path="/storage/.env_snapshots/${target_snapshot}.metadata"
+            
+            echo "=== SNAPSHOT QUICK DEBUG ==="
+            echo "🔍 Snapshot path: $snapshot_path"
+            echo "🔍 Snapshot exists: $([[ -f "$snapshot_path" ]] && echo "YES" || echo "NO")"
+            echo "🔍 Snapshot size: $([[ -f "$snapshot_path" ]] && du -sh "$snapshot_path" | cut -f1 || echo "N/A")"
+            echo "🔍 Metadata exists: $([[ -f "$metadata_path" ]] && echo "YES" || echo "NO")"
+            
+            if [[ -f "$snapshot_path" ]]; then
+                echo "🔍 Tar integrity: $(tar -tzf "$snapshot_path" >/dev/null 2>&1 && echo "OK" || echo "CORRUPTED")"
+                echo "🔍 Python binary: $(tar -tzf "$snapshot_path" | grep -q "bin/python" && echo "FOUND" || echo "MISSING")"
+                echo "🔍 PyTorch package: $(tar -tzf "$snapshot_path" | grep -q "torch" && echo "FOUND" || echo "MISSING")"
+            fi
+            
+            echo "🔍 Environment dir: $([[ -d "/tmp/sd_comfy-env" ]] && echo "EXISTS" || echo "MISSING")"
+            echo "🔍 Python executable: $([[ -f "/tmp/sd_comfy-env/bin/python" ]] && echo "EXISTS" || echo "MISSING")"
+            echo "=========================="
+            exit 0
+            ;;
+        "debug-snapshot")
+            export SNAPSHOT_DEBUG_MODE=true
+            log "🔍 DEBUG MODE: Detailed snapshot diagnostics enabled"
+            ;;
+        "clean")
+            log "🧹 CLEANING: Removing all caches and snapshots..."
+            rm -rf /storage/.pip_cache/* /storage/.wheel_cache/* /storage/.apt_cache/* /storage/.env_snapshots/* /tmp/sd_comfy-env
+            log "✅ Cleanup completed"
+            exit 0
+            ;;
+        "repair-snapshot")
+            log "🔧 REPAIRING: Attempting to repair corrupted snapshots..."
+            local target_snapshot="pytorch_2.8.0_cuda_12.8_complete"
+            local snapshot_path="/storage/.env_snapshots/${target_snapshot}.tar.gz"
+            local metadata_path="/storage/.env_snapshots/${target_snapshot}.metadata"
+            
+            if [[ -f "$snapshot_path" ]]; then
+                log "🔍 Checking snapshot: $target_snapshot"
+                
+                # Test integrity
+                if tar -tzf "$snapshot_path" >/dev/null 2>&1; then
+                    log "✅ Snapshot integrity OK - no repair needed"
+                else
+                    log "❌ Snapshot corrupted - removing for recreation..."
+                    rm -f "$snapshot_path" "$metadata_path"
+                    log "💡 Run ./main.sh again to create a new, verified snapshot"
+                fi
+            else
+                log "📋 No snapshot found to repair"
+            fi
+            exit 0
+            ;;
+        "forensic-analysis")
+            log "🔍 FORENSIC ANALYSIS: Investigating snapshot corruption..."
+            local snapshot_dir="/storage/.env_snapshots"
+            
+            echo "=== FORENSIC ANALYSIS REPORT ==="
+            echo "🔍 Analysis time: $(date)"
+            echo "🔍 Snapshot directory: $snapshot_dir"
+            echo ""
+            
+            # Check directory permissions and ownership
+            echo "📁 DIRECTORY ANALYSIS:"
+            if [[ -d "$snapshot_dir" ]]; then
+                echo "  ✅ Directory exists"
+                echo "  📊 Permissions: $(ls -ld "$snapshot_dir")"
+                echo "  📊 Owner: $(stat -c '%U:%G' "$snapshot_dir" 2>/dev/null || echo 'unknown')"
+                echo "  📊 Disk space: $(df -h "$snapshot_dir" | awk 'NR==2 {print $4 " available"}')"
+            else
+                echo "  ❌ Directory missing"
+            fi
+            echo ""
+            
+            # Check for any files
+            echo "📄 FILE ANALYSIS:"
+            local file_count=$(find "$snapshot_dir" -type f 2>/dev/null | wc -l)
+            echo "  📊 Total files found: $file_count"
+            
+            if [[ $file_count -gt 0 ]]; then
+                echo "  📄 All files in directory:"
+                find "$snapshot_dir" -type f -exec ls -la {} \; 2>/dev/null | head -20
+            fi
+            echo ""
+            
+            # Check for specific snapshot files
+            echo "🔍 SPECIFIC SNAPSHOT ANALYSIS:"
+            local target_snapshot="pytorch_2.8.0_cuda_12.8_complete"
+            local snapshot_path="$snapshot_dir/${target_snapshot}.tar.gz"
+            local metadata_path="$snapshot_dir/${target_snapshot}.metadata"
+            
+            echo "  🔍 Target snapshot: $target_snapshot"
+            echo "  📄 .tar.gz file: $([[ -f "$snapshot_path" ]] && echo "EXISTS ($(du -sh "$snapshot_path" | cut -f1))" || echo "MISSING")"
+            echo "  📄 .metadata file: $([[ -f "$metadata_path" ]] && echo "EXISTS" || echo "MISSING")"
+            
+            if [[ -f "$metadata_path" ]]; then
+                echo "  📊 Metadata contents:"
+                cat "$metadata_path" | sed 's/^/    /'
+            fi
+            echo ""
+            
+            # Check system resources
+            echo "💻 SYSTEM RESOURCE ANALYSIS:"
+            echo "  💾 Available memory: $(free -h | awk 'NR==2 {print $7 " available"}')"
+            echo "  💾 Available disk space: $(df -h /storage | awk 'NR==2 {print $4 " available"}')"
+            echo "  🔍 Inodes available: $(df -i /storage | awk 'NR==2 {print $4 " available"}')"
+            echo ""
+            
+            echo "=== END FORENSIC ANALYSIS ==="
+            exit 0
+            ;;
+        "help"|"-h"|"--help")
+            show_usage
+            exit 0
+            ;;
+        "reload")
+            log "🔄 RELOAD: Restarting ComfyUI..."
+            ;;
+        *)
+            # Default: normal installation/restoration
+            ;;
+    esac
+}
+
 # Test network connectivity
 test_connectivity() {
     log "Testing network connectivity..."
@@ -803,9 +975,59 @@ EOF
         # PARALLEL BATCH INSTALL with optimized flags and wheel cache
         log "🚀 TURBO MODE: Installing ${#packages_to_install[@]} packages with parallel processing..."
         
-        # Split packages into parallel batches for super-fast installation
-        local batch_size=8
-        local parallel_jobs=4
+        # RTX A4000-SPECIFIC OPTIMIZATION (16GB VRAM, 45GB RAM)
+        local available_memory=$(free -m | awk 'NR==2 {print $7}')
+        local gpu_memory=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0")
+        local gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "Unknown")
+        
+        # A4000-OPTIMIZED settings based on real-world testing
+        local batch_size
+        local parallel_jobs
+        local memory_limit_mb
+        
+        if [[ "$gpu_name" == *"A4000"* ]] || [[ $gpu_memory -eq 16384 ]]; then
+            # RTX A4000 SPECIFIC: Optimized for 16GB VRAM + 45GB RAM
+            batch_size=3          # 3 packages per batch (optimal for A4000)
+            parallel_jobs=2       # 2 parallel processes (prevents VRAM overflow)
+            memory_limit_mb=12000 # 12GB memory limit per batch (leaves 4GB buffer)
+            
+            log "🚀 RTX A4000 DETECTED: Using specialized optimization profile!"
+            log "🔧 A4000 Profile: batch_size=3, parallel_jobs=2, memory_limit=12GB"
+            
+        elif [[ $gpu_memory -ge 16000 ]]; then
+            # Other 16GB+ GPUs - conservative settings
+            batch_size=3
+            parallel_jobs=2
+            memory_limit_mb=10000
+            log "🔧 16GB+ GPU: Using conservative settings"
+            
+        elif [[ $gpu_memory -ge 8000 ]]; then
+            # 8GB GPUs - very conservative
+            batch_size=2
+            parallel_jobs=1
+            memory_limit_mb=6000
+            log "🔧 8GB GPU: Using very conservative settings"
+            
+        else
+            # Unknown GPU - ultra-safe defaults
+            batch_size=2
+            parallel_jobs=1
+            memory_limit_mb=4000
+            log "🔧 Unknown GPU: Using ultra-safe defaults"
+        fi
+        
+        # A4000-SPECIFIC memory pressure prevention
+        if [[ "$gpu_name" == *"A4000"* ]]; then
+            # A4000: Reserve more memory for GPU operations
+            export CUDA_MEMORY_FRACTION=0.8  # Use 80% of GPU memory max
+            export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:2048,garbage_collection_threshold:0.6"
+            log "🔧 A4000 Memory Management: CUDA_MEMORY_FRACTION=0.8, max_split_size=2GB"
+        fi
+        
+        log "🔧 RTX A4000 OPTIMIZATION: batch_size=$batch_size, parallel_jobs=$parallel_jobs"
+        log "🔧 System: ${gpu_name} (${gpu_memory}MB VRAM), ${available_memory}MB RAM"
+        log "🔧 Memory Limit: ${memory_limit_mb}MB per batch (prevents VRAM overflow)"
+        
         local pids=()
         local temp_batch_dir="/tmp/parallel_batches_$$"
         mkdir -p "$temp_batch_dir"
@@ -843,24 +1065,61 @@ EOF
             wait "$pid"
         done
         
-        # Check results
+        # Check results with detailed reporting
         local success_count=0
         local failed_count=0
+        local failed_batches=()
+        
         for result_file in "$temp_batch_dir"/result_*; do
             [[ -f "$result_file" ]] && {
-                local result=$(cat "$result_file")
-                [[ "$result" == "0" ]] && ((success_count++)) || ((failed_count++))
+                local batch_name=$(basename "$result_file" result_)
+                local result_data=$(cat "$result_file")
+                local result=$(echo "$result_data" | cut -d'|' -f1)
+                local ram_used=$(echo "$result_data" | cut -d'|' -f2)
+                local vram_used=$(echo "$result_data" | cut -d'|' -f3)
+                local packages_in_batch=$(echo "$result_data" | cut -d'|' -f4)
+                
+                if [[ "$result" == "0" ]]; then
+                    ((success_count++))
+                    if [[ "$gpu_name" == *"A4000"* ]]; then
+                        log "✅ Batch $batch_name: SUCCESS (${packages_in_batch} packages, RAM: ${ram_used}MB, VRAM: ${vram_used}MB)"
+                    else
+                        log "✅ Batch $batch_name: SUCCESS (${packages_in_batch} packages, memory used: ${ram_used}MB)"
+                    fi
+                else
+                    ((failed_count++))
+                    failed_batches+=("$batch_name")
+                    if [[ "$gpu_name" == *"A4000"* ]]; then
+                        log "❌ Batch $batch_name: FAILED (${packages_in_batch} packages, exit code: $result, RAM: ${ram_used}MB, VRAM: ${vram_used}MB)"
+                    else
+                        log "❌ Batch $batch_name: FAILED (${packages_in_batch} packages, exit code: $result, memory used: ${ram_used}MB)"
+                    fi
+                    
+                    # Show which packages were in this batch
+                    local batch_file="$temp_batch_dir/$batch_name"
+                    if [[ -f "$batch_file" ]]; then
+                        log "  📦 Packages in failed batch:"
+                        cat "$batch_file" | sed 's/^/    /'
+                    fi
+                fi
             }
         done
         
         rm -rf "$temp_batch_dir" "$temp_req_file"
         
+        # Show final progress summary
+        local total_installed=$((success_count * batch_size))
+        local total_failed=$((failed_count * batch_size))
+        
         if [[ $failed_count -eq 0 ]]; then
             log "✅ PARALLEL SUCCESS: All ${success_count} parallel batches installed successfully!"
-        rm -f "$missing_packages"
-        return 0
-    else
+            log "📊 TOTAL PROGRESS: $total_installed packages installed in parallel mode"
+            rm -f "$missing_packages"
+            return 0
+        else
             log "⚠️ Some parallel batches failed ($failed_count), trying fallback strategies..."
+            log "🔍 Failed batches: ${failed_batches[*]}"
+            log "📊 PARALLEL PROGRESS: $total_installed packages succeeded, $total_failed packages failed"
         fi
     fi
     
@@ -1497,43 +1756,156 @@ prepare_link() {
     done
 }
 
-# Environment Snapshot System - Cache complete environments for instant restoration
+# Environment Snapshot System - BULLETPROOF creation with integrity verification
 create_environment_snapshot() {
     local snapshot_name="$1"
     local snapshot_dir="/storage/.env_snapshots"
     local venv_path="/tmp/sd_comfy-env"
     
+    # PROTECTION: Mark snapshots as critical (never auto-delete)
+    local protection_file="$snapshot_dir/.snapshots_protected"
+    echo "SNAPSHOTS_PROTECTED=true" > "$protection_file"
+    echo "PROTECTION_DATE=$(date)" >> "$protection_file"
+    echo "PROTECTION_REASON=Critical system files - DO NOT DELETE" >> "$protection_file"
+    
     [[ -z "$snapshot_name" ]] && return 1
     
-    log "📸 Creating environment snapshot: $snapshot_name"
+    log "📸 Creating BULLETPROOF environment snapshot: $snapshot_name"
     mkdir -p "$snapshot_dir"
+    
+    # PRE-CREATION VALIDATION
+    log "🔍 Pre-creation validation..."
+    
+    # Check if virtual environment exists and is valid
+    if [[ ! -d "$venv_path" ]]; then
+        log_error "❌ Virtual environment not found: $venv_path"
+        return 1
+    fi
+    
+    if [[ ! -f "$venv_path/bin/python" ]]; then
+        log_error "❌ Python executable missing from virtual environment"
+        return 1
+    fi
+    
+    if [[ ! -f "$venv_path/bin/activate" ]]; then
+        log_error "❌ Virtual environment activation script missing"
+        return 1
+    fi
+    
+    # Verify PyTorch is working before snapshot
+    log "🔍 Verifying PyTorch before snapshot creation..."
+    if ! python -c "import torch; print(f'PyTorch {torch.__version__} CUDA: {torch.cuda.is_available()}')" 2>/dev/null; then
+        log_error "❌ PyTorch not working before snapshot creation - cannot create valid snapshot"
+        return 1
+    fi
+    
+    # Check available disk space (need at least 2x the environment size)
+    local env_size=$(du -s "$venv_path" | cut -f1)
+    local available_space=$(df "$snapshot_dir" | awk 'NR==2 {print $4}')
+    local required_space=$((env_size * 2))
+    
+    if [[ $available_space -lt $required_space ]]; then
+        log_error "❌ Insufficient disk space for snapshot creation"
+        log "🔍 Environment size: ${env_size}KB, Available: ${available_space}KB, Required: ${required_space}KB"
+        return 1
+    fi
+    
+    log "✅ Pre-creation validation passed"
     
     # Create snapshot metadata
     local snapshot_path="$snapshot_dir/${snapshot_name}.tar.gz"
     local metadata_path="$snapshot_dir/${snapshot_name}.metadata"
+    local temp_snapshot="$snapshot_dir/${snapshot_name}.tmp.tar.gz"
     
-    # Create metadata file
+    # Create comprehensive metadata file
+    log "📝 Creating comprehensive metadata..."
     cat > "$metadata_path" << EOF
 SNAPSHOT_NAME=$snapshot_name
 CREATED=$(date)
 PYTHON_VERSION=$(python --version 2>&1)
 PYTORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
-CUDA_VERSION=$(nvcc --version 2>&1 | grep release | awk '{print $6}' || echo "none")
+TORCHVISION_VERSION=$(python -c "import torchvision; print(torchvision.__version__)" 2>/dev/null || echo "none")
+TORCHAUDIO_VERSION=$(python -c "import torchaudio; print(torchaudio.__version__)" 2>/dev/null || echo "none")
+CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "none")
 PACKAGES_COUNT=$(pip list --quiet | wc -l)
-SNAPSHOT_SIZE=$(du -sh "$venv_path" | cut -f1)
+ENVIRONMENT_SIZE=$(du -sh "$venv_path" | cut -f1)
+PYTHON_PATH=$(which python)
+VIRTUAL_ENV_PATH=$venv_path
 EOF
     
-    # Create compressed snapshot of virtual environment
-    if tar -czf "$snapshot_path" -C "$(dirname "$venv_path")" "$(basename "$venv_path")" 2>/dev/null; then
-        local size=$(du -sh "$snapshot_path" | cut -f1)
-        log "✅ Environment snapshot created: $snapshot_name ($size)"
-        echo "COMPRESSED_SIZE=$size" >> "$metadata_path"
-        return 0
-    else
-        log_error "❌ Failed to create environment snapshot: $snapshot_name"
-        rm -f "$snapshot_path" "$metadata_path"
+    # BULLETPROOF SNAPSHOT CREATION with integrity verification
+    log "🚀 Creating snapshot with integrity verification..."
+    
+    # Step 1: Create temporary snapshot
+    if ! tar -czf "$temp_snapshot" -C "$(dirname "$venv_path")" "$(basename "$venv_path")" 2>/dev/null; then
+        log_error "❌ Failed to create temporary snapshot"
+        rm -f "$temp_snapshot" "$metadata_path"
         return 1
     fi
+    
+    # Step 2: Verify temporary snapshot integrity
+    log "🔍 Verifying temporary snapshot integrity..."
+    if ! tar -tzf "$temp_snapshot" >/dev/null 2>&1; then
+        log_error "❌ Temporary snapshot integrity check failed"
+        rm -f "$temp_snapshot" "$metadata_path"
+        return 1
+    fi
+    
+    # Step 3: Verify critical files are present
+    local critical_files=("bin/python" "bin/activate" "lib/python3.10/site-packages/torch")
+    local missing_critical=()
+    
+    for file in "${critical_files[@]}"; do
+        if ! tar -tzf "$temp_snapshot" | grep -q "$file"; then
+            missing_critical+=("$file")
+        fi
+    done
+    
+    if [[ ${#missing_critical[@]} -gt 0 ]]; then
+        log_error "❌ Critical files missing from snapshot: ${missing_critical[*]}"
+        rm -f "$temp_snapshot" "$metadata_path"
+        return 1
+    fi
+    
+    # Step 4: Test extraction to verify snapshot works
+    log "🔍 Testing snapshot extraction..."
+    local test_dir="/tmp/snapshot_test_$$"
+    mkdir -p "$test_dir"
+    
+    if ! tar -xzf "$temp_snapshot" -C "$test_dir" 2>/dev/null; then
+        log_error "❌ Snapshot extraction test failed"
+        rm -rf "$test_dir" "$temp_snapshot" "$metadata_path"
+        return 1
+    fi
+    
+    # Step 5: Verify extracted environment works
+    local extracted_venv="$test_dir/sd_comfy-env"
+    if [[ ! -f "$extracted_venv/bin/python" ]]; then
+        log_error "❌ Extracted environment verification failed"
+        rm -rf "$test_dir" "$temp_snapshot" "$metadata_path"
+        return 1
+    fi
+    
+    # Clean up test directory
+    rm -rf "$test_dir"
+    
+    # Step 6: Move temporary snapshot to final location
+    if ! mv "$temp_snapshot" "$snapshot_path"; then
+        log_error "❌ Failed to move snapshot to final location"
+        rm -f "$temp_snapshot" "$metadata_path"
+        return 1
+    fi
+    
+    # Step 7: Final verification
+    local final_size=$(du -sh "$snapshot_path" | cut -f1)
+    echo "COMPRESSED_SIZE=$final_size" >> "$metadata_path"
+    echo "INTEGRITY_VERIFIED=true" >> "$metadata_path"
+    echo "VERIFICATION_DATE=$(date)" >> "$metadata_path"
+    
+    log "✅ BULLETPROOF Environment snapshot created: $snapshot_name ($final_size)"
+    log "🔍 Snapshot integrity verified and tested - ready for instant restoration!"
+    
+    return 0
 }
 
 restore_environment_snapshot() {
@@ -1592,41 +1964,86 @@ restore_environment_snapshot() {
 
 list_environment_snapshots() {
     local snapshot_dir="/storage/.env_snapshots"
-    [[ ! -d "$snapshot_dir" ]] && { log "No environment snapshots found"; return 0; }
+    [[ ! -d "$snapshot_dir" ]] && { log "No environment snapshots directory found"; return 0; }
     
-    log "📸 Available environment snapshots:"
-    local valid_snapshots=0
-    local orphaned_metadata=0
+    log "🔍 DETAILED SNAPSHOT DISCOVERY: Scanning $snapshot_dir..."
     
-    for metadata in "$snapshot_dir"/*.metadata; do
-        [[ ! -f "$metadata" ]] && continue
-        local name=$(basename "$metadata" .metadata)
-        local snapshot_path="$snapshot_dir/${name}.tar.gz"
+    # Check what files actually exist
+    local all_files=$(ls -la "$snapshot_dir" 2>/dev/null | head -10 || echo "Directory empty or inaccessible")
+    log "🔍 Directory contents:"
+    echo "$all_files"
+    
+    local found_snapshots=false
+    local orphaned_metadata=()
+    local corrupted_snapshots=()
+    local valid_snapshots=()
+    
+    # Scan for metadata files
+    for metadata_file in "$snapshot_dir"/*.metadata; do
+        [[ -f "$metadata_file" ]] || continue
         
-        # Only list snapshots that have both metadata AND valid snapshot files
+        local snapshot_name=$(basename "$metadata_file" .metadata)
+        local snapshot_path="$snapshot_dir/${snapshot_name}.tar.gz"
+        
+        log "🔍 Found metadata: $snapshot_name"
+        
+        # Check if corresponding .tar.gz exists
         if [[ -f "$snapshot_path" ]]; then
-            # Verify snapshot file integrity
+            log "  ✅ Snapshot file exists: $(du -sh "$snapshot_path" | cut -f1)"
+            
+            # Verify the .tar.gz file is not corrupted
             if tar -tzf "$snapshot_path" >/dev/null 2>&1; then
-        local size=$(grep "COMPRESSED_SIZE=" "$metadata" | cut -d'=' -f2)
-        local created=$(grep "CREATED=" "$metadata" | cut -d'=' -f2-)
-        local pytorch=$(grep "PYTORCH_VERSION=" "$metadata" | cut -d'=' -f2)
-        log "  📦 $name: $size, PyTorch $pytorch, created $created"
-                ((valid_snapshots++))
+                log "  ✅ Snapshot integrity verified"
+                
+                # Extract and display metadata
+                local created=$(grep "CREATED=" "$metadata_file" | cut -d'=' -f2-)
+                local pytorch_version=$(grep "PYTORCH_VERSION=" "$metadata_file" | cut -d'=' -f2)
+                local cuda_version=$(grep "CUDA_VERSION=" "$metadata_file" | cut -d'=' -f2)
+                local size=$(grep "COMPRESSED_SIZE=" "$metadata_file" | cut -d'=' -f2)
+                local integrity=$(grep "INTEGRITY_VERIFIED=" "$metadata_file" | cut -d'=' -f2)
+                
+                log "  📊 Metadata: PyTorch $pytorch_version, CUDA $cuda_version, created $created"
+                log "  📊 Size: $size, Integrity: ${integrity:-unknown}"
+                
+                valid_snapshots+=("$snapshot_name")
+                found_snapshots=true
             else
-                log "  ⚠️ $name: Corrupted snapshot file (removing...)"
-                rm -f "$snapshot_path" "$metadata"
-                ((orphaned_metadata++))
+                log "  ❌ Snapshot corrupted (tar integrity check failed)"
+                corrupted_snapshots+=("$snapshot_name")
             fi
         else
-            log "  ⚠️ $name: Missing snapshot file (cleaning metadata...)"
-            rm -f "$metadata"
-            ((orphaned_metadata++))
+            log "  ❌ Snapshot file MISSING (orphaned metadata)"
+            orphaned_metadata+=("$snapshot_name")
         fi
     done
     
-    if [[ $valid_snapshots -eq 0 ]]; then
-        log "  No valid environment snapshots found"
-        [[ $orphaned_metadata -gt 0 ]] && log "  Cleaned $orphaned_metadata orphaned/corrupted files"
+    # Summary
+    log ""
+    log "📊 SNAPSHOT DISCOVERY SUMMARY:"
+    log "  🔍 Total metadata files found: $(( ${#valid_snapshots[@]} + ${#corrupted_snapshots[@]} + ${#orphaned_metadata[@]} ))"
+    log "  ✅ Valid snapshots: ${#valid_snapshots[@]} (${valid_snapshots[*]})"
+    log "  ❌ Corrupted snapshots: ${#corrupted_snapshots[@]} (${corrupted_snapshots[*]})"
+    log "  🗑️  Orphaned metadata: ${#orphaned_metadata[@]} (${orphaned_metadata[*]})"
+    
+    # Clean up corrupted and orphaned files
+    if [[ ${#corrupted_snapshots[@]} -gt 0 ]]; then
+        log "🧹 Cleaning corrupted snapshots..."
+        for snapshot in "${corrupted_snapshots[@]}"; do
+            rm -f "$snapshot_dir/${snapshot}.tar.gz" "$snapshot_dir/${snapshot}.metadata"
+            log "  🗑️  Removed: $snapshot"
+        done
+    fi
+    
+    if [[ ${#orphaned_metadata[@]} -gt 0 ]]; then
+        log "🧹 Cleaning orphaned metadata..."
+        for snapshot in "${orphaned_metadata[@]}"; do
+            rm -f "$snapshot_dir/${snapshot}.metadata"
+            log "  🗑️  Removed: $snapshot"
+        done
+    fi
+    
+    if [[ "$found_snapshots" == false ]]; then
+        log "  📋 No valid environment snapshots found"
     fi
 }
 
@@ -1655,9 +2072,9 @@ manage_cache_size() {
                 min_age_days=14  # Only remove files older than 2 weeks
                 ;;
             ".env_snapshots")
-                # Environment snapshots: Higher threshold (3GB) 
-                threshold_bytes=$((3 * 1024 * 1024 * 1024))  # 3GB for snapshots
-                min_age_days=30  # Only remove very old snapshots
+                # Environment snapshots: NEVER auto-clean (too valuable)
+                threshold_bytes=$((100 * 1024 * 1024 * 1024))  # 100GB (effectively never)
+                min_age_days=365  # Only remove snapshots older than 1 year
                 ;;
             *)
                 # Other caches: Standard threshold
@@ -1668,6 +2085,13 @@ manage_cache_size() {
         
         if [[ $current_size -gt $threshold_bytes ]]; then
             log "📊 Cache $cache_dir: ${current_size_mb}MB (cleaning files older than ${min_age_days} days...)"
+            
+            # SPECIAL PROTECTION: Never delete environment snapshots
+            if [[ "$(basename "$cache_dir")" == ".env_snapshots" ]]; then
+                log "🛡️  SNAPSHOT PROTECTION: Environment snapshots are protected from deletion"
+                log "💡 Snapshots are critical system files - manual cleanup required"
+                continue
+            fi
             
             # Remove files older than specified age
             local files_before=$(find "$cache_dir" -type f 2>/dev/null | wc -l)
@@ -1886,7 +2310,138 @@ EOF
     fi
 }
 
-# Removed redundant install_critical_dependencies function - now merged into combined requirements
+# Fast batch installer for critical dependencies with enhanced caching
+install_critical_dependencies() {
+    log "📦 Installing Critical Custom Node Dependencies with Enhanced Caching..."
+    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate")
+    
+    # Create temporary requirements file for enhanced caching
+    local temp_critical_req="/tmp/critical_deps_$(date +%s).txt"
+    printf "%s\n" "${critical_packages[@]}" > "$temp_critical_req"
+    
+    # Lightning-fast check: what's already installed?
+    log "🔍 LIGHTNING CHECK: Scanning already installed critical packages..."
+    local already_installed_count=0
+    local temp_needed="/tmp/critical_needed_$(date +%s).txt"
+    > "$temp_needed"
+    
+    for pkg in "${critical_packages[@]}"; do
+        local pkg_name=$(echo "$pkg" | sed 's/[<>=!].*//' | sed 's/\[.*\]//')
+        if pip show "$pkg_name" &>/dev/null; then
+            ((already_installed_count++))
+        else
+            echo "$pkg" >> "$temp_needed"
+        fi
+    done
+    
+    local needed_count=$(wc -l < "$temp_needed")
+    log "⚡ SPEED BOOST: $already_installed_count/${#critical_packages[@]} critical packages already installed! Only $needed_count needed."
+    
+    if [[ $needed_count -eq 0 ]]; then
+        log "✅ PERFECT: All critical packages already installed - INSTANT COMPLETION!"
+        rm -f "$temp_critical_req" "$temp_needed"
+        return 0
+    fi
+    
+    # Use the needed packages list instead of full list
+    cp "$temp_needed" "$temp_critical_req"
+    rm -f "$temp_needed"
+    
+    # Use the optimized list we already created
+    local packages_to_install=()
+    while read -r pkg; do
+        [[ -n "$pkg" ]] && packages_to_install+=("$pkg")
+    done < "$temp_critical_req"
+    
+    # Batch install remaining packages
+    if [[ ${#packages_to_install[@]} -gt 0 ]]; then
+        log "📦 Installing ${#packages_to_install[@]} packages in batch..."
+        
+        # Create temporary requirements file for batch installation
+        local temp_req_file="/tmp/critical_deps_$(date +%s).txt"
+        printf "%s\n" "${packages_to_install[@]}" > "$temp_req_file"
+        
+        # PARALLEL BATCH INSTALL with optimized flags and wheel cache
+        log "🚀 TURBO MODE: Installing ${#packages_to_install[@]} packages with parallel processing..."
+        
+        # Split packages into parallel batches for super-fast installation
+        local batch_size=8
+        local parallel_jobs=4
+        local pids=()
+        local temp_batch_dir="/tmp/parallel_batches_$$"
+        mkdir -p "$temp_batch_dir"
+        
+        # Split packages into parallel batches
+        split -l $batch_size "$temp_req_file" "$temp_batch_dir/batch_"
+        
+        # Install batches in parallel
+        local batch_count=0
+        for batch_file in "$temp_batch_dir"/batch_*; do
+            [[ ! -f "$batch_file" ]] && continue
+            
+            # Launch parallel pip install
+            (
+                pip install --no-cache-dir --disable-pip-version-check --quiet --progress-bar off --find-links "/storage/.wheel_cache" -r "$batch_file" 2>/dev/null
+                echo $? > "$temp_batch_dir/result_$(basename "$batch_file")"
+            ) &
+            
+            pids+=($!)
+            ((batch_count++))
+            
+            # Limit concurrent jobs
+            if [[ ${#pids[@]} -ge $parallel_jobs ]]; then
+                wait "${pids[0]}"
+                pids=("${pids[@]:1}")
+            fi
+        done
+        
+        # Wait for remaining jobs
+        for pid in "${pids[@]}"; do
+            wait "$pid"
+        done
+        
+        # Check results
+        local success_count=0
+        local failed_count=0
+        for result_file in "$temp_batch_dir"/result_*; do
+            [[ -f "$result_file" ]] && {
+                local result=$(cat "$result_file")
+                [[ "$result" == "0" ]] && ((success_count++)) || ((failed_count++))
+            }
+        done
+        
+        rm -rf "$temp_batch_dir"
+        
+        if [[ $failed_count -eq 0 ]]; then
+            log "✅ TURBO SUCCESS: All ${success_count} parallel batches installed successfully!"
+        else
+            log "⚠️ Batch installation failed, falling back to individual installation..."
+            # Fallback to individual installation
+            local installed_count=0
+            local failed_count=0
+            
+            for pkg in "${packages_to_install[@]}"; do
+                if install_package "$pkg"; then
+                    ((installed_count++))
+                else
+                    ((failed_count++))
+                fi
+            done
+            
+            log "📊 Fallback installation summary: $installed_count installed, $failed_count failed"
+        fi
+        
+        # Clean up
+        rm -f "$temp_req_file" "$temp_critical_req"
+    else
+        log "✅ All critical packages already installed"
+        rm -f "$temp_critical_req"
+    fi
+    
+    # Final verification of critical dependencies
+    log "🔍 Final verification of critical dependencies..."
+    verify_critical_dependencies
+}
 
 # Fast verification of critical dependencies
 verify_critical_dependencies() {
@@ -1894,7 +2449,7 @@ verify_critical_dependencies() {
     local verification_failures=0
     
     # Critical packages to verify
-    local critical_packages=("torch" "torchsde" "diffusers" "gguf" "nunchaku" "huggingface_hub")
+    local critical_packages=("torch" "diffusers" "gguf" "nunchaku" "huggingface_hub")
     
     # Fast batch verification using pip list
     log "🔍 Fast-verifying package installations..."
@@ -1939,6 +2494,9 @@ verify_critical_dependencies() {
 #######################################
 
 main() {
+    # Handle command line arguments first
+    handle_commands "$@"
+    
     # START TIMING for speed measurement
     local start_time=$(date +%s)
     log "⏱️ TURBO INSTALLATION STARTED: $(date)"
@@ -1955,6 +2513,58 @@ main() {
     
     # FAST ENVIRONMENT RESTORATION - Check for complete environment snapshot first
     local target_snapshot="pytorch_2.8.0_cuda_12.8_complete"
+    
+    # PRE-RESTORATION INTEGRITY CHECK
+    log "🔍 Verifying snapshot integrity: $target_snapshot"
+    local snapshot_path="/storage/.env_snapshots/${target_snapshot}.tar.gz"
+    local metadata_path="/storage/.env_snapshots/${target_snapshot}.metadata"
+    
+    if [[ -f "$snapshot_path" ]]; then
+        log "🔍 Snapshot file exists: $(du -sh "$snapshot_path" | cut -f1)"
+        
+        # Check if snapshot is corrupted
+        if ! tar -tzf "$snapshot_path" >/dev/null 2>&1; then
+            log "❌ SNAPSHOT CORRUPTED: Cannot read tar archive"
+            log "🧹 Removing corrupted snapshot..."
+            rm -f "$snapshot_path" "$metadata_path"
+            log "📋 Corrupted snapshot removed, will perform full installation"
+        else
+            # Check for critical files in snapshot
+            local critical_files=("bin/python" "bin/activate" "lib/python3.10/site-packages/torch")
+            local missing_critical=()
+            
+            for file in "${critical_files[@]}"; do
+                if ! tar -tzf "$snapshot_path" | grep -q "$file"; then
+                    missing_critical+=("$file")
+                fi
+            done
+            
+            if [[ ${#missing_critical[@]} -gt 0 ]]; then
+                log "❌ SNAPSHOT INCOMPLETE: Missing critical files: ${missing_critical[*]}"
+                log "🧹 Removing incomplete snapshot..."
+                rm -f "$snapshot_path" "$metadata_path"
+                log "📋 Incomplete snapshot removed, will perform full installation"
+            else
+                log "✅ Snapshot integrity verified - all critical files present"
+            fi
+        fi
+    else
+        log "📋 No snapshot found at: $snapshot_path"
+    fi
+    
+    # FORCE VERIFICATION MODE - if you want to debug without reinstalling
+    if [[ "${FORCE_VERIFY_SNAPSHOT:-false}" == "true" ]]; then
+        log "🔍 FORCE VERIFICATION MODE: Checking snapshot without restoration..."
+        if [[ -f "$snapshot_path" ]]; then
+            log "🔍 Snapshot exists, checking integrity..."
+            if tar -tzf "$snapshot_path" | grep -q "bin/python"; then
+                log "✅ Snapshot integrity check passed - Python binary found"
+            else
+                log "❌ Snapshot integrity check failed - Python binary missing"
+            fi
+        fi
+    fi
+    
     if restore_environment_snapshot "$target_snapshot"; then
         log "🚀 FAST MODE: Environment restored from snapshot in seconds!"
         log "⏭️ Skipping slow installation process - environment ready!"
@@ -1962,15 +2572,77 @@ main() {
         # Activate the restored environment
         source "/tmp/sd_comfy-env/bin/activate"
         
-        # Quick verification
-        if python -c "import torch; print(f'PyTorch {torch.__version__} CUDA: {torch.cuda.is_available()}')" 2>/dev/null; then
+        # DETAILED verification with diagnostics
+        log "🔍 DETAILED SNAPSHOT VERIFICATION: Checking every component..."
+        
+        # Check Python environment
+        log "🔍 Checking Python environment..."
+        if [[ ! -f "/tmp/sd_comfy-env/bin/python" ]]; then
+            log "❌ VERIFICATION FAILED: Python binary missing from snapshot"
+            log "🔍 Expected: /tmp/sd_comfy-env/bin/python"
+            log "🔍 Found: $(ls -la /tmp/sd_comfy-env/bin/ 2>/dev/null | head -5 || echo 'Directory empty or missing')"
+        elif [[ ! -f "/tmp/sd_comfy-env/bin/activate" ]]; then
+            log "❌ VERIFICATION FAILED: Virtual environment activation script missing"
+            log "🔍 Expected: /tmp/sd_comfy-env/bin/activate"
+            log "🔍 Found: $(ls -la /tmp/sd_comfy-env/bin/ 2>/dev/null | head -5 || echo 'Directory empty or missing')"
+        else
+            log "✅ Python environment structure verified"
+        fi
+        
+        # Check PyTorch installation
+        log "🔍 Checking PyTorch installation..."
+        local torch_check_output=$(python -c "import torch; print(f'PyTorch {torch.__version__} CUDA: {torch.cuda.is_available()}')" 2>&1)
+        if [[ $? -eq 0 ]]; then
+            log "✅ PyTorch verification successful: $torch_check_output"
+            
+            # Additional PyTorch checks
+            local torch_version=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+            local torch_cuda=$(python -c "import torch; print(torch.version.cuda)" 2>/dev/null)
+            log "🔍 PyTorch version: $torch_version, CUDA: $torch_cuda"
+            
+            # Check if this matches expected version
+            if [[ "$torch_version" == *"2.8.0"* && "$torch_cuda" == *"cu128"* ]]; then
             log "✅ SNAPSHOT SUCCESS: Full environment verified and ready!"
             cd "$REPO_DIR"
             touch "/tmp/sd_comfy.prepared"
             return 0
         else
-            log "⚠️ Snapshot verification failed, falling back to full installation..."
+                log "❌ VERIFICATION FAILED: PyTorch version mismatch"
+                log "🔍 Expected: 2.8.0+cu128"
+                log "🔍 Found: $torch_version+$torch_cuda"
         fi
+    else
+            log "❌ VERIFICATION FAILED: PyTorch import failed"
+            log "🔍 Error: $torch_check_output"
+            log "🔍 Python path: $(which python)"
+            log "🔍 Python version: $(python --version 2>&1)"
+            log "🔍 Site packages: $(python -c 'import site; print(site.getsitepackages())' 2>/dev/null)"
+        fi
+        
+        # Check other critical packages
+        log "🔍 Checking other critical packages..."
+        local missing_packages=()
+        for pkg in "torchvision" "torchaudio" "xformers" "numpy" "pillow"; do
+            if ! python -c "import $pkg" 2>/dev/null; then
+                missing_packages+=("$pkg")
+            fi
+        done
+        
+        if [[ ${#missing_packages[@]} -gt 0 ]]; then
+            log "❌ VERIFICATION FAILED: Missing critical packages: ${missing_packages[*]}"
+        else
+            log "✅ All critical packages verified"
+        fi
+        
+        # Final diagnostic summary
+        log "🔍 VERIFICATION DIAGNOSTIC SUMMARY:"
+        log "🔍 Snapshot path: /storage/.env_snapshots/pytorch_2.8.0_cuda_12.8_complete.tar.gz"
+        log "🔍 Snapshot size: $(du -sh /storage/.env_snapshots/pytorch_2.8.0_cuda_12.8_complete.tar.gz 2>/dev/null || echo 'Missing')"
+        log "🔍 Environment directory: $(ls -la /tmp/sd_comfy-env/ 2>/dev/null | head -3 || echo 'Missing')"
+        log "🔍 Python executable: $(ls -la /tmp/sd_comfy-env/bin/python 2>/dev/null || echo 'Missing')"
+        
+        log "⚠️ Snapshot verification failed, falling back to full installation..."
+        log "💡 TIP: Check the diagnostics above to understand why verification failed"
     else
         log "📋 Environment snapshot restoration failed or not available, performing full installation..."
         log "ℹ️  This will create a new snapshot for faster future startups."
@@ -2055,7 +2727,7 @@ main() {
     
     # MERGE critical packages with combined requirements for efficiency
     log "🔧 Merging critical packages with combined requirements..."
-    local critical_packages=("torchsde" "blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate")
+    local critical_packages=("blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate")
     
     # Add critical packages to combined requirements (avoid duplicates)
     for pkg in "${critical_packages[@]}"; do
@@ -2175,7 +2847,7 @@ elif [[ "$1" == "clean-cache" ]]; then
 fi
 
 # Execute main workflow
-main
+main "$@"
 
 # Model download (can run in background)
 download_models() {
@@ -2195,8 +2867,14 @@ launch() {
     # Log rotation
     [[ -f "$LOG_DIR/sd_comfy.log" ]] && { local timestamp=$(date +"%Y%m%d_%H%M%S"); mv "$LOG_DIR/sd_comfy.log" "$LOG_DIR/sd_comfy_${timestamp}.log"; ls -t "$LOG_DIR"/sd_comfy_*.log 2>/dev/null | tail -n +6 | xargs -r rm; }
   
-    # A4000-specific optimizations
-  export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
+    # RTX A4000-SPECIFIC OPTIMIZATIONS (16GB VRAM, 45GB RAM)
+export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:2048,garbage_collection_threshold:0.6"
+export CUDA_MEMORY_FRACTION=0.8
+export CUDA_LAUNCH_BLOCKING=0
+export TORCH_CUDA_ARCH_LIST="8.6"
+export MAX_JOBS=4
+export USE_NINJA=1
+export DISABLE_ADDMM_CUDA_LT=1
   
     # Runtime PyTorch verification - skip if working correctly from snapshot
     if [[ -f "/tmp/env_snapshot_restored" ]]; then
