@@ -1649,12 +1649,35 @@ echo "=================================================="
 echo ""
 
 #######################################
-# STEP 8: START COMFYUI
+# STEP 8: CREATE MODEL SYMLINKS
+#######################################
+echo ""
+echo "=================================================="
+echo "           STEP 8: CREATE MODEL SYMLINKS"
+echo "=================================================="
+echo ""
+
+# Create symlinks for model directories
+echo "Creating model directory symlinks..."
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf diffusion_models && ln -s /tmp/stable-diffusion-models/sd diffusion_models
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf text_encoders && ln -s /tmp/stable-diffusion-models/lora text_encoders
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf sams && ln -s /tmp/stable-diffusion-models/upscaler sams
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
+cd "/storage/stable-diffusion-comfy/custom_nodes/comfyui_controlnet_aux/ckpts" && rm -rf lllyasviel && ln -s /tmp/stable-diffusion-models/controlnet lllyasviel
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf ipadapter && ln -s /tmp/stable-diffusion-models/upscaler ipadapter
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf inpaint && ln -s /tmp/stable-diffusion-models/vae inpaint
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf RMBG && ln -s /tmp/stable-diffusion-models/controlnet RMBG
+
+echo "✅ Model symlinks created successfully"
+
+#######################################
+# STEP 9: START COMFYUI
 #######################################
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo ""
   echo "=================================================="
-  echo "              STEP 8: START COMFYUI"
+  echo "              STEP 9: START COMFYUI"
   echo "=================================================="
   echo ""
   echo "### Starting Stable Diffusion Comfy ###"
@@ -1715,12 +1738,12 @@ if [[ -z "$INSTALL_ONLY" ]]; then
 fi
 
 #######################################
-# STEP 9: DOWNLOAD MODELS (BACKGROUND)
+# STEP 10: DOWNLOAD MODELS (BACKGROUND)
 #######################################
 if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
   echo ""
   echo "=================================================="
-  echo "         STEP 9: DOWNLOAD MODELS (BACKGROUND)"
+  echo "        STEP 10: DOWNLOAD MODELS (BACKGROUND)"
   echo "=================================================="
   echo ""
   echo "### Downloading Models for Stable Diffusion Comfy in Background ###"
@@ -1739,11 +1762,11 @@ else
 fi
 
 #######################################
-# STEP 10: FINAL SETUP COMPLETION
+# STEP 11: FINAL SETUP COMPLETION
 #######################################
 echo ""
 echo "=================================================="
-echo "           STEP 10: FINAL SETUP COMPLETION"
+echo "           STEP 11: FINAL SETUP COMPLETION"
 echo "=================================================="
 echo ""
 send_to_discord "Stable Diffusion Comfy Started"
