@@ -1139,197 +1139,58 @@ else:
         log_error "ComfyUI will continue without Nunchaku quantization support"
     fi
 
-    # --- STEP 4: INSTALL HUNYUAN3D-2.1 TEXTURE COMPONENTS ---
-    echo "=== STEP 4: Installing Hunyuan3D-2.1 Texture Components ==="
+
+
+    # --- STEP 4: UPDATE CUSTOM NODES ---
+    echo "=== STEP 4: Updating Custom Nodes ==="
     
-    # Function to install Hunyuan3D texture generation components
-    install_hunyuan3d_texture_components() {
-        echo "Installing Hunyuan3D-2.1 texture generation components..."
-        log "Starting Hunyuan3D-2.1 texture components installation"
+    # Function to update all custom nodes from Git repositories
+    update_custom_nodes() {
+        local nodes_dir="$REPO_DIR/custom_nodes"
+        [[ ! -d "$nodes_dir" ]] && return 0
         
-        # Check if Hunyuan3D custom node is already installed
-        local hunyuan3d_path="$REPO_DIR/custom_nodes/ComfyUI-Hunyuan3d-2-1"
-        if [[ ! -d "$hunyuan3d_path" ]]; then
-            log_error "Hunyuan3D-2.1 custom node not found at $hunyuan3d_path"
-            log_error "Please ensure the Hunyuan3D-2.1 custom node is installed first"
-            return 1
-        fi
+        log "🔄 Updating all custom nodes from Git repositories..."
+        local updated_nodes=0
+        local failed_nodes=0
         
-        echo "Found Hunyuan3D-2.1 custom node at: $hunyuan3d_path"
-        
-        # Install required dependencies for compilation
-        echo "Installing required dependencies for Hunyuan3D compilation..."
-        set +e
-        pip install --no-cache-dir --disable-pip-version-check pybind11 ninja
-        set -e
-        
-        # Install custom_rasterizer component
-        local custom_rasterizer_path="$hunyuan3d_path/hy3dpaint/custom_rasterizer"
-        if [[ -d "$custom_rasterizer_path" ]]; then
-            echo "Installing custom_rasterizer component..."
-            cd "$custom_rasterizer_path" || {
-                log_error "Failed to change directory to custom_rasterizer: $custom_rasterizer_path"
-                return 1
-            }
-            
-            # Check if precompiled wheel exists
-            if [[ -d "dist" ]] && ls dist/*.whl 1> /dev/null 2>&1; then
-                echo "Found precompiled wheel in dist folder, checking compatibility..."
-                local wheel_file=$(ls dist/*.whl | head -1)
-                local wheel_name=$(basename "$wheel_file")
+        for git_dir in "$nodes_dir"/*/.git; do
+            if [[ -d "$git_dir" ]]; then
+                local node_dir="${git_dir%/.git}"
+                local node_name=$(basename "$node_dir")
                 
-                # Check Python version compatibility
-                local current_python_version
-                current_python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+                log "📁 Updating Git node: $node_name"
                 
-                # Extract Python version from wheel name (e.g., cp311 from cp311-cp311-linux_x86_64.whl)
-                local wheel_python_version
-                if [[ "$wheel_name" =~ cp([0-9]{2}) ]]; then
-                    wheel_python_version="${BASH_REMATCH[1]}"
-                else
-                    wheel_python_version="unknown"
-                fi
-                
-                echo "Current Python version: $current_python_version, Wheel Python version: $wheel_python_version"
-                
-                if [[ "$wheel_python_version" == "$current_python_version" ]]; then
-                    echo "Wheel Python version matches, attempting installation..."
-                    # Temporarily disable set -e for pip install to prevent script exit on failure
-                    set +e
-                    if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
-                        set -e
-                        echo "✅ custom_rasterizer installed from precompiled wheel"
+                if cd "$node_dir"; then
+                    if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
+                        log "✅ Git update successful for $node_name"
+                        ((updated_nodes++))
                     else
-                        set -e
-                        log_error "Failed to install custom_rasterizer from precompiled wheel, attempting compilation..."
-                        set +e
-                        if python setup.py install; then
-                            set -e
-                            echo "✅ custom_rasterizer compiled and installed successfully"
-                        else
-                            set -e
-                            log_error "❌ custom_rasterizer compilation failed"
-                            return 1
-                        fi
+                        log_error "❌ Git update failed for $node_name"
+                        ((failed_nodes++))
                     fi
+                    cd - > /dev/null
                 else
-                    log_error "Wheel Python version mismatch: current=$current_python_version, wheel=$wheel_python_version"
-                    log_error "Skipping precompiled wheel and attempting compilation..."
-                    set +e
-                    if python setup.py install; then
-                        set -e
-                        echo "✅ custom_rasterizer compiled and installed successfully"
-                    else
-                        set -e
-                        log_error "❌ custom_rasterizer compilation failed"
-                        return 1
-                    fi
-                fi
-            else
-                echo "No precompiled wheel found, compiling custom_rasterizer..."
-                if python setup.py install; then
-                    echo "✅ custom_rasterizer compiled and installed successfully"
-                else
-                    log_error "❌ custom_rasterizer compilation failed"
-                    return 1
+                    log_error "❌ Failed to access directory for $node_name"
+                    ((failed_nodes++))
                 fi
             fi
-        else
-            log_error "custom_rasterizer directory not found at: $custom_rasterizer_path"
-            return 1
-        fi
+        done
         
-        # Install DifferentiableRenderer component
-        local differentiable_renderer_path="$hunyuan3d_path/hy3dpaint/DifferentiableRenderer"
-        if [[ -d "$differentiable_renderer_path" ]]; then
-            echo "Installing DifferentiableRenderer component..."
-            cd "$differentiable_renderer_path" || {
-                log_error "Failed to change directory to DifferentiableRenderer: $differentiable_renderer_path"
-                return 1
-            }
-            
-            # Check if precompiled wheel exists
-            if [[ -d "dist" ]] && ls dist/*.whl 1> /dev/null 2>&1; then
-                echo "Found precompiled wheel in dist folder, checking compatibility..."
-                local wheel_file=$(ls dist/*.whl | head -1)
-                local wheel_name=$(basename "$wheel_file")
-                
-                # Check Python version compatibility
-                local current_python_version
-                current_python_version=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-                
-                # Extract Python version from wheel name (e.g., cp311 from cp311-cp311-linux_x86_64.whl)
-                local wheel_python_version
-                if [[ "$wheel_name" =~ cp([0-9]{2}) ]]; then
-                    wheel_python_version="${BASH_REMATCH[1]}"
-                else
-                    wheel_python_version="unknown"
-                fi
-                
-                echo "Current Python version: $current_python_version, Wheel Python version: $wheel_python_version"
-                
-                if [[ "$wheel_python_version" == "$current_python_version" ]]; then
-                    echo "Wheel Python version matches, attempting installation..."
-                    # Temporarily disable set -e for pip install to prevent script exit on failure
-                    set +e
-                    if pip install --no-cache-dir --disable-pip-version-check "$wheel_file"; then
-                        set -e
-                        echo "✅ DifferentiableRenderer installed from precompiled wheel"
-                    else
-                        set -e
-                        log_error "Failed to install DifferentiableRenderer from precompiled wheel, attempting compilation..."
-                        set +e
-                        if python setup.py install; then
-                            set -e
-                            echo "✅ DifferentiableRenderer compiled and installed successfully"
-                        else
-                            set -e
-                            log_error "❌ DifferentiableRenderer compilation failed"
-                            return 1
-                        fi
-                    fi
-                else
-                    log_error "Wheel Python version mismatch: current=$current_python_version, wheel=$wheel_python_version"
-                    log_error "Skipping precompiled wheel and attempting compilation..."
-                    set +e
-                    if python setup.py install; then
-                        set -e
-                        echo "✅ DifferentiableRenderer compiled and installed successfully"
-                    else
-                        set -e
-                        log_error "❌ DifferentiableRenderer compilation failed"
-                        return 1
-                    fi
-                fi
-            else
-                echo "No precompiled wheel found, compiling DifferentiableRenderer..."
-                if python setup.py install; then
-                    echo "✅ DifferentiableRenderer compiled and installed successfully"
-                else
-                    log_error "❌ DifferentiableRenderer compilation failed"
-                    return 1
-                fi
-            fi
-        else
-            log_error "DifferentiableRenderer directory not found at: $differentiable_renderer_path"
-            return 1
-        fi
+        # Summary
+        log "📊 Custom node update summary: $updated_nodes successful, $failed_nodes failed"
+        [[ $failed_nodes -gt 0 ]] && log_error "⚠️ Some custom nodes had issues - check logs above"
         
-        # Return to original directory
-        cd "$REPO_DIR" || log_error "Failed to return to original directory"
-        
-        echo "✅ Hunyuan3D-2.1 texture components installation completed successfully"
-        return 0
+        log "✅ Custom node Git updates complete!"
     }
     
-    # Execute Hunyuan3D texture components installation
-    install_hunyuan3d_texture_components
-    hunyuan3d_status=$?
-    if [[ $hunyuan3d_status -eq 0 ]]; then
-        echo "✅ Hunyuan3D-2.1 texture components installation completed successfully."
+    # Execute custom node updates
+    update_custom_nodes
+    custom_nodes_status=$?
+    if [[ $custom_nodes_status -eq 0 ]]; then
+        echo "✅ Custom nodes update completed successfully."
     else
-        log_error "⚠️ Hunyuan3D-2.1 texture components installation had issues (Status: $hunyuan3d_status)"
-        log_error "Hunyuan3D texture generation features may not work properly"
+        log_error "⚠️ Custom nodes update had issues (Status: $custom_nodes_status)"
+        log_error "Some custom nodes may not be up-to-date"
     fi
 
     # --- STEP 5: PROCESS REQUIREMENTS ---
@@ -1543,6 +1404,9 @@ EOF
     process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
 
     # Note: All SageAttention helper functions are defined earlier in the script to avoid duplication
+
+    # --- STEP 6: FINAL INSTALLATION CHECKS ---
+    echo "=== STEP 6: Final Installation Checks ==="
 
     # Installation Success Handling
     handle_successful_installation() {
@@ -1760,19 +1624,7 @@ fi
 log "Finished Preparing Environment for Stable Diffusion Comfy"
 
 #######################################
-# STEP 6: MODEL DOWNLOAD
-#######################################
-if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
-  echo "### Downloading Model for Stable Diffusion Comfy ###"
-  log "Downloading Model for Stable Diffusion Comfy"
-  bash $current_dir/../utils/sd_model_download/main.sh
-  log "Finished Downloading Models for Stable Diffusion Comfy"
-else
-  log "Skipping Model Download for Stable Diffusion Comfy"
-fi
-
-#######################################
-# STEP 7: START STABLE DIFFUSION
+# STEP 7: START STABLE DIFFUSION (COMFYUI)
 #######################################
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo "### Starting Stable Diffusion Comfy ###"
@@ -1809,8 +1661,6 @@ if [[ -z "$INSTALL_ONLY" ]]; then
       fi
   fi
 
-
-
   # Launch ComfyUI with A4000-optimized parameters using SageAttention
   echo "NOTE: A pip dependency warning regarding xformers and torch versions may appear below."
   echo "This is expected with the current package versions and can be safely ignored."
@@ -1828,10 +1678,33 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     --enable-compress-response-body \
     ${EXTRA_SD_COMFY_ARGS}" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
+  
+  # Wait a moment for ComfyUI to start
+  sleep 3
+  log "✅ ComfyUI started successfully! You can now access it at http://localhost:$SD_COMFY_PORT"
 fi
 
 #######################################
-# STEP 8: FINAL NOTIFICATIONS
+# STEP 8: MODEL DOWNLOAD (BACKGROUND)
+#######################################
+if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
+  echo "### Downloading Models for Stable Diffusion Comfy in Background ###"
+  log "Starting Model Download for Stable Diffusion Comfy in background..."
+  log "💡 Models will download in background while ComfyUI is running 💡 You can start using ComfyUI immediately!"
+  
+  # Start model download in background
+  bash $current_dir/../utils/sd_model_download/main.sh > /tmp/model_download.log 2>&1 &
+  local download_pid=$!
+  echo "$download_pid" > /tmp/model_download.pid
+  log "📋 Model download started with PID: $download_pid in background"
+  log "📋 Check download progress with: tail -f /tmp/model_download.log"
+  log "📋 Stop download with: kill \$(cat /tmp/model_download.pid)"
+else
+  log "Skipping Model Download for Stable Diffusion Comfy"
+fi
+
+#######################################
+# STEP 9: FINAL NOTIFICATIONS
 #######################################
 send_to_discord "Stable Diffusion Comfy Started"
 
