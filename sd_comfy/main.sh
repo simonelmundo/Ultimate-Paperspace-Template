@@ -993,7 +993,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                  fi
      }
 
-    # Nunchaku Installation Process (Simplified - Source Build Only)
+    # Nunchaku Installation Process (Simple Wheel Install)
     install_nunchaku() {
         log "🔧 Installing Nunchaku quantization library..."
         
@@ -1010,38 +1010,21 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             return 1
         fi
         
-        # Build Nunchaku from source (proven working method)
-        log "🔄 Building Nunchaku from source..."
-        log "🔧 Command: pip install --no-cache-dir --force-reinstall nunchaku"
+        # Install Nunchaku wheel directly from URL
+        log "🔄 Installing Nunchaku wheel from Hugging Face..."
+        log "🔧 Command: pip install --no-cache-dir --no-deps --force-reinstall https://huggingface.co/mit-han-lab/nunchaku/resolve/main/nunchaku-0.3.1+torch2.8-cp310-cp310-linux_x86_64.whl"
         
-        local source_output
-        local source_install_status
-        if command -v timeout >/dev/null 2>&1; then
-            log "🔧 Using timeout command for source build"
-            timeout 600s pip install --no-cache-dir --force-reinstall nunchaku > /tmp/source_pip_output.log 2>&1
-            source_install_status=$?
-            source_output=$(cat /tmp/source_pip_output.log 2>/dev/null || echo "No source pip output captured")
-            rm -f /tmp/source_pip_output.log
-        else
-            log "⚠️ Timeout command not available, using regular pip install for source build"
-            source_output=$(pip install --no-cache-dir --force-reinstall nunchaku 2>&1)
-            source_install_status=$?
-        fi
-        
-        log "🔧 Source build completed with status: $source_install_status"
-        
-        if [[ $source_install_status -eq 0 ]]; then
-            log "✅ Nunchaku built from source successfully"
+        if pip install --no-cache-dir --no-deps --force-reinstall https://huggingface.co/mit-han-lab/nunchaku/resolve/main/nunchaku-0.3.1+torch2.8-cp310-cp310-linux_x86_64.whl; then
+            log "✅ Nunchaku wheel installed successfully"
             if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} imported successfully')" 2>/dev/null; then
-                log "✅ Nunchaku source build verified"
+                log "✅ Nunchaku installation verified"
                 return 0
             else
-                log_error "❌ Nunchaku import failed after source build"
+                log_error "❌ Nunchaku import failed after wheel installation"
                 return 1
             fi
         else
-            log_error "❌ Source build failed (exit code: $source_install_status)"
-            log_error "Source build output: $source_output"
+            log_error "❌ Failed to install Nunchaku wheel"
             return 1
         fi
     }
