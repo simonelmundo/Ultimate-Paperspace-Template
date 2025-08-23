@@ -291,34 +291,23 @@ readonly TORCHAUDIO_VERSION="2.8.0+cu128"
 readonly XFORMERS_VERSION="0.0.32.post2"
 readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 
-# Function to install missing packages that commonly cause custom node errors
-install_missing_custom_node_deps() {
-    log "📦 Installing missing packages for custom nodes..."
+# Function to install critical packages that are commonly needed by custom nodes
+install_critical_packages() {
+    log "📦 Installing critical packages for custom nodes..."
     
-    local missing_packages=(
-        "rembg"           # For ComfyUI-Hunyuan3d-2-1
-        "onnxruntime"     # For comfyui_controlnet_aux
-        "opencv-python"   # For various nodes
-        "opencv-contrib-python"  # For advanced OpenCV features
-        "ultralytics"     # For various AI models
-        "transformers"    # For Hugging Face models
-        "diffusers"       # For Stable Diffusion models
-        "accelerate"      # For model acceleration
-        "huggingface_hub" # For model downloads
-        "segment-anything" # For SAM models
-        "groundingdino"   # For grounding models
-        "insightface"     # For face recognition
-        "facexlib"        # For face processing
-        "scikit-image"    # For image processing
-        "piexif"          # For EXIF data
-        "sounddevice"     # For audio processing
-        "av>=12.0.0,<14.0.0"  # For video processing
+    local critical_packages=(
+        "blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" 
+        "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" 
+        "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" 
+        "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" 
+        "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate"
+        "git+https://github.com/facebookresearch/sam2"
     )
     
     local installed_count=0
     local failed_count=0
     
-    for pkg in "${missing_packages[@]}"; do
+    for pkg in "${critical_packages[@]}"; do
         log "📦 Installing: $pkg"
         if pip install --quiet --no-cache-dir "$pkg" 2>/dev/null; then
             log "✅ Successfully installed: $pkg"
@@ -329,7 +318,7 @@ install_missing_custom_node_deps() {
         fi
     done
     
-    log "📊 Custom node dependencies: $installed_count installed, $failed_count failed"
+    log "📊 Critical packages: $installed_count installed, $failed_count failed"
     return $failed_count
 }
 
@@ -1439,10 +1428,28 @@ EOF
 
     # Note: All SageAttention helper functions are defined earlier in the script to avoid duplication
 
-    # --- STEP 7: VERIFY INSTALLATIONS ---
+    # --- STEP 7: INSTALL CRITICAL PACKAGES ---
     echo ""
     echo "=================================================="
-    echo "            STEP 7: VERIFY INSTALLATIONS"
+    echo "         STEP 7: INSTALL CRITICAL PACKAGES"
+    echo "=================================================="
+    echo ""
+    
+    # Execute critical packages installation
+    log "🔧 Installing critical packages (commonly needed by custom nodes)..."
+    install_critical_packages || log_error "Some critical packages failed to install (continuing)"
+    critical_packages_status=$?
+    if [[ $critical_packages_status -eq 0 ]]; then
+        echo "✅ Critical packages installation completed successfully."
+    else
+        log_error "⚠️ Critical packages installation had issues (Status: $critical_packages_status)"
+        log_error "Some custom nodes may not work properly"
+    fi
+
+    # --- STEP 8: VERIFY INSTALLATIONS ---
+    echo ""
+    echo "=================================================="
+    echo "            STEP 8: VERIFY INSTALLATIONS"
     echo "=================================================="
     echo ""
 
@@ -1649,11 +1656,11 @@ echo "=================================================="
 echo ""
 
 #######################################
-# STEP 8: CREATE MODEL SYMLINKS
+# STEP 9: CREATE MODEL SYMLINKS
 #######################################
 echo ""
 echo "=================================================="
-echo "           STEP 8: CREATE MODEL SYMLINKS"
+echo "           STEP 9: CREATE MODEL SYMLINKS"
 echo "=================================================="
 echo ""
 
@@ -1672,12 +1679,12 @@ cd "/storage/stable-diffusion-comfy/models/" && rm -rf RMBG && ln -s /tmp/stable
 echo "✅ Model symlinks created successfully"
 
 #######################################
-# STEP 9: START COMFYUI
+# STEP 10: START COMFYUI
 #######################################
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo ""
   echo "=================================================="
-  echo "              STEP 9: START COMFYUI"
+  echo "             STEP 10: START COMFYUI"
   echo "=================================================="
   echo ""
   echo "### Starting Stable Diffusion Comfy ###"
@@ -1738,12 +1745,12 @@ if [[ -z "$INSTALL_ONLY" ]]; then
 fi
 
 #######################################
-# STEP 10: DOWNLOAD MODELS (BACKGROUND)
+# STEP 11: DOWNLOAD MODELS (BACKGROUND)
 #######################################
 if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
   echo ""
   echo "=================================================="
-  echo "        STEP 10: DOWNLOAD MODELS (BACKGROUND)"
+  echo "        STEP 11: DOWNLOAD MODELS (BACKGROUND)"
   echo "=================================================="
   echo ""
   echo "### Downloading Models for Stable Diffusion Comfy in Background ###"
@@ -1762,11 +1769,11 @@ else
 fi
 
 #######################################
-# STEP 11: FINAL SETUP COMPLETION
+# STEP 12: FINAL SETUP COMPLETION
 #######################################
 echo ""
 echo "=================================================="
-echo "           STEP 11: FINAL SETUP COMPLETION"
+echo "           STEP 12: FINAL SETUP COMPLETION"
 echo "=================================================="
 echo ""
 send_to_discord "Stable Diffusion Comfy Started"
