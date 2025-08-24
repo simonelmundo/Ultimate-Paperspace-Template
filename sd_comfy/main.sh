@@ -296,7 +296,7 @@ install_critical_packages() {
     log "📦 Installing critical packages for custom nodes..."
     
     local critical_packages=(
-        "blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" 
+        "blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" " groundingdino-py"
         "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" 
         "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" 
         "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" 
