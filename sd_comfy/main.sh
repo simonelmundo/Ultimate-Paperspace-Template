@@ -1271,7 +1271,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     set +e
     disable_err_trap
     
-    install_sageattention
+  
     sageattention_status=$?
     
     # Re-enable set -e and ERR trap
