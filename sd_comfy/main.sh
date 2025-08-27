@@ -296,7 +296,7 @@ install_critical_packages() {
     log "📦 Installing critical packages for custom nodes..."
     
     local critical_packages=(
-        "blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" " groundingdino-py"
+        "blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino" 
         "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" 
         "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" 
         "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" 
@@ -644,7 +644,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         git checkout -- requirements.txt
     }
     
-   # Ensure we're on a branch before updating
+       # Ensure we're on a branch before updating
     if [[ -d ".git" ]]; then
         # Check if we're in detached HEAD state
         if git symbolic-ref -q HEAD >/dev/null; then
@@ -656,6 +656,104 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                 git checkout -b main
             }
         fi
+    fi 
+    
+    # Check and update ComfyUI to latest version before installation
+    echo ""
+    echo "=================================================="
+    echo "           CHECKING COMFYUI UPDATES"
+    echo "=================================================="
+    echo ""
+    
+    if [ -d ".git" ]; then
+        echo "📋 Checking ComfyUI version information..."
+        
+        # Get current commit hash and branch
+        current_commit=$(git rev-parse HEAD 2>/dev/null || echo "Unknown")
+        current_branch=$(git branch --show-current 2>/dev/null || echo "Unknown")
+        current_date=$(git log -1 --format="%cd" --date=short 2>/dev/null || echo "Unknown")
+        
+        echo "📍 Current ComfyUI Status:"
+        echo "   Branch: $current_branch"
+        echo "   Commit: $current_commit"
+        echo "   Date: $current_date"
+        
+        # Check if there are updates available
+        echo ""
+        echo "🔄 Checking for updates..."
+        git fetch origin 2>/dev/null
+        
+        # Compare local vs remote
+        local_commit=$(git rev-parse HEAD 2>/dev/null)
+        remote_commit=$(git rev-parse origin/$current_branch 2>/dev/null)
+        
+        if [ "$local_commit" = "$remote_commit" ]; then
+            echo "✅ ComfyUI is up to date with the latest version!"
+        else
+            echo "⚠️  ComfyUI has updates available!"
+            echo "   Local:  $local_commit"
+            echo "   Remote: $remote_commit"
+            echo ""
+            echo "🔄 Updating ComfyUI to latest version..."
+            
+            # Perform the update
+            if git pull origin $current_branch; then
+                echo "✅ ComfyUI successfully updated to latest version!"
+                
+                # Update custom nodes as well
+                echo "🔄 Updating custom nodes..."
+                if [ -d "custom_nodes" ]; then
+                    updated_nodes=0
+                    failed_nodes=0
+                    
+                    for git_dir in custom_nodes/*/.git; do
+                        if [[ -d "$git_dir" ]]; then
+                            node_dir="${git_dir%/.git}"
+                            node_name=$(basename "$node_dir")
+                            
+                            echo "📁 Updating custom node: $node_name"
+                            if cd "$node_dir"; then
+                                if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
+                                    echo "✅ Updated: $node_name"
+                                    ((updated_nodes++))
+                                else
+                                    echo "⚠️  Failed to update: $node_name"
+                                    ((failed_nodes++))
+                                fi
+                                cd - > /dev/null
+                            fi
+                        fi
+                    done
+                    
+                    echo "📊 Custom nodes update summary: $updated_nodes successful, $failed_nodes failed"
+                fi
+                
+                # Update ComfyUI Manager specifically if it exists
+                if [ -d "custom_nodes/comfyui-manager" ]; then
+                    echo "🔧 Updating ComfyUI Manager..."
+                    cd "custom_nodes/comfyui-manager"
+                    if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
+                        echo "✅ ComfyUI Manager updated successfully"
+                    else
+                        echo "⚠️  ComfyUI Manager update had issues"
+                    fi
+                    cd - > /dev/null
+                fi
+                
+                echo "🔄 ComfyUI and custom nodes updated successfully!"
+                
+            else
+                echo "❌ Failed to update ComfyUI. Please check the repository status."
+            fi
+        fi
+        
+        # Show recent commits
+        echo ""
+        echo "📝 Recent commits:"
+        git log --oneline -5 2>/dev/null | sed 's/^/   /' || echo "   Unable to show recent commits"
+        
+    else
+        echo "⚠️  ComfyUI repository not found or not a git repository"
     fi 
     
 
@@ -1637,10 +1735,65 @@ EOF
     echo "Stable Diffusion Comfy setup complete."
 else
     echo "Stable Diffusion Comfy already prepared. Skipping setup."
+    
+    # Check ComfyUI version and update status even when skipping installation
+    echo ""
+    echo "=================================================="
+    echo "           CHECKING COMFYUI STATUS"
+    echo "=================================================="
+    echo ""
+    
     # Activate venv even if skipping setup
     if [ -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
         source $VENV_DIR/sd_comfy-env/bin/activate
         echo "Virtual environment activated: $VENV_DIR/sd_comfy-env"
+        
+        # Check current ComfyUI version
+        if [ -d "$REPO_DIR/.git" ]; then
+            cd "$REPO_DIR"
+            echo "📋 Checking ComfyUI version information..."
+            
+            # Get current commit hash and branch
+            current_commit=$(git rev-parse HEAD 2>/dev/null || echo "Unknown")
+            current_branch=$(git branch --show-current 2>/dev/null || echo "Unknown")
+            
+            # Get current commit date
+            current_date=$(git log -1 --format="%cd" --date=short 2>/dev/null || echo "Unknown")
+            
+            echo "📍 Current ComfyUI Status:"
+            echo "   Branch: $current_branch"
+            echo "   Commit: $current_commit"
+            echo "   Date: $current_date"
+            
+            # Check if there are updates available
+            echo ""
+            echo "🔄 Checking for updates..."
+            git fetch origin 2>/dev/null
+            
+            # Compare local vs remote
+            local_commit=$(git rev-parse HEAD 2>/dev/null)
+            remote_commit=$(git rev-parse origin/$current_branch 2>/dev/null)
+            
+            if [ "$local_commit" = "$remote_commit" ]; then
+                echo "✅ ComfyUI is up to date with the latest version!"
+            else
+                echo "⚠️  ComfyUI has updates available!"
+                echo "   Local:  $local_commit"
+                echo "   Remote: $remote_commit"
+                echo ""
+                echo "💡 ComfyUI updates are now handled at the beginning of the installation process"
+                echo "   Run the script again to get the latest updates"
+            fi
+            
+            # Show recent commits
+            echo ""
+            echo "📝 Recent commits:"
+            git log --oneline -5 2>/dev/null | sed 's/^/   /' || echo "   Unable to show recent commits"
+            
+        else
+            echo "⚠️  ComfyUI repository not found or not a git repository"
+        fi
+        
     else
         log_error "Virtual environment activation script not found!"
         exit 1
@@ -1728,13 +1881,11 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     --dont-print-server \
     --port $SD_COMFY_PORT \
     --cuda-malloc \
-    --use-sage-attention \
     --preview-method auto \
     --bf16-vae \
     --fp16-unet \
     --cache-lru 5 \
     --reserve-vram 0.5 \
-    --fast \
     --enable-compress-response-body \
     ${EXTRA_SD_COMFY_ARGS}" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
