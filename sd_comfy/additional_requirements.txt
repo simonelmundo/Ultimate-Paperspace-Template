@@ -24,6 +24,7 @@ flet==0.23.2
 -r /storage/stable-diffusion-comfy/custom_nodes/teacache/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui_controlnet_aux/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui_layerstyle/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/comfyui-fluxtrainer/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Crystools/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-easy-use/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-impact-pack/requirements.txt
