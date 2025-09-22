@@ -301,7 +301,6 @@ install_critical_packages() {
         "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" 
         "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" 
         "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate"
-        "git+https://github.com/facebookresearch/sam2"
     )
     
     local installed_count=0
@@ -320,6 +319,67 @@ install_critical_packages() {
     
     log "📊 Critical packages: $installed_count installed, $failed_count failed"
     return $failed_count
+}
+
+# Optimized SAM2 Installation Function
+install_sam2_optimized() {
+    log "🚀 Installing SAM2 with optimizations for faster installation..."
+    
+    # Check if SAM2 is already installed
+    if python -c "import sam2" 2>/dev/null; then
+        local sam2_version=$(python -c "import sam2; print(sam2.__version__)" 2>/dev/null || echo "unknown")
+        log "✅ SAM2 $sam2_version already installed"
+        return 0
+    fi
+    
+    # Create a temporary directory for SAM2 installation
+    local sam2_temp_dir="/tmp/sam2_install"
+    mkdir -p "$sam2_temp_dir"
+    cd "$sam2_temp_dir"
+    
+    log "📦 Cloning SAM2 repository with shallow clone (faster)..."
+    # Use shallow clone to reduce download time
+    if git clone --depth 1 https://github.com/facebookresearch/sam2.git .; then
+        log "✅ SAM2 repository cloned successfully"
+    else
+        log_error "❌ Failed to clone SAM2 repository"
+        return 1
+    fi
+    
+    log "🔧 Installing SAM2 with optimized settings..."
+    # Install with optimizations
+    export MAX_JOBS=$(nproc)  # Use all available cores
+    export USE_NINJA=1        # Use Ninja for faster builds
+    
+    # Install in development mode for faster installation
+    if pip install -e . --no-build-isolation --no-deps; then
+        log "✅ SAM2 installed successfully in development mode"
+        
+        # Install dependencies separately
+        log "📦 Installing SAM2 dependencies..."
+        pip install --no-cache-dir --disable-pip-version-check \
+            "torch>=1.9.0" "torchvision>=0.10.0" "opencv-python" \
+            "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
+            "timm" "transformers" "huggingface_hub" 2>/dev/null || log "Some dependencies may have failed"
+        
+        # Clean up
+        cd /
+        rm -rf "$sam2_temp_dir"
+        
+        # Verify installation
+        if python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} installed successfully')" 2>/dev/null; then
+            log "✅ SAM2 installation verified"
+            return 0
+        else
+            log_error "❌ SAM2 installation verification failed"
+            return 1
+        fi
+    else
+        log_error "❌ Failed to install SAM2"
+        cd /
+        rm -rf "$sam2_temp_dir"
+        return 1
+    fi
 }
 
 # Function to fix common custom node import errors
@@ -1570,6 +1630,32 @@ EOF
     else
         log_error "⚠️ Critical packages installation had issues (Status: $critical_packages_status)"
         log_error "Some custom nodes may not work properly"
+    fi
+
+    # --- STEP 7.5: INSTALL SAM2 OPTIMIZED ---
+    echo ""
+    echo "=================================================="
+    echo "        STEP 7.5: INSTALL SAM2 OPTIMIZED"
+    echo "=================================================="
+    echo ""
+    
+    # Temporarily disable set -e and ERR trap for SAM2 installation
+    set +e
+    disable_err_trap
+    
+    log "🚀 Installing SAM2 with optimizations (faster than Git install)..."
+    install_sam2_optimized
+    sam2_status=$?
+    
+    # Re-enable set -e and ERR trap
+    set -e
+    enable_err_trap
+    
+    if [[ $sam2_status -eq 0 ]]; then
+        echo "✅ SAM2 installation completed successfully."
+    else
+        log_error "⚠️ SAM2 installation had issues (Status: $sam2_status)"
+        log_error "Some custom nodes requiring SAM2 may not work properly"
     fi
 
     # --- STEP 8: VERIFY INSTALLATIONS ---
