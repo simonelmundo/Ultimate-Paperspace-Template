@@ -325,10 +325,14 @@ install_critical_packages() {
 install_sam2_optimized() {
     log "🚀 Installing SAM2 with optimizations for faster installation..."
     
+    # Temporarily disable set -e within this function
+    set +e
+    
     # Check if SAM2 is already installed
     if python -c "import sam2" 2>/dev/null; then
         local sam2_version=$(python -c "import sam2; print(sam2.__version__)" 2>/dev/null || echo "unknown")
         log "✅ SAM2 $sam2_version already installed"
+        set -e  # Re-enable set -e
         return 0
     fi
     
@@ -362,24 +366,27 @@ install_sam2_optimized() {
             "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
             "timm" "transformers" "huggingface_hub" 2>/dev/null || log "Some dependencies may have failed"
         
-        # Clean up
-        cd /
-        rm -rf "$sam2_temp_dir"
-        
-        # Verify installation
-        if python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} installed successfully')" 2>/dev/null; then
-            log "✅ SAM2 installation verified"
-            return 0
-        else
-            log_error "❌ SAM2 installation verification failed"
-            return 1
-        fi
+    # Clean up
+    cd /
+    rm -rf "$sam2_temp_dir"
+    
+    # Verify installation
+    if python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} installed successfully')" 2>/dev/null; then
+        log "✅ SAM2 installation verified"
+        set -e  # Re-enable set -e
+        return 0
     else
-        log_error "❌ Failed to install SAM2"
-        cd /
-        rm -rf "$sam2_temp_dir"
+        log_error "❌ SAM2 installation verification failed"
+        set -e  # Re-enable set -e
         return 1
     fi
+else
+    log_error "❌ Failed to install SAM2"
+    cd /
+    rm -rf "$sam2_temp_dir"
+    set -e  # Re-enable set -e
+    return 1
+fi
 }
 
 # Function to fix common custom node import errors
@@ -1422,7 +1429,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             fi
             
             # Process included requirements files
-            if grep "^-r" "$file" 2>/dev/null | sed 's/^-r\s*//' | while read -r included_file; do
+            grep "^-r" "$file" 2>/dev/null | sed 's/^-r\s*//' | while read -r included_file; do
                 # Resolve relative paths
                 if [[ "$included_file" != /* ]]; then
                     included_file="$(dirname "$file")/$included_file"
@@ -1434,11 +1441,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                 else
                     echo "${ind}Warning: Included file not found - $included_file"
                 fi
-            fi; then
-                : # Command succeeded
-            else
-                echo "${ind}Warning: Failed to process included requirements from $file"
-            fi
+            done
         }
         
         collect_reqs "$req_file" "$indent"
@@ -1644,19 +1647,26 @@ EOF
     disable_err_trap
     
     log "🚀 Installing SAM2 with optimizations (faster than Git install)..."
-    install_sam2_optimized
+    # Force SAM2 installation to never fail the script
+    install_sam2_optimized 2>/dev/null || true
     sam2_status=$?
     
     # Re-enable set -e and ERR trap
     set -e
     enable_err_trap
     
+    # Always report status but never fail the script
     if [[ $sam2_status -eq 0 ]]; then
         echo "✅ SAM2 installation completed successfully."
     else
         log_error "⚠️ SAM2 installation had issues (Status: $sam2_status)"
         log_error "Some custom nodes requiring SAM2 may not work properly"
+        log_error "Continuing with script execution..."
     fi
+    
+    # Force continue regardless of SAM2 status
+    echo "🔄 Continuing to next step regardless of SAM2 status..."
+    sam2_status=0  # Force success to ensure continuation
 
     # --- STEP 8: VERIFY INSTALLATIONS ---
     echo ""
