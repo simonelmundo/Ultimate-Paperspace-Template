@@ -1333,6 +1333,9 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             echo "${indent}Skipping: File not found - $req_file"
             return 0
         }
+        
+        # Temporarily disable set -e for this function to prevent termination on individual failures
+        set +e
 
         echo "${indent}Processing: $req_file"
         
@@ -1352,11 +1355,14 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             
             [[ ! -f "$file" ]] && return 0
             
-            # Add requirements from this file
-            grep -v "^-r\|^#\|^$" "$file" >> "$combined_reqs"
+            # Add requirements from this file (with error handling)
+            if ! grep -v "^-r\|^#\|^$" "$file" >> "$combined_reqs" 2>/dev/null; then
+                echo "${ind}Warning: Failed to read requirements from $file"
+                return 0
+            fi
             
             # Process included requirements files
-            grep "^-r" "$file" | sed 's/^-r\s*//' | while read -r included_file; do
+            if grep "^-r" "$file" 2>/dev/null | sed 's/^-r\s*//' | while read -r included_file; do
                 # Resolve relative paths
                 if [[ "$included_file" != /* ]]; then
                     included_file="$(dirname "$file")/$included_file"
@@ -1368,7 +1374,11 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                 else
                     echo "${ind}Warning: Included file not found - $included_file"
                 fi
-            done
+            fi; then
+                : # Command succeeded
+            else
+                echo "${ind}Warning: Failed to process included requirements from $file"
+            fi
         }
         
         collect_reqs "$req_file" "$indent"
@@ -1428,8 +1438,12 @@ with open(sys.argv[2], 'w') as f:
 EOF
 
         # Run the conflict resolution script
-        python "/tmp/resolve_conflicts.py" "$combined_reqs" "/tmp/resolved_requirements.txt"
-        mv "/tmp/resolved_requirements.txt" "$combined_reqs"
+        if ! python "/tmp/resolve_conflicts.py" "$combined_reqs" "/tmp/resolved_requirements.txt" 2>/dev/null; then
+            echo "${indent}Warning: Conflict resolution failed for $req_file, using original requirements"
+            # Keep original file if conflict resolution fails
+        else
+            mv "/tmp/resolved_requirements.txt" "$combined_reqs"
+        fi
         
         # Create verification script
         cat > "$verify_script" << 'EOF'
@@ -1484,7 +1498,10 @@ EOF
         
         # Verify which packages are actually missing
         echo "${indent}Verifying package imports..."
-        python "$verify_script" "$combined_reqs" "/tmp/missing_packages.txt"
+        if ! python "$verify_script" "$combined_reqs" "/tmp/missing_packages.txt" 2>/dev/null; then
+            echo "${indent}Warning: Package verification failed for $req_file, skipping verification"
+            touch "/tmp/missing_packages.txt"  # Create empty file to continue
+        fi
         
         # Install packages in smaller batches to avoid dependency conflicts
         if [[ -s "/tmp/missing_packages.txt" ]]; then
@@ -1518,11 +1535,22 @@ EOF
         
         # Clean up
         rm -f "$combined_reqs" "$verify_script" "/tmp/missing_packages.txt" "/tmp/resolve_conflicts.py" /tmp/pkg_batch_*
+        
+        # Re-enable set -e at the end of the function
+        set -e
+        echo "${indent}Completed processing: $req_file"
     }
 
-        # Call the function with the requirements file
-    process_requirements "$REPO_DIR/requirements.txt"
-    process_requirements "/notebooks/sd_comfy/additional_requirements.txt"
+        # Call the function with the requirements file - with error handling
+    echo "Processing main ComfyUI requirements..."
+    if ! process_requirements "$REPO_DIR/requirements.txt"; then
+        log_error "⚠️ Failed to process main ComfyUI requirements, but continuing..."
+    fi
+    
+    echo "Processing additional requirements..."
+    if ! process_requirements "/notebooks/sd_comfy/additional_requirements.txt"; then
+        log_error "⚠️ Failed to process additional requirements, but continuing..."
+    fi
 
     # Note: All SageAttention helper functions are defined earlier in the script to avoid duplication
 
