@@ -770,6 +770,10 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                 # Update custom nodes as well
                 echo "🔄 Updating custom nodes..."
                 if [ -d "custom_nodes" ]; then
+                    # Temporarily disable set -e and ERR trap to allow custom node update failures without script exit
+                    set +e
+                    disable_err_trap
+                    
                     updated_nodes=0
                     failed_nodes=0
                     
@@ -792,12 +796,20 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                         fi
                     done
                     
+                    # Re-enable set -e and ERR trap
+                    set -e
+                    enable_err_trap
+                    
                     echo "📊 Custom nodes update summary: $updated_nodes successful, $failed_nodes failed"
                 fi
                 
                 # Update ComfyUI Manager specifically if it exists
                 if [ -d "custom_nodes/comfyui-manager" ]; then
                     echo "🔧 Updating ComfyUI Manager..."
+                    # Temporarily disable set -e and ERR trap to allow ComfyUI Manager update failures without script exit
+                    set +e
+                    disable_err_trap
+                    
                     cd "custom_nodes/comfyui-manager"
                     if git fetch --all &>/dev/null && git reset --hard origin/HEAD &>/dev/null; then
                         echo "✅ ComfyUI Manager updated successfully"
@@ -805,6 +817,10 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                         echo "⚠️  ComfyUI Manager update had issues"
                     fi
                     cd - > /dev/null
+                    
+                    # Re-enable set -e and ERR trap
+                    set -e
+                    enable_err_trap
                 fi
                 
                 echo "🔄 ComfyUI and custom nodes updated successfully!"
@@ -1283,8 +1299,17 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     }
     
     # Execute custom node updates
+    # Temporarily disable set -e and ERR trap to allow custom node update failures without script exit
+    set +e
+    disable_err_trap
+    
     update_custom_nodes || log_error "Custom nodes update had issues (continuing)"
     custom_nodes_status=$?
+    
+    # Re-enable set -e and ERR trap
+    set -e
+    enable_err_trap
+    
     if [[ $custom_nodes_status -eq 0 ]]; then
         echo "✅ Custom nodes update completed successfully."
     else
