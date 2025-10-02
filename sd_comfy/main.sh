@@ -67,6 +67,35 @@ setup_logging
 echo "Starting main.sh operations at $(date)"
 
 #######################################
+# STEP 0: PYTHON 3.10 COMPREHENSIVE SETUP
+#######################################
+echo ""
+echo "=================================================="
+echo "        STEP 0: PYTHON 3.10 COMPREHENSIVE SETUP"
+echo "=================================================="
+echo ""
+
+# Check Python 3.10 is working and set it as default
+PYTHON_EXECUTABLE="/storage/python_versions/python3.10/bin/python3.10"
+if [ -x "$PYTHON_EXECUTABLE" ] && "$PYTHON_EXECUTABLE" -c "import _bz2, ssl, sqlite3" 2>/dev/null; then
+    log "✅ Python 3.10 is ready"
+    
+    # Create symlinks to use Python 3.10 as default
+    log "🔗 Setting Python 3.10 as default..."
+    ln -sf "$PYTHON_EXECUTABLE" /usr/local/bin/python3.10
+    ln -sf "$PYTHON_EXECUTABLE" /usr/local/bin/python3
+    
+    # Update PATH to prioritize our Python 3.10
+    export PATH="/storage/python_versions/python3.10/bin:$PATH"
+    
+    log "✅ Python 3.10 is now the default Python"
+    log "📍 Python version: $($PYTHON_EXECUTABLE --version)"
+else
+    log_error "❌ Python 3.10 not working - please install it first"
+    exit 1
+fi
+
+#######################################
 # STEP 1: INITIAL SETUP AND LOGGING
 #######################################
 echo ""
@@ -851,11 +880,13 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                  "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO" \
                  "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
 
-    # Virtual environment setup
+    # Virtual environment setup using storage Python 3.10
     rm -rf $VENV_DIR/sd_comfy-env
-    python3.10 -m venv $VENV_DIR/sd_comfy-env
+    "$PYTHON_EXECUTABLE" -m venv $VENV_DIR/sd_comfy-env
     source $VENV_DIR/sd_comfy-env/bin/activate
     echo "Virtual environment activated: $VENV_DIR/sd_comfy-env"
+    echo "Using Python: $(which python)"
+    echo "Python version: $(python --version)"
 
     # System dependencies
     echo "Installing essential system dependencies..."
@@ -1184,7 +1215,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         log "🔄 Installing Nunchaku wheel from GitHub releases..."
         log "🔧 Command: pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-tech/nunchaku/releases/download/v1.0.1/nunchaku-1.0.1+torch2.8-cp310-cp310-linux_x86_64.whl"
         
-        if pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-tech/nunchaku/releases/download/v1.0.1dev20250930/nunchaku-1.0.1.dev20250930+torch2.8-cp310-cp310-linux_x86_64.whl; then
+        if pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-tech/nunchaku/releases/download/v1.0.1/nunchaku-1.0.1+torch2.8-cp310-cp310-linux_x86_64.whl; then
             log "✅ Nunchaku wheel installed successfully"
             if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} imported successfully')" 2>/dev/null; then
                 log "✅ Nunchaku installation verified"
