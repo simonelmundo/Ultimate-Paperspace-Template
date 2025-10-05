@@ -2059,6 +2059,12 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   echo "This is expected with the current package versions and can be safely ignored."
   PYTHONUNBUFFERED=1 service_loop "python main.py \
     --port $SD_COMFY_PORT \
+    --bf16-vae 
+    --fp16-unet 
+    --cache-lru 5 
+    --reserve-vram 0.5 
+    --fast 
+    --enable-compress-response-body 
    " > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
   
