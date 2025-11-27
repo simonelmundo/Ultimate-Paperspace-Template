@@ -2057,16 +2057,16 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Launch ComfyUI with A4000-optimized parameters using SageAttention
   echo "NOTE: A pip dependency warning regarding xformers and torch versions may appear below."
   echo "This is expected with the current package versions and can be safely ignored."
-  PYTHONUNBUFFERED=1 service_loop "python main.py \
+  COMFYUI_CMD="python main.py \
     --port $SD_COMFY_PORT \
-    --bf16-vae 
-    --fp16-unet 
-    --cache-lru 5 
-    --reserve-vram 0.5 
-    --enable-compress-response-body
-    --use-sage-attention 
-    --cuda-malloc 
-   " > $LOG_DIR/sd_comfy.log 2>&1 &
+    --bf16-vae \
+    --fp16-unet \
+    --cache-lru 5 \
+    --reserve-vram 0.5 \
+    --enable-compress-response-body \
+    --use-sage-attention \
+    --cuda-malloc"
+  PYTHONUNBUFFERED=1 service_loop "$COMFYUI_CMD" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
   
   # Wait a moment for ComfyUI to start
