@@ -2140,11 +2140,9 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   COMFYUI_CMD="python main.py \
     --port $SD_COMFY_PORT \
     --bf16-vae \
-    --fp16-unet \
     --cache-lru 5 \
     --reserve-vram 0.5 \
     --enable-compress-response-body \
-    --use-sage-attention \
     --cuda-malloc"
   PYTHONUNBUFFERED=1 service_loop "$COMFYUI_CMD" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
