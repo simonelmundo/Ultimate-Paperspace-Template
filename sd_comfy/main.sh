@@ -2063,8 +2063,9 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     --fp16-unet 
     --cache-lru 5 
     --reserve-vram 0.5 
-    --fast 
-    --enable-compress-response-body 
+    --enable-compress-response-body
+    --use-sage-attention 
+    --cuda-malloc 
    " > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
   
