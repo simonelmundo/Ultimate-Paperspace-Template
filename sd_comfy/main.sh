@@ -2020,6 +2020,86 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   echo "             STEP 10: START COMFYUI"
   echo "=================================================="
   echo ""
+  
+  # Kill any existing ComfyUI processes before starting
+  echo "🛑 Stopping any existing ComfyUI processes..."
+  log "Checking for existing ComfyUI processes..."
+  
+  # Function to kill ComfyUI processes
+  kill_existing_comfyui() {
+    local killed_any=false
+    
+    # Method 1: Kill using PID file if it exists
+    if [[ -f "/tmp/sd_comfy.pid" ]]; then
+      local pid=$(cat /tmp/sd_comfy.pid 2>/dev/null)
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        log "Killing process from PID file: $pid"
+        # Kill the process and all its children
+        pkill -P "$pid" 2>/dev/null || true
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        # Force kill if still running
+        kill -9 "$pid" 2>/dev/null || true
+        killed_any=true
+      fi
+      # Remove stale PID file
+      rm -f /tmp/sd_comfy.pid
+    fi
+    
+    # Method 2: Kill all Python processes running ComfyUI on the port
+    local comfyui_pids=$(pgrep -f "python.*main\.py.*--port.*${SD_COMFY_PORT:-7005}" 2>/dev/null || true)
+    if [[ -n "$comfyui_pids" ]]; then
+      log "Found ComfyUI Python processes: $comfyui_pids"
+      for pid in $comfyui_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+          log "Killing ComfyUI Python process: $pid"
+          kill -TERM "$pid" 2>/dev/null || true
+          killed_any=true
+        fi
+      done
+      sleep 1
+      # Force kill any remaining
+      for pid in $comfyui_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+          log "Force killing ComfyUI Python process: $pid"
+          kill -9 "$pid" 2>/dev/null || true
+        fi
+      done
+    fi
+    
+    # Method 3: Kill processes using the port (fallback)
+    if command -v lsof &>/dev/null; then
+      local port_pids=$(lsof -ti:${SD_COMFY_PORT:-7005} 2>/dev/null || true)
+      if [[ -n "$port_pids" ]]; then
+        log "Found processes using port ${SD_COMFY_PORT:-7005}: $port_pids"
+        for pid in $port_pids; do
+          if kill -0 "$pid" 2>/dev/null; then
+            log "Killing process using port: $pid"
+            kill -TERM "$pid" 2>/dev/null || true
+            killed_any=true
+          fi
+        done
+        sleep 1
+        # Force kill any remaining
+        for pid in $port_pids; do
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+        done
+      fi
+    fi
+    
+    if [[ "$killed_any" == "true" ]]; then
+      log "✅ Existing ComfyUI processes stopped"
+      sleep 2  # Give processes time to fully terminate
+    else
+      log "No existing ComfyUI processes found"
+    fi
+  }
+  
+  # Execute the cleanup
+  kill_existing_comfyui
+  
   echo "### Starting Stable Diffusion Comfy ###"
   log "Starting Stable Diffusion Comfy"
   cd "$REPO_DIR"
@@ -2057,7 +2137,7 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Launch ComfyUI with A4000-optimized parameters using SageAttention
   echo "NOTE: A pip dependency warning regarding xformers and torch versions may appear below."
   echo "This is expected with the current package versions and can be safely ignored."
-  PYTHONUNBUFFERED=1 service_loop "python main.py \
+  COMFYUI_CMD="python main.py \
     --port $SD_COMFY_PORT \
     --bf16-vae \
     --fp16-unet \
@@ -2065,8 +2145,8 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     --reserve-vram 0.5 \
     --enable-compress-response-body \
     --use-sage-attention \
-    --cuda-malloc
-   " > $LOG_DIR/sd_comfy.log 2>&1 &
+    --cuda-malloc"
+  PYTHONUNBUFFERED=1 service_loop "$COMFYUI_CMD" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
   
   # Wait a moment for ComfyUI to start
