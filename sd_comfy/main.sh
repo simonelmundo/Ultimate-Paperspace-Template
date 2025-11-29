@@ -329,7 +329,7 @@ install_critical_packages() {
         "insightface" "opencv-python" "opencv-contrib-python" "facexlib" "onnxruntime" "timm" 
         "segment-anything" "scikit-image" "piexif" "transformers" "opencv-python-headless" 
         "scipy>=1.11.4" "numpy" "dill" "matplotlib" "oss2" "gguf" "diffusers" 
-        "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate"
+        "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate" "pyOpenSSL"
     )
     
     local installed_count=0
