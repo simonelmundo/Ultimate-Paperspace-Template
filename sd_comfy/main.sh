@@ -2137,13 +2137,37 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Launch ComfyUI with A4000-optimized parameters using SageAttention
   echo "NOTE: A pip dependency warning regarding xformers and torch versions may appear below."
   echo "This is expected with the current package versions and can be safely ignored."
+  
+  # Debug: Check if custom nodes should be disabled (set DISABLE_CUSTOM_NODES=1 to disable)
+  CUSTOM_NODES_FLAG=""
+  if [[ -n "${DISABLE_CUSTOM_NODES}" ]]; then
+    CUSTOM_NODES_FLAG="--disable-all-custom-nodes"
+    echo "⚠️  Custom nodes DISABLED for debugging"
+  fi
+  
+  
+  # Frontend version - hardcoded to 1.25.10 for reverse proxy compatibility
+  # Override with USE_LEGACY_FRONTEND=1 if needed
+  FRONTEND_FLAG="--front-end-version Comfy-Org/ComfyUI_frontend@1.25.10"
+  echo "📦 Using frontend version: 1.25.10"
+  
+  if [[ -n "${USE_LEGACY_FRONTEND}" ]]; then
+    FRONTEND_FLAG="--front-end-version Comfy-Org/ComfyUI_legacy_frontend@latest"
+    echo "⚠️  Overriding to LEGACY frontend"
+  fi
+  
   COMFYUI_CMD="python main.py \
     --port $SD_COMFY_PORT \
+    --dont-print-server \
     --bf16-vae \
     --cache-lru 5 \
     --reserve-vram 0.5 \
     --enable-compress-response-body \
-    --cuda-malloc"
+    --cuda-malloc \
+    --preview-method latent2rgb \
+    --disable-api-nodes \
+    $CUSTOM_NODES_FLAG \
+    $FRONTEND_FLAG"
   PYTHONUNBUFFERED=1 service_loop "$COMFYUI_CMD" > $LOG_DIR/sd_comfy.log 2>&1 &
   echo $! > /tmp/sd_comfy.pid
   
