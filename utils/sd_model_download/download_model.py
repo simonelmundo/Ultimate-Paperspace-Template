@@ -110,38 +110,45 @@ def prepare_folder(name):
     os.makedirs(f"{model_storage_dir}/{name}",exist_ok=True)
     os.chdir(f"{model_storage_dir}/{name}")  
 
-prepare_folder("sd")
-model_list = os.environ.get('MODEL_LIST', "").split(',')
-for uri in model_list:
-    if uri != '':
-        downlaod_model(uri)
-
-prepare_folder("lora")
-lora_list = os.environ.get('LORA_LIST', "").split(',')
-for uri in lora_list:
-    if uri != '':
-        downlaod_model(uri)
-
-prepare_folder("controlnet")
-controlnet_list = os.environ.get('CONTROLNET_LIST', "").split(',')
-for uri in controlnet_list:
-    if uri != '':
-        downlaod_model(uri)
-
+# Download order: VAE -> ControlNet -> Upscaler -> LoRA -> SD -> Embedding
+# VAE first (needed for image encoding/decoding)
 prepare_folder("vae")
 vae_list = os.environ.get('VAE_LIST', "").split(',')
 for uri in vae_list:
     if uri != '':
         downlaod_model(uri)
 
-prepare_folder("embedding") 
-embedding_list = os.environ.get('EMBEDDING_LIST', "").split(',')
-for uri in embedding_list:
+# ControlNet second (needed for control features)
+prepare_folder("controlnet")
+controlnet_list = os.environ.get('CONTROLNET_LIST', "").split(',')
+for uri in controlnet_list:
     if uri != '':
         downlaod_model(uri)
 
+# Upscaler third (needed for image upscaling)
 prepare_folder("upscaler") 
 upscaler_list = os.environ.get('UPSCALER_LIST', "").split(',')
 for uri in upscaler_list:
+    if uri != '':
+        downlaod_model(uri)
+
+# LoRA fourth (needed for model fine-tuning)
+prepare_folder("lora")
+lora_list = os.environ.get('LORA_LIST', "").split(',')
+for uri in lora_list:
+    if uri != '':
+        downlaod_model(uri)
+
+# SD models fifth (main stable diffusion models)
+prepare_folder("sd")
+model_list = os.environ.get('MODEL_LIST', "").split(',')
+for uri in model_list:
+    if uri != '':
+        downlaod_model(uri)
+
+# Embedding last (text embeddings)
+prepare_folder("embedding") 
+embedding_list = os.environ.get('EMBEDDING_LIST', "").split(',')
+for uri in embedding_list:
     if uri != '':
         downlaod_model(uri)
