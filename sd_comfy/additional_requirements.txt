@@ -43,3 +43,4 @@ flet==0.23.2
 -r /storage/stable-diffusion-comfy/custom_nodes/comfy-image-saver/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-GGUF/requirements.txt
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-inspyrenet-rembg/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/ComfyUI-Upscaler-Tensorrt/requirements.txt
