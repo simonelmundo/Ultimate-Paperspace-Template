@@ -3,7 +3,41 @@ set -e
 
 current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
-source .env
+
+# Source parent .env and helper.sh first
+source $current_dir/../.env
+source $current_dir/../utils/helper.sh
+
+# Hardcode critical textgen variables to avoid .env syntax errors
+export TEXTGEN_PORT="${TEXTGEN_PORT:-7009}"
+export GRADIO_ROOT_PATH="/textgen"
+export MODEL_DIR="${TEXTGEN_MODEL_DIR:-$DATA_DIR/llm-models}"
+export REPO_DIR="${TEXTGEN_REPO_DIR:-$ROOT_REPO_DIR/text-generation-webui}"
+export LINK_MODEL_TO="${TEXTGEN_LINK_MODEL_TO:-$REPO_DIR/models}"
+export TEXTGEN_OPENAI_API_PORT="${TEXTGEN_OPENAI_API_PORT:-7013}"
+export EXPOSE_PORTS="$EXPOSE_PORTS:$TEXTGEN_PORT:$TEXTGEN_OPENAI_API_PORT"
+export PORT_MAPPING="$PORT_MAPPING:textgen:textgen_openai_api"
+export REQUIRED_ENV="${REQUIRED_ENV:-}"
+
+# Try to source local .env for any additional overrides (ignore errors)
+source .env 2>/dev/null || true
+
+# Set up CUDA environment (reuse ComfyUI's setup if available, otherwise set it)
+if [[ -z "$CUDA_HOME" ]]; then
+    # If ComfyUI hasn't set it up yet, set the same CUDA environment
+    export CUDA_HOME=/usr/local/cuda-12.8
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    export FORCE_CUDA=1
+    export CUDA_VISIBLE_DEVICES=0
+    export TORCH_CUDA_ARCH_LIST="8.6"
+    export TORCH_CUDNN_V8_API_ENABLED=1
+fi
+
+# Apply VRAM optimization (same as ComfyUI)
+export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
+export CUDA_LAUNCH_BLOCKING=0
+export CUDA_DEVICE_MAX_CONNECTIONS=32
 
 # Set up a trap to call the error_exit function on ERR signal
 trap 'error_exit "### ERROR ###"' ERR
@@ -22,6 +56,14 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
     UPDATE_REPO=$TEXTGEN_UPDATE_REPO \
     UPDATE_REPO_COMMIT=$TEXTGEN_UPDATE_REPO_COMMIT \
     prepare_repo
+    
+    # Verify repo was cloned successfully
+    if [[ ! -d "$REPO_DIR" ]] || [[ ! -d "$REPO_DIR/.git" ]]; then
+        log "ERROR: Repository not found at $REPO_DIR"
+        log "prepare_repo may have failed"
+        error_exit "Repository setup failed"
+    fi
+    
     rm -rf $VENV_DIR/textgen-env
     
     
@@ -33,8 +75,40 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
     pip install --upgrade wheel setuptools
     
     cd $REPO_DIR
+    
+    # text-generation-webui uses a requirements folder, not a single requirements.txt
+    # Check for requirements files in the requirements folder
+    if [[ -d "requirements" ]]; then
+        # Look for the main requirements file (usually requirements.txt in the requirements folder)
+        if [[ -f "requirements/requirements.txt" ]]; then
+            REQ_FILE="requirements/requirements.txt"
+        elif [[ -f "requirements/requirements_cuda.txt" ]]; then
+            REQ_FILE="requirements/requirements_cuda.txt"
+        else
+            # Find any requirements file in the requirements folder
+            REQ_FILE=$(find requirements -name "requirements*.txt" | head -1)
+            if [[ -z "$REQ_FILE" ]]; then
+                log "WARNING: No requirements file found in requirements folder"
+                log "Repository contents:"
+                ls -la "$REPO_DIR" | head -20
+                log "Requirements folder contents:"
+                ls -la "$REPO_DIR/requirements" 2>/dev/null || log "requirements folder not accessible"
+                error_exit "No requirements file found"
+            fi
+        fi
+        log "Found requirements file: $REQ_FILE"
+    elif [[ -f "requirements.txt" ]]; then
+        REQ_FILE="requirements.txt"
+    else
+        log "ERROR: No requirements file found in $REPO_DIR"
+        log "Current directory: $(pwd)"
+        log "Repository contents:"
+        ls -la "$REPO_DIR" | head -20
+        error_exit "No requirements file found"
+    fi
+    
     pip install torch torchvision torchaudio
-    pip install -r requirements.txt
+    pip install -r "$REQ_FILE"
 
     mkdir -p repositories
     cd repositories
