@@ -83,5 +83,8 @@ do
     continue
   fi
   echo "✅ Starting $script..."
-  bash control.sh reload
+  # Run control.sh and capture all output (both stdout and stderr)
+  # This ensures we wait for the script to complete before moving to the next one
+  bash control.sh reload 2>&1
+  echo "✅ Finished $script"
 done
