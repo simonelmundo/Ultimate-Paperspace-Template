@@ -52,6 +52,7 @@ cp /$WORKING_DIR/nginx/nginx.conf /etc/nginx/nginx.conf
 # Always set RUN_SCRIPT to ensure textgen runs before sd_comfy
 # Order: command,image_browser,rclone,textgen,sd_comfy
 export RUN_SCRIPT="command,image_browser,rclone,textgen,sd_comfy"
+echo "RUN_SCRIPT set to: $RUN_SCRIPT"
 
 run_script="$RUN_SCRIPT"
 
@@ -66,18 +67,21 @@ fi
 
 # Loop through each script and execute the corresponding case
 echo "Starting script(s)"
+echo "RUN_SCRIPT contains: $RUN_SCRIPT"
 for script in "${scripts[@]}"
 do
+  echo "Processing script: $script"
   cd $SCRIPT_ROOT_DIR
   if [[ ! -d $script ]]; then
-    echo "Script folder $script not found, skipping..."
+    echo "⚠️ Script folder $script not found, skipping..."
     continue
   fi
   cd $script
   source_env_file
   if ! check_required_env_vars; then
-    echo "One or more required environment variables are missing."
+    echo "⚠️ One or more required environment variables are missing for $script, skipping..."
     continue
   fi
+  echo "✅ Starting $script..."
   bash control.sh reload
 done
