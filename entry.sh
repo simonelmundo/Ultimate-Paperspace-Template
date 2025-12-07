@@ -49,7 +49,16 @@ cp /$WORKING_DIR/nginx/default /etc/nginx/sites-available/default
 cp /$WORKING_DIR/nginx/nginx.conf /etc/nginx/nginx.conf
 /usr/sbin/nginx
 
-# Read the RUN_SCRIPT environment variable
+# Read the RUN_SCRIPT environment variable, or use hardcoded default
+# Default order: command,image_browser,rclone,textgen,sd_comfy
+# (textgen runs before sd_comfy to set up environment first)
+if [[ -z "$RUN_SCRIPT" ]]; then
+  export RUN_SCRIPT="command,image_browser,rclone,textgen,sd_comfy"
+  echo "Using hardcoded RUN_SCRIPT: $RUN_SCRIPT"
+else
+  echo "Using RUN_SCRIPT from environment: $RUN_SCRIPT"
+fi
+
 run_script="$RUN_SCRIPT"
 
 # Separate the variable by commas
