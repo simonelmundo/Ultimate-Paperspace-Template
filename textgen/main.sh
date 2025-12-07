@@ -19,8 +19,27 @@ export EXPOSE_PORTS="$EXPOSE_PORTS:$TEXTGEN_PORT:$TEXTGEN_OPENAI_API_PORT"
 export PORT_MAPPING="$PORT_MAPPING:textgen:textgen_openai_api"
 export REQUIRED_ENV="${REQUIRED_ENV:-}"
 
-# Try to source local .env for any additional overrides (ignore errors)
-source .env 2>/dev/null || true
+# Fix broken .env syntax by regenerating from template if needed
+if [[ -f .env ]]; then
+    # Check if .env has broken syntax (space after = sign)
+    if grep -qE 'export [A-Z_]+= [^"]' .env 2>/dev/null; then
+        log "Detected broken .env syntax - regenerating from template.yaml..."
+        if [[ -f template.yaml ]] && command -v python3 &> /dev/null; then
+            # Regenerate .env from the fixed template
+            python3 ../template/template.py --yaml_file template.yaml --output_path ./ 2>&1 | while read line; do
+                log "$line"
+            done
+            log ".env file regenerated from template.yaml"
+        else
+            # Fallback: fix the broken syntax directly
+            log "Template regeneration not available, fixing syntax directly..."
+            sed -i -E 's/export ([A-Z_]+)= ([^"'\''][^ ]*)/export \1="\2"/' .env
+            log ".env file fixed (regeneration recommended)"
+        fi
+    fi
+    # Source the .env file
+    source .env
+fi
 
 # Set up CUDA environment (reuse ComfyUI's setup if available, otherwise set it)
 if [[ -z "$CUDA_HOME" ]]; then
