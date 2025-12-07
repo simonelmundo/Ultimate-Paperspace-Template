@@ -45,7 +45,9 @@ trap 'error_exit "### ERROR ###"' ERR
 
 echo "### Setting up Text generation Webui ###"
 log "Setting up Text generation Webui"
+echo "Checking if setup is needed: REINSTALL_TEXTGEN=$REINSTALL_TEXTGEN, prepared file exists: $([ -f /tmp/textgen.prepared ] && echo 'yes' || echo 'no')"
 if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
+  log "Running full setup (this may take several minutes)..."
 
     # Remove stale symlink to avoid pull conflicts
     rm -rf $LINK_MODEL_TO
@@ -111,13 +113,14 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
     pip install -r "$REQ_FILE"
 
     mkdir -p repositories
-    cd repositories
     TARGET_REPO_DIR=$REPO_DIR/repositories/GPTQ-for-LLaMa \
     TARGET_REPO_BRANCH="cuda" \
     TARGET_REPO_URL="https://github.com/qwopqwop200/GPTQ-for-LLaMa.git" \
     prepare_repo
 
-    cd GPTQ-for-LLaMa
+    # prepare_repo changes to TARGET_REPO_DIR, so we're already in the right directory
+    # But to be safe, explicitly cd to the full path
+    cd $REPO_DIR/repositories/GPTQ-for-LLaMa
     python setup_cuda.py install
 
     pip uninstall -y llama-cpp-python
@@ -128,10 +131,10 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
     pip install xformers
     
     touch /tmp/textgen.prepared
+    log "Setup completed successfully. Marker file created: /tmp/textgen.prepared"
 else
-    
+    log "Setup already completed, skipping installation steps"
     source $VENV_DIR/textgen-env/bin/activate
-    
 fi
 log "Finished Preparing Environment for Text generation Webui"
 
@@ -181,6 +184,9 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     PYTHONUNBUFFERED=1 service_loop "python server.py  $share_args" > $LOG_DIR/textgen.log 2>&1 &
   fi
   echo $! > /tmp/textgen.pid
+  log "Text generation Webui service started in background (PID: $(cat /tmp/textgen.pid))"
+  # Give the service a moment to start before continuing
+  sleep 2
 
   # undo the change for git pull to work
   if env | grep -q "PAPERSPACE"; then
