@@ -18,10 +18,16 @@ cd $current_dir
 source $current_dir/../.env
 source $current_dir/../utils/helper.sh
 
+# Ensure LOG_DIR is set (default to /tmp/log if not set)
+export LOG_DIR="${LOG_DIR:-/tmp/log}"
+mkdir -p "$LOG_DIR"
+
 # Set textgen-specific variables (no need for local .env - parent .env + defaults are enough)
 export TEXTGEN_PORT="${TEXTGEN_PORT:-7009}"
 export GRADIO_ROOT_PATH="/textgen"
-export MODEL_DIR="${TEXTGEN_MODEL_DIR:-$DATA_DIR/llm-models}"
+# Use the same LLM checkpoints directory as ComfyUI
+# ComfyUI uses: $DATA_DIR/stable-diffusion-models/llm_checkpoints
+export MODEL_DIR="${TEXTGEN_MODEL_DIR:-$DATA_DIR/stable-diffusion-models/llm_checkpoints}"
 export REPO_DIR="${TEXTGEN_REPO_DIR:-$ROOT_REPO_DIR/text-generation-webui}"
 export LINK_MODEL_TO="${TEXTGEN_LINK_MODEL_TO:-$REPO_DIR/models}"
 export TEXTGEN_OPENAI_API_PORT="${TEXTGEN_OPENAI_API_PORT:-7013}"
@@ -128,9 +134,18 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
     log "⏭️  Skipping PyTorch installation (already available in shared environment)"
     
     # Install only text-generation-webui specific requirements
+    # Use smart upgrade strategy to minimize downgrades of packages from ComfyUI
     log "📦 Installing text-generation-webui specific requirements..."
-    pip install -r "$REQ_FILE" || log "⚠️  Some packages failed to install, continuing..."
+    log "💡 Using 'only-if-needed' strategy to preserve ComfyUI's newer package versions"
+    
+    # --upgrade-strategy only-if-needed: Only upgrades if current version doesn't satisfy requirement
+    # This minimizes downgrades (e.g., won't downgrade pillow 11.3.0 if textgen wants 10.4.0)
+    # Note: Some packages may still be reinstalled if requirements.txt has exact version pins
+    pip install --upgrade-strategy only-if-needed -r "$REQ_FILE" || log "⚠️  Some packages failed to install, continuing..."
 
+    # Install GPTQ-for-LLaMa (optional - for GPTQ model quantization support)
+    # Note: This may fail with newer PyTorch versions, but textgen will work without it
+    log "📦 Installing GPTQ-for-LLaMa (optional quantization support)..."
     mkdir -p repositories
     TARGET_REPO_DIR=$REPO_DIR/repositories/GPTQ-for-LLaMa \
     TARGET_REPO_BRANCH="cuda" \
@@ -140,10 +155,27 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
     # prepare_repo changes to TARGET_REPO_DIR, so we're already in the right directory
     # But to be safe, explicitly cd to the full path
     cd $REPO_DIR/repositories/GPTQ-for-LLaMa
-    python setup_cuda.py install
+    log "⚠️  GPTQ-for-LLaMa may fail with PyTorch 2.8.0 (deprecated APIs) - this is optional"
+    python setup_cuda.py install || {
+        log "⚠️  GPTQ-for-LLaMa installation failed (likely PyTorch 2.8.0 incompatibility)"
+        log "💡 Textgen will work without GPTQ support - GPTQ models won't be available"
+        log "💡 You can use other quantization formats (GGUF, AWQ) instead"
+    }
 
-    pip uninstall -y llama-cpp-python
-    CMAKE_ARGS="-DLLAMA_CUBLAS=on" FORCE_CMAKE=1 pip install llama-cpp-python --no-cache-dir
+    # Install llama-cpp-python (for GGUF model support)
+    # Build from source to avoid GLIBC version issues with precompiled binaries
+    log "📦 Installing llama-cpp-python from source (for GGUF model support)..."
+    pip uninstall -y llama-cpp-python llama-cpp-python-cuda 2>/dev/null || true
+    
+    # Force build from source with CUDA support
+    # Use GGML_CUDA instead of deprecated LLAMA_CUBLAS for newer llama.cpp versions
+    # --no-binary llama-cpp-python forces building from source instead of using precompiled wheels
+    log "🔨 Building llama-cpp-python from source (this may take 5-10 minutes)..."
+    CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 pip install llama-cpp-python --no-cache-dir --no-binary llama-cpp-python || {
+        log "⚠️  llama-cpp-python installation failed (optional, continuing...)"
+        log "💡 GGUF models won't be available, but other formats will work"
+        log "💡 You can use Transformers/AWQ models instead of GGUF"
+    }
 
     # Install deepspeed if needed for advanced optimizations
     log "📦 Installing deepspeed (optional optimization)..."
@@ -162,27 +194,15 @@ fi
 log "Finished Preparing Environment for Text generation Webui"
 
 
-if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
-  echo "### Downloading Model for Text generation Webui ###"
-  log "Downloading Model for Text generation Webui"
-  # Prepare model dir and link it under the models folder inside the repo
-  mkdir -p $MODEL_DIR
-  rm -rf $LINK_MODEL_TO
-  ln -s $MODEL_DIR $LINK_MODEL_TO
-  if [[ ! -f $MODEL_DIR/config.yaml ]]; then 
-      current_dir_save=$(pwd) 
-      cd $REPO_DIR
-      commit=$(git rev-parse HEAD)
-      wget -q https://raw.githubusercontent.com/oobabooga/text-generation-webui/$commit/models/config.yaml -P $MODEL_DIR
-      cd $current_dir_save
-  fi
+# Skip model download - users can download models manually through the UI
+log "⏭️  Skipping automatic model download - download models manually through the textgen UI"
 
-
-  llm_model_download
-  log "Finished Downloading Models for Text generation Webui"
-else
-  log "Skipping Model Download for Text generation Webui"
-fi
+# Prepare model directory and create symlink so textgen can find models
+mkdir -p "$MODEL_DIR"
+rm -rf "$LINK_MODEL_TO"
+ln -s "$MODEL_DIR" "$LINK_MODEL_TO"
+log "📁 Model directory: $MODEL_DIR"
+log "🔗 Symlinked to: $LINK_MODEL_TO"
 
 if env | grep -q "PAPERSPACE"; then
   sed -i "s/server_port=shared.args.listen_port, inbrowser=shared.args.auto_launch, auth=auth)/server_port=shared.args.listen_port, inbrowser=shared.args.auto_launch, auth=auth, root_path='\\/textgen')/g" $REPO_DIR/server.py
@@ -192,20 +212,131 @@ fi
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo "### Starting Text generation Webui ###"
   log "Starting Text generation Webui"
+  
+  # Kill any existing textgen processes before starting
+  echo "🛑 Stopping any existing textgen processes..."
+  log "Checking for existing textgen processes..."
+  
+  # Function to kill textgen processes
+  kill_existing_textgen() {
+    local killed_any=false
+    
+    # Method 1: Kill using PID file if it exists
+    if [[ -f "/tmp/textgen.pid" ]]; then
+      local pid=$(cat /tmp/textgen.pid 2>/dev/null)
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        log "Killing process from PID file: $pid"
+        # Kill the process and all its children
+        pkill -P "$pid" 2>/dev/null || true
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        # Force kill if still running
+        kill -9 "$pid" 2>/dev/null || true
+        killed_any=true
+      fi
+      # Remove stale PID file
+      rm -f /tmp/textgen.pid
+    fi
+    
+    # Method 2: Kill all Python processes running textgen on the port
+    local textgen_pids=$(pgrep -f "python.*server\.py.*--listen-port.*${TEXTGEN_PORT:-7009}" 2>/dev/null || true)
+    if [[ -n "$textgen_pids" ]]; then
+      log "Found textgen Python processes: $textgen_pids"
+      for pid in $textgen_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+          log "Killing textgen Python process: $pid"
+          # Kill the process and its parent (service_loop)
+          local parent_pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+          kill -TERM "$pid" 2>/dev/null || true
+          if [[ -n "$parent_pid" ]] && kill -0 "$parent_pid" 2>/dev/null; then
+            kill -TERM "$parent_pid" 2>/dev/null || true
+          fi
+          killed_any=true
+        fi
+      done
+      sleep 1
+      # Force kill any remaining
+      for pid in $textgen_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+          log "Force killing textgen Python process: $pid"
+          kill -9 "$pid" 2>/dev/null || true
+        fi
+      done
+    fi
+    
+    # Method 2.5: Kill any service_loop processes running textgen commands
+    local service_loop_pids=$(pgrep -f "service_loop.*server\.py" 2>/dev/null || true)
+    if [[ -n "$service_loop_pids" ]]; then
+      log "Found service_loop processes running textgen: $service_loop_pids"
+      for pid in $service_loop_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+          log "Killing service_loop process: $pid"
+          pkill -P "$pid" 2>/dev/null || true
+          kill -TERM "$pid" 2>/dev/null || true
+          killed_any=true
+        fi
+      done
+      sleep 1
+      for pid in $service_loop_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -9 "$pid" 2>/dev/null || true
+        fi
+      done
+    fi
+    
+    # Method 3: Kill processes using the port (fallback)
+    if command -v lsof &>/dev/null; then
+      local port_pids=$(lsof -ti:${TEXTGEN_PORT:-7009} 2>/dev/null || true)
+      if [[ -n "$port_pids" ]]; then
+        log "Found processes using port ${TEXTGEN_PORT:-7009}: $port_pids"
+        for pid in $port_pids; do
+          if kill -0 "$pid" 2>/dev/null; then
+            log "Killing process using port: $pid"
+            kill -TERM "$pid" 2>/dev/null || true
+            killed_any=true
+          fi
+        done
+        sleep 1
+        # Force kill any remaining
+        for pid in $port_pids; do
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+        done
+      fi
+    fi
+    
+    if [[ "$killed_any" == "true" ]]; then
+      log "✅ Existing textgen processes stopped"
+      sleep 2  # Give processes time to fully terminate
+    else
+      log "No existing textgen processes found"
+    fi
+  }
+  
+  # Execute the cleanup
+  kill_existing_textgen
+  
   cd $REPO_DIR
-  share_args="--chat --listen-port $TEXTGEN_PORT --xformers ${EXTRA_TEXTGEN_ARGS}"
-  if [ -v TEXTGEN_ENABLE_OPENAI_API ] && [ ! -z "$TEXTGEN_ENABLE_OPENAI_API" ];then
-    loader_arg=""
-    if echo "$TEXTGEN_OPENAI_MODEL" | grep -q "GPTQ"; then
-      loader_arg="--loader exllama"
-    fi
-    if echo "$TEXTGEN_OPENAI_MODEL" | grep -q "LongChat"; then
-      loader_arg+=" --max_seq_len 8192 --compress_pos_emb 4"
-    fi
-    PYTHONUNBUFFERED=1 OPENEDAI_PORT=7013 service_loop "python server.py --model $TEXTGEN_OPENAI_MODEL $loader_arg --extensions openai $share_args" > $LOG_DIR/textgen.log 2>&1 &
-  else
-    PYTHONUNBUFFERED=1 service_loop "python server.py  $share_args" > $LOG_DIR/textgen.log 2>&1 &
+  
+  # Rotate textgen log file instead of deleting it
+  if [[ -f "$LOG_DIR/textgen.log" ]]; then
+    # Create timestamp for old log
+    timestamp=$(date +"%Y%m%d_%H%M%S")
+    mv "$LOG_DIR/textgen.log" "$LOG_DIR/textgen_${timestamp}.log"
+    echo "Previous textgen log archived as: textgen_${timestamp}.log"
+    
+    # Keep only the last 5 rotated logs to save space
+    ls -t "$LOG_DIR"/textgen_*.log 2>/dev/null | tail -n +6 | xargs -r rm
   fi
+  
+  # Default arguments for text-generation-webui
+  # --listen: Make server accessible on network (not just localhost)
+  # --listen-port: Port to listen on (default: 7009)
+  default_args="--listen --listen-port $TEXTGEN_PORT"
+  
+  log "🚀 Starting textgen with command: python server.py $default_args"
+  PYTHONUNBUFFERED=1 service_loop "python server.py $default_args" > $LOG_DIR/textgen.log 2>&1 &
   echo $! > /tmp/textgen.pid
   log "Text generation Webui service started in background (PID: $(cat /tmp/textgen.pid))"
   # Give the service a moment to start before continuing
