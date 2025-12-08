@@ -2221,6 +2221,18 @@ if [[ -n "${CF_TOKEN}" ]]; then
   bash $current_dir/../cloudflare_reload.sh
 fi
 
+# Automatically trigger textgen setup after ComfyUI completes
+# (Only if not in INSTALL_ONLY mode and textgen script exists)
+if [[ -z "$INSTALL_ONLY" ]] && [[ -f "$current_dir/../textgen/main.sh" ]]; then
+  echo ""
+  echo "=================================================="
+  echo "        AUTO-STARTING TEXT GENERATION SETUP"
+  echo "=================================================="
+  echo ""
+  log "🚀 ComfyUI setup complete. Starting textgen setup..."
+  bash $current_dir/../textgen/main.sh
+fi
+
 echo ""
 echo "=================================================="
 echo "           SCRIPT EXECUTION COMPLETE!"
