@@ -51,7 +51,7 @@ cp /$WORKING_DIR/nginx/nginx.conf /etc/nginx/nginx.conf
 
 # Always set RUN_SCRIPT to ensure sd_comfy runs before textgen (textgen uses ComfyUI's environment)
 # Order: command,image_browser,rclone,sd_comfy,textgen
-export RUN_SCRIPT="command,image_browser,rclone,sd_comfy,textgen"
+export RUN_SCRIPT="command,image_browser,rclone,sd_comfy"
 echo "RUN_SCRIPT set to: $RUN_SCRIPT"
 
 run_script="$RUN_SCRIPT"
