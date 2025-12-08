@@ -1,6 +1,16 @@
 #!/bin/bash
 set -e
 
+# ============================================================================
+# Text Generation WebUI Setup Script
+# ============================================================================
+# This script sets up oobabooga's text-generation-webui
+# NOTE: This script REUSES the ComfyUI environment to save time and space
+#       - PyTorch, CUDA, and most dependencies are already installed
+#       - Only text-gen specific packages will be installed
+#       - Run ComfyUI setup first (sd_comfy/main.sh) before running this
+# ============================================================================
+
 current_dir=$(dirname "$(realpath "$0")")
 cd $current_dir
 
@@ -8,7 +18,7 @@ cd $current_dir
 source $current_dir/../.env
 source $current_dir/../utils/helper.sh
 
-# Hardcode critical textgen variables to avoid .env syntax errors
+# Set textgen-specific variables (no need for local .env - parent .env + defaults are enough)
 export TEXTGEN_PORT="${TEXTGEN_PORT:-7009}"
 export GRADIO_ROOT_PATH="/textgen"
 export MODEL_DIR="${TEXTGEN_MODEL_DIR:-$DATA_DIR/llm-models}"
@@ -18,28 +28,6 @@ export TEXTGEN_OPENAI_API_PORT="${TEXTGEN_OPENAI_API_PORT:-7013}"
 export EXPOSE_PORTS="$EXPOSE_PORTS:$TEXTGEN_PORT:$TEXTGEN_OPENAI_API_PORT"
 export PORT_MAPPING="$PORT_MAPPING:textgen:textgen_openai_api"
 export REQUIRED_ENV="${REQUIRED_ENV:-}"
-
-# Fix broken .env syntax by regenerating from template if needed
-if [[ -f .env ]]; then
-    # Check if .env has broken syntax (space after = sign)
-    if grep -qE 'export [A-Z_]+= [^"]' .env 2>/dev/null; then
-        log "Detected broken .env syntax - regenerating from template.yaml..."
-        if [[ -f template.yaml ]] && command -v python3 &> /dev/null; then
-            # Regenerate .env from the fixed template
-            python3 ../template/template.py --yaml_file template.yaml --output_path ./ 2>&1 | while read line; do
-                log "$line"
-            done
-            log ".env file regenerated from template.yaml"
-        else
-            # Fallback: fix the broken syntax directly
-            log "Template regeneration not available, fixing syntax directly..."
-            sed -i -E 's/export ([A-Z_]+)= ([^"'\''][^ ]*)/export \1="\2"/' .env
-            log ".env file fixed (regeneration recommended)"
-        fi
-    fi
-    # Source the .env file
-    source .env
-fi
 
 # Set up CUDA environment (reuse ComfyUI's setup if available, otherwise set it)
 if [[ -z "$CUDA_HOME" ]]; then
@@ -65,6 +53,17 @@ trap 'error_exit "### ERROR ###"' ERR
 echo "### Setting up Text generation Webui ###"
 log "Setting up Text generation Webui"
 echo "Checking if setup is needed: REINSTALL_TEXTGEN=$REINSTALL_TEXTGEN, prepared file exists: $([ -f /tmp/textgen.prepared ] && echo 'yes' || echo 'no')"
+
+# Check if ComfyUI environment exists
+COMFY_VENV="$VENV_DIR/sd_comfy-env"
+if [[ ! -d "$COMFY_VENV" ]]; then
+    log "ERROR: ComfyUI environment not found at $COMFY_VENV"
+    log "Please run ComfyUI setup first (sd_comfy/main.sh) to create the shared environment"
+    error_exit "ComfyUI environment required"
+fi
+
+log "✅ Using shared ComfyUI environment at $COMFY_VENV"
+
 if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
   log "Running full setup (this may take several minutes)..."
 
@@ -85,15 +84,12 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
         error_exit "Repository setup failed"
     fi
     
-    rm -rf $VENV_DIR/textgen-env
+    # Use ComfyUI's environment instead of creating a new one
+    log "🔗 Activating shared ComfyUI environment (reusing PyTorch, CUDA, and dependencies)..."
+    source $COMFY_VENV/bin/activate
     
-    
-    python3.10 -m venv $VENV_DIR/textgen-env
-    
-    source $VENV_DIR/textgen-env/bin/activate
-
-    pip install pip==24.0
-    pip install --upgrade wheel setuptools
+    log "Python version: $(python --version)"
+    log "PyTorch version: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo 'not yet installed')"
     
     cd $REPO_DIR
     
@@ -128,8 +124,12 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
         error_exit "No requirements file found"
     fi
     
-    pip install torch torchvision torchaudio
-    pip install -r "$REQ_FILE"
+    # Skip PyTorch installation - already in ComfyUI environment
+    log "⏭️  Skipping PyTorch installation (already available in shared environment)"
+    
+    # Install only text-generation-webui specific requirements
+    log "📦 Installing text-generation-webui specific requirements..."
+    pip install -r "$REQ_FILE" || log "⚠️  Some packages failed to install, continuing..."
 
     mkdir -p repositories
     TARGET_REPO_DIR=$REPO_DIR/repositories/GPTQ-for-LLaMa \
@@ -145,15 +145,19 @@ if [[ "$REINSTALL_TEXTGEN" || ! -f "/tmp/textgen.prepared" ]]; then
     pip uninstall -y llama-cpp-python
     CMAKE_ARGS="-DLLAMA_CUBLAS=on" FORCE_CMAKE=1 pip install llama-cpp-python --no-cache-dir
 
-    pip install deepspeed
+    # Install deepspeed if needed for advanced optimizations
+    log "📦 Installing deepspeed (optional optimization)..."
+    pip install deepspeed || log "⚠️  DeepSpeed installation failed (optional, continuing...)"
 
-    pip install xformers
+    # Skip xformers - already installed in ComfyUI environment
+    log "⏭️  Skipping xformers installation (already available in shared environment)"
     
     touch /tmp/textgen.prepared
     log "Setup completed successfully. Marker file created: /tmp/textgen.prepared"
 else
     log "Setup already completed, skipping installation steps"
-    source $VENV_DIR/textgen-env/bin/activate
+    log "🔗 Activating shared ComfyUI environment..."
+    source $COMFY_VENV/bin/activate
 fi
 log "Finished Preparing Environment for Text generation Webui"
 
