@@ -96,58 +96,6 @@ else
 fi
 
 #######################################
-# STEP 0.5: INSTALL AND START OLLAMA
-#######################################
-echo ""
-echo "=================================================="
-echo "        STEP 0.5: INSTALL AND START OLLAMA"
-echo "=================================================="
-echo ""
-
-# Start Ollama LLM API server (simple, no Gradio needed)
-# Uses existing /textgen/ nginx path on port 7009
-if [[ -z "$INSTALL_ONLY" ]]; then
-  # Install Ollama if not already installed
-  if ! command -v ollama &> /dev/null; then
-    log "📦 Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh || {
-      log "⚠️  Ollama installation failed, continuing..."
-      log "💡 You can install it manually: curl -fsSL https://ollama.com/install.sh | sh"
-    }
-  fi
-  
-  # Kill any existing Ollama processes
-  if [[ -f "/tmp/ollama.pid" ]]; then
-    pid=$(cat /tmp/ollama.pid 2>/dev/null)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      log "🛑 Stopping existing Ollama process (PID: $pid)..."
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 1
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f /tmp/ollama.pid
-  fi
-  pkill -f "ollama serve" 2>/dev/null || true
-  
-  # Start Ollama server on port 7009 (same as textgen was using)
-  log "🚀 Starting Ollama API server on port 7009..."
-  log "📡 API will be available at: http://localhost:7009/api/generate"
-  log "🌐 Accessible via: https://your-domain/textgen/api/generate"
-  
-  # Set OLLAMA_HOST to bind to all interfaces and use port 7009
-  export OLLAMA_HOST=0.0.0.0:7009
-  ollama serve > $LOG_DIR/ollama.log 2>&1 &
-  echo $! > /tmp/ollama.pid
-  sleep 3  # Give it time to start
-  
-  log "✅ Ollama API server started (PID: $(cat /tmp/ollama.pid))"
-  log "💡 To pull a model: ollama pull llama2"
-  log "💡 API endpoint: http://localhost:7009/api/generate"
-else
-  log "Skipping Ollama startup (INSTALL_ONLY mode)"
-fi
-
-#######################################
 # STEP 1: INITIAL SETUP AND LOGGING
 #######################################
 echo ""
@@ -203,6 +151,180 @@ setup_cuda_env() {
 log "🔧 Setting up CUDA environment..."
 setup_cuda_env
 log "✅ CUDA environment setup completed"
+
+#######################################
+# STEP 2.5: INSTALL AND START OLLAMA (AFTER CUDA)
+#######################################
+echo ""
+echo "=================================================="
+echo "     STEP 2.5: INSTALL AND START OLLAMA (AFTER CUDA)"
+echo "=================================================="
+echo ""
+
+# Function to check CUDA availability and GPU status
+check_cuda_for_ollama() {
+    log "🔍 Checking CUDA availability for Ollama..."
+    
+    # Check if nvcc is available
+    local cuda_available=false
+    local cuda_version="unknown"
+    local nvidia_gpu_available=false
+    local gpu_name="unknown"
+    
+    if command -v nvcc &>/dev/null; then
+        cuda_available=true
+        cuda_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
+        log "✅ CUDA detected: Version $cuda_version"
+        log "   NVCC path: $(which nvcc)"
+    else
+        log "⚠️  CUDA not detected (nvcc not found)"
+        log "   Ollama will run in CPU mode"
+    fi
+    
+    # Check for NVIDIA GPU
+    if command -v nvidia-smi &>/dev/null; then
+        local nvidia_smi_output
+        nvidia_smi_output=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "")
+        if [[ -n "$nvidia_smi_output" ]]; then
+            nvidia_gpu_available=true
+            gpu_name="$nvidia_smi_output"
+            log "✅ NVIDIA GPU detected: $gpu_name"
+            
+            # Get GPU memory info
+            local gpu_memory
+            gpu_memory=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "unknown")
+            if [[ "$gpu_memory" != "unknown" ]]; then
+                log "   GPU Memory: ${gpu_memory} MB"
+            fi
+        else
+            log "⚠️  nvidia-smi found but no GPU detected"
+        fi
+    else
+        log "⚠️  nvidia-smi not found - cannot detect GPU"
+    fi
+    
+    # Check CUDA environment variables
+    log "🔍 CUDA Environment Variables:"
+    log "   CUDA_HOME: ${CUDA_HOME:-not set}"
+    log "   LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-not set}"
+    
+    # Summary
+    echo ""
+    if [[ "$cuda_available" == "true" && "$nvidia_gpu_available" == "true" ]]; then
+        log "✅ CUDA and GPU detected - Ollama will use GPU acceleration"
+        return 0
+    elif [[ "$cuda_available" == "true" ]]; then
+        log "⚠️  CUDA detected but no GPU found - Ollama will use CPU"
+        return 1
+    else
+        log "⚠️  No CUDA detected - Ollama will run in CPU mode"
+        return 2
+    fi
+}
+
+# Start Ollama LLM API server (after CUDA setup)
+# Uses existing /textgen/ nginx path on port 7009
+if [[ -z "$INSTALL_ONLY" ]]; then
+  # Check CUDA status first
+  check_cuda_for_ollama
+  cuda_status=$?
+  
+  # Install Ollama if not already installed
+  if ! command -v ollama &> /dev/null; then
+    log "📦 Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh || {
+      log_error "⚠️  Ollama installation failed, continuing..."
+      log "💡 You can install it manually: curl -fsSL https://ollama.com/install.sh | sh"
+    }
+  else
+    ollama_version=$(ollama --version 2>/dev/null || echo "unknown")
+    log "✅ Ollama already installed: $ollama_version"
+  fi
+  
+  # Kill any existing Ollama processes
+  if [[ -f "/tmp/ollama.pid" ]]; then
+    pid=$(cat /tmp/ollama.pid 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      log "🛑 Stopping existing Ollama process (PID: $pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f /tmp/ollama.pid
+  fi
+  pkill -f "ollama serve" 2>/dev/null || true
+  
+  # Ensure CUDA environment is available for Ollama
+  setup_cuda_env
+  
+  # Start Ollama server on port 7009 (same as textgen was using)
+  log "🚀 Starting Ollama API server on port 7009..."
+  log "📡 API will be available at: http://localhost:7009/api/generate"
+  log "🌐 Accessible via: https://your-domain/textgen/api/generate"
+  
+  # Set OLLAMA_HOST to bind to all interfaces and use port 7009
+  export OLLAMA_HOST=0.0.0.0:7009
+  
+  # Start Ollama with CUDA environment
+  ollama serve > $LOG_DIR/ollama.log 2>&1 &
+  echo $! > /tmp/ollama.pid
+  sleep 5  # Give it more time to start and detect CUDA
+  
+  # Check if Ollama started successfully
+  if kill -0 $(cat /tmp/ollama.pid) 2>/dev/null; then
+    log "✅ Ollama API server started (PID: $(cat /tmp/ollama.pid))"
+    
+    # Check Ollama logs for CUDA/GPU detection
+    log "🔍 Checking Ollama startup logs for CUDA/GPU detection..."
+    sleep 2
+    if [[ -f "$LOG_DIR/ollama.log" ]]; then
+      # Look for GPU-related messages in Ollama logs
+      if grep -i "gpu\|cuda\|cublas\|metal" "$LOG_DIR/ollama.log" 2>/dev/null | head -5; then
+        log "✅ Found GPU/CUDA references in Ollama logs"
+      else
+        log "⚠️  No GPU/CUDA references found in Ollama logs (may be using CPU)"
+      fi
+      
+      # Show recent log entries
+      log "📋 Recent Ollama log entries:"
+      tail -10 "$LOG_DIR/ollama.log" 2>/dev/null | sed 's/^/   /' || log "   (log file not readable yet)"
+    fi
+    
+    # Try to query Ollama to verify it's running and check GPU usage
+    log "🔍 Verifying Ollama API and checking GPU acceleration..."
+    sleep 2
+    if command -v curl &>/dev/null; then
+      ollama_response=$(curl -s http://localhost:7009/api/tags 2>/dev/null || echo "")
+      if [[ -n "$ollama_response" ]]; then
+        log "✅ Ollama API is responding"
+      else
+        log "⚠️  Ollama API not responding yet (may need more time to start)"
+      fi
+    fi
+    
+    # Final summary
+    echo ""
+    if [[ $cuda_status -eq 0 ]]; then
+      log "✅ Ollama started with GPU acceleration support"
+      log "   CUDA and GPU detected - models will use GPU when available"
+    elif [[ $cuda_status -eq 1 ]]; then
+      log "⚠️  Ollama started but GPU not detected"
+      log "   CUDA available but no GPU found - will use CPU"
+    else
+      log "⚠️  Ollama started in CPU mode"
+      log "   No CUDA detected - all processing will use CPU"
+    fi
+    
+    log "💡 To pull a model: ollama pull llama2"
+    log "💡 API endpoint: http://localhost:7009/api/generate"
+    log "💡 Check GPU usage: nvidia-smi (if GPU is available)"
+  else
+    log_error "❌ Failed to start Ollama server"
+    log_error "   Check logs at: $LOG_DIR/ollama.log"
+  fi
+else
+  log "Skipping Ollama startup (INSTALL_ONLY mode)"
+fi
 
 install_cuda_12() {
     echo "Installing CUDA 12.8 and essential build tools..."
