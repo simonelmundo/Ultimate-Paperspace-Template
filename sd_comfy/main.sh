@@ -96,6 +96,58 @@ else
 fi
 
 #######################################
+# STEP 0.5: INSTALL AND START OLLAMA
+#######################################
+echo ""
+echo "=================================================="
+echo "        STEP 0.5: INSTALL AND START OLLAMA"
+echo "=================================================="
+echo ""
+
+# Start Ollama LLM API server (simple, no Gradio needed)
+# Uses existing /textgen/ nginx path on port 7009
+if [[ -z "$INSTALL_ONLY" ]]; then
+  # Install Ollama if not already installed
+  if ! command -v ollama &> /dev/null; then
+    log "📦 Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh || {
+      log "⚠️  Ollama installation failed, continuing..."
+      log "💡 You can install it manually: curl -fsSL https://ollama.com/install.sh | sh"
+    }
+  fi
+  
+  # Kill any existing Ollama processes
+  if [[ -f "/tmp/ollama.pid" ]]; then
+    pid=$(cat /tmp/ollama.pid 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      log "🛑 Stopping existing Ollama process (PID: $pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f /tmp/ollama.pid
+  fi
+  pkill -f "ollama serve" 2>/dev/null || true
+  
+  # Start Ollama server on port 7009 (same as textgen was using)
+  log "🚀 Starting Ollama API server on port 7009..."
+  log "📡 API will be available at: http://localhost:7009/api/generate"
+  log "🌐 Accessible via: https://your-domain/textgen/api/generate"
+  
+  # Set OLLAMA_HOST to bind to all interfaces and use port 7009
+  export OLLAMA_HOST=0.0.0.0:7009
+  ollama serve > $LOG_DIR/ollama.log 2>&1 &
+  echo $! > /tmp/ollama.pid
+  sleep 3  # Give it time to start
+  
+  log "✅ Ollama API server started (PID: $(cat /tmp/ollama.pid))"
+  log "💡 To pull a model: ollama pull llama2"
+  log "💡 API endpoint: http://localhost:7009/api/generate"
+else
+  log "Skipping Ollama startup (INSTALL_ONLY mode)"
+fi
+
+#######################################
 # STEP 1: INITIAL SETUP AND LOGGING
 #######################################
 echo ""
@@ -2219,53 +2271,6 @@ if [[ -n "${CF_TOKEN}" ]]; then
     export RUN_SCRIPT="$RUN_SCRIPT,sd_comfy"
   fi
   bash $current_dir/../cloudflare_reload.sh
-fi
-
-# Start Ollama LLM API server (simple, no Gradio needed)
-# Uses existing /textgen/ nginx path on port 7009
-if [[ -z "$INSTALL_ONLY" ]]; then
-  echo ""
-  echo "=================================================="
-  echo "        STARTING OLLAMA LLM API SERVER"
-  echo "=================================================="
-  echo ""
-  
-  # Install Ollama if not already installed
-  if ! command -v ollama &> /dev/null; then
-    log "📦 Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh || {
-      log "⚠️  Ollama installation failed, continuing..."
-      log "💡 You can install it manually: curl -fsSL https://ollama.com/install.sh | sh"
-    }
-  fi
-  
-  # Kill any existing Ollama processes
-  if [[ -f "/tmp/ollama.pid" ]]; then
-    pid=$(cat /tmp/ollama.pid 2>/dev/null)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      log "🛑 Stopping existing Ollama process (PID: $pid)..."
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 1
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f /tmp/ollama.pid
-  fi
-  pkill -f "ollama serve" 2>/dev/null || true
-  
-  # Start Ollama server on port 7009 (same as textgen was using)
-  log "🚀 Starting Ollama API server on port 7009..."
-  log "📡 API will be available at: http://localhost:7009/api/generate"
-  log "🌐 Accessible via: https://your-domain/textgen/api/generate"
-  
-  # Set OLLAMA_HOST to bind to all interfaces and use port 7009
-  export OLLAMA_HOST=0.0.0.0:7009
-  ollama serve > $LOG_DIR/ollama.log 2>&1 &
-  echo $! > /tmp/ollama.pid
-  sleep 3  # Give it time to start
-  
-  log "✅ Ollama API server started (PID: $(cat /tmp/ollama.pid))"
-  log "💡 To pull a model: ollama pull llama2"
-  log "💡 API endpoint: http://localhost:7009/api/generate"
 fi
 
 echo ""
