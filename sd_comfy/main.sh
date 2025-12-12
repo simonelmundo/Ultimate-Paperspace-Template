@@ -26,11 +26,10 @@ if [ ! -f ".env" ]; then
 fi
 source .env || { echo "Failed to source .env"; exit 1; }
 
-# OVERRIDE: Use persistent storage for virtual environment
-# This persists 8GB of core ML packages (PyTorch, CUDA, TensorFlow) between runs
-# Change this path if you want to use a different location
-export VENV_DIR="/storage/venvs"
-echo "📁 VENV_DIR: $VENV_DIR (persistent storage for 8GB core packages)"
+# Default to persistent locations when not provided in .env
+VENV_DIR=${VENV_DIR:-/storage/.venvs}
+export PIP_CACHE_DIR=${PIP_CACHE_DIR:-/storage/.pip_cache}
+mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR"
 
 # Configure logging system
 LOG_DIR="/tmp/log"
@@ -337,69 +336,16 @@ install_cuda_12() {
     local CUDA_MARKER="/storage/.cuda_12.8_installed"
     local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log" # Log file for apt output
 
-    # FIRST: Check if CUDA 12.8 packages are already installed via apt
-    if dpkg -l | grep -q "cuda-cudart-12-8\|cuda-nvcc-12-8"; then
-        echo "🔍 CUDA 12.8 packages detected via apt. Checking installation..."
-        setup_cuda_env
-        hash -r
-        
-        # Find where nvcc is actually installed (apt packages install to /usr, not /usr/local)
-        local nvcc_path
-        nvcc_path=$(which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | grep -E "cuda.*12.*8|12-8" | head -1)
-        
-        if [[ -n "$nvcc_path" && -x "$nvcc_path" ]]; then
-            local cuda_version
-            cuda_version=$("$nvcc_path" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
-            if [[ "$cuda_version" == "12.8"* ]]; then
-                echo "✅ CUDA 12.8 already installed via apt packages (version: $cuda_version)"
-                echo "   NVCC found at: $nvcc_path"
-                
-                # Create symlink to /usr/local/cuda-12.8 if it doesn't exist (for compatibility)
-                if [[ ! -d "/usr/local/cuda-12.8" ]]; then
-                    local cuda_base_dir
-                    cuda_base_dir=$(dirname "$(dirname "$nvcc_path")")
-                    echo "   Creating symlink: /usr/local/cuda-12.8 -> $cuda_base_dir"
-                    ln -sf "$cuda_base_dir" /usr/local/cuda-12.8
-                fi
-                
-                # Create/update marker file
-                touch "$CUDA_MARKER"
-                return 0
-            else
-                echo "⚠️  CUDA packages installed but version mismatch: $cuda_version (expected 12.8)"
-            fi
-        else
-            echo "⚠️  CUDA packages installed but nvcc not found. Checking package locations..."
-            # Try to find CUDA installation directory
-            local cuda_dirs
-            cuda_dirs=$(find /usr -type d -name "*cuda*12*8*" 2>/dev/null | head -1)
-            if [[ -n "$cuda_dirs" ]]; then
-                echo "   Found CUDA directory: $cuda_dirs"
-                ln -sf "$cuda_dirs" /usr/local/cuda-12.8 2>/dev/null || true
-            fi
-        fi
-    fi
-    
-    # SECOND: Check marker file and verify /usr/local/cuda-12.8 path
-    local CUDA_12_8_NVCC="/usr/local/cuda-12.8/bin/nvcc"
+    # Check marker and verify existing installation (logic from previous step)
     if [ -f "$CUDA_MARKER" ]; then
         echo "CUDA 12.8 marker file exists. Verifying installation..."
         setup_cuda_env
         hash -r
-        
-        # Check if symlink exists and points to valid CUDA
-        if [[ -L "/usr/local/cuda-12.8" ]]; then
-            local symlink_target
-            symlink_target=$(readlink -f /usr/local/cuda-12.8)
-            echo "   Symlink found: /usr/local/cuda-12.8 -> $symlink_target"
-        fi
-        
-        # Use explicit path to avoid finding CUDA 11.6 from PATH
-        if [[ -x "$CUDA_12_8_NVCC" ]] && [[ "$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
-             echo "✅ CUDA 12.8 already installed and verified."
+        if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
+             echo "CUDA 12.8 already installed and verified."
              return 0
         else
-             echo "⚠️  Marker file exists, but verification failed. Proceeding with installation..."
+             echo "Marker file exists, but verification failed. Proceeding with installation..."
         fi
     fi
 
@@ -481,166 +427,67 @@ EOL
 
     # Verify installation *before* creating marker
     echo "Verifying CUDA 12.8 installation..."
-    
-    # Find where nvcc was actually installed (apt packages install to /usr, not /usr/local)
-    local nvcc_path
-    nvcc_path=$(which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | head -1)
-    
-    if [[ -n "$nvcc_path" && -x "$nvcc_path" ]]; then
+    if command -v nvcc &>/dev/null; then
         local installed_version
-        installed_version=$("$nvcc_path" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
-        
+        installed_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
         if [[ "$installed_version" == "12.8"* ]]; then
-            echo "✅ CUDA 12.8 installation verified successfully (Version: $installed_version)."
-            echo "   NVCC found at: $nvcc_path"
-            
-            # Create symlink to /usr/local/cuda-12.8 for compatibility (if it doesn't exist)
-            if [[ ! -d "/usr/local/cuda-12.8" ]]; then
-                local cuda_base_dir
-                cuda_base_dir=$(dirname "$(dirname "$nvcc_path")")
-                echo "   Creating symlink: /usr/local/cuda-12.8 -> $cuda_base_dir"
-                ln -sf "$cuda_base_dir" /usr/local/cuda-12.8
-            fi
-            
+            echo "CUDA 12.8 installation verified successfully (Version: $installed_version)."
             touch "$CUDA_MARKER"
             echo "Installation marker created: $CUDA_MARKER"
             return 0
         else
-            log_error "CUDA 12.8 installation verification failed. Found nvcc at $nvcc_path, but version is '$installed_version'."
+            log_error "CUDA 12.8 installation verification failed. Found nvcc, but version is '$installed_version'."
+            log_error "Which nvcc: $(which nvcc)"
             log_error "PATH: $PATH"
             return 1
         fi
     else
-        log_error "CUDA 12.8 installation verification failed. NVCC not found after installation."
-        log_error "Checking for CUDA packages..."
-        dpkg -l | grep -i cuda | head -10
+        log_error "CUDA 12.8 installation verification failed. NVCC command not found after installation attempt."
+        log_error "Check /usr/local/cuda-12.8/bin exists and contains nvcc."
+        ls -l /usr/local/cuda-12.8/bin/nvcc || true
         return 1
     fi
 }
 
 setup_environment() {
     echo "Attempting to set up CUDA 12.8 environment..."
-    local CUDA_MARKER="/storage/.cuda_12.8_installed"
-    local CUDA_12_8_NVCC="/usr/local/cuda-12.8/bin/nvcc"
-    
-    # FIRST: Check if CUDA 12.8 packages are already installed via apt (most reliable)
-    if dpkg -l | grep -q "cuda-cudart-12-8\|cuda-nvcc-12-8"; then
-        echo "🔍 CUDA 12.8 packages detected via apt. Verifying installation..."
-        setup_cuda_env
-        hash -r
-        
-        # Find where nvcc is actually installed (apt packages install to /usr, not /usr/local)
-        local nvcc_path
-        nvcc_path=$(which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | grep -E "cuda.*12.*8|12-8" | head -1 || find /usr -name "nvcc" -type f 2>/dev/null | head -1)
-        
-        if [[ -n "$nvcc_path" && -x "$nvcc_path" ]]; then
-            local cuda_version
-            cuda_version=$("$nvcc_path" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
-            
-            if [[ "$cuda_version" == "12.8"* ]]; then
-                echo "✅ CUDA 12.8 already installed via apt packages (version: $cuda_version)"
-                echo "   NVCC found at: $nvcc_path"
-                log "✅ CUDA 12.8 already configured correctly"
-                
-                # Create symlink to /usr/local/cuda-12.8 if it doesn't exist (for compatibility)
-                if [[ ! -d "/usr/local/cuda-12.8" ]]; then
-                    local cuda_base_dir
-                    cuda_base_dir=$(dirname "$(dirname "$nvcc_path")")
-                    echo "   Creating symlink: /usr/local/cuda-12.8 -> $cuda_base_dir"
-                    ln -sf "$cuda_base_dir" /usr/local/cuda-12.8
-                fi
-                
-                # Create/update marker file
-                touch "$CUDA_MARKER"
-                return 0
-            else
-                echo "⚠️  CUDA packages installed but version mismatch: $cuda_version (expected 12.8)"
-                log "⚠️  Will reinstall CUDA 12.8..."
-            fi
-        else
-            echo "⚠️  CUDA packages installed but nvcc not found. Checking package locations..."
-            # Try to find CUDA installation directory and create symlink
-            local cuda_dirs
-            cuda_dirs=$(find /usr -type d -name "*cuda*12*8*" -o -type d -name "*cuda-12-8*" 2>/dev/null | head -1)
-            if [[ -n "$cuda_dirs" ]]; then
-                echo "   Found CUDA directory: $cuda_dirs"
-                ln -sf "$cuda_dirs" /usr/local/cuda-12.8 2>/dev/null || true
-                # Try again with symlink
-                if [[ -x "$CUDA_12_8_NVCC" ]]; then
-                    local cuda_version
-                    cuda_version=$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
-                    if [[ "$cuda_version" == "12.8"* ]]; then
-                        echo "✅ CUDA 12.8 verified after creating symlink"
-                        touch "$CUDA_MARKER"
-                        return 0
-                    fi
-                fi
-            fi
-        fi
-    fi
-    
-    # SECOND: Check if marker file exists and verify /usr/local/cuda-12.8 path
-    if [ -f "$CUDA_MARKER" ]; then
-        echo "CUDA 12.8 marker file found. Verifying installation..."
-        setup_cuda_env
-        hash -r
-        
-        # Check if symlink exists and points to valid CUDA
-        if [[ -L "/usr/local/cuda-12.8" ]]; then
-            local symlink_target
-            symlink_target=$(readlink -f /usr/local/cuda-12.8)
-            echo "   Symlink found: /usr/local/cuda-12.8 -> $symlink_target"
-        fi
-        
-        # Use explicit path to CUDA 12.8 nvcc (don't rely on PATH which might find 11.6)
-        if [[ -x "$CUDA_12_8_NVCC" ]]; then
-            local cuda_version
-            cuda_version=$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
-            
-            if [[ "$cuda_version" == "12.8"* ]]; then
-                echo "✅ CUDA 12.8 already installed and verified (version: $cuda_version)"
-                log "✅ CUDA 12.8 already configured correctly"
-                return 0
-            else
-                echo "⚠️  Marker exists but CUDA 12.8 nvcc reports version: $cuda_version"
-                log "⚠️  Will reinstall CUDA 12.8..."
-            fi
-        else
-            echo "⚠️  Marker exists but CUDA 12.8 nvcc not found at $CUDA_12_8_NVCC"
-            log "⚠️  Will reinstall CUDA 12.8..."
-        fi
-    fi
-    
-    # Set the desired environment variables
+    # Set the desired environment variables FIRST
     setup_cuda_env
+
+    # Clear the shell's command hash to ensure PATH changes are recognized
     hash -r
     echo "Command hash cleared."
 
-    # Check explicit CUDA 12.8 path (don't use command -v which might find 11.6)
-    if [[ -x "$CUDA_12_8_NVCC" ]]; then
+    # Now check if nvcc is available in the configured PATH
+    if command -v nvcc &>/dev/null; then
+        # If nvcc is found, check its version
         local cuda_version
-        cuda_version=$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
-        
-        echo "Detected CUDA Version from explicit path: $cuda_version"
-        
+        # Pipe stderr to stdout for grep, handle potential errors finding version string
+        cuda_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' || echo "unknown")
+        # Remove potential leading 'V' if present
+        cuda_version=${cuda_version#V}
+
+        echo "Detected CUDA Version (after setting env and clearing hash): $cuda_version"
+
+        # Verify if the detected version is the target 12.8
         if [[ "$cuda_version" == "12.8"* ]]; then
-            echo "✅ CUDA 12.8 environment appears correctly configured."
+            echo "CUDA 12.8 environment appears correctly configured."
             log "✅ CUDA 12.8 already configured correctly"
-            # Create marker if it doesn't exist
-            touch "$CUDA_MARKER"
-            return 0
+            # Environment is already set by setup_cuda_env above
         else
-            echo "Found CUDA 12.8 nvcc, but version is '$cuda_version', not 12.8. Attempting installation/reconfiguration..."
+            echo "Found nvcc, but version is '$cuda_version', not 12.8. Attempting installation/reconfiguration..."
             log "⚠️ CUDA version mismatch: $cuda_version (expected 12.8)"
             log "🔧 Installing CUDA 12.8..."
             install_cuda_12
+            # Re-clear hash after potential installation changes PATH again
             hash -r
         fi
     else
-        # If CUDA 12.8 nvcc is NOT found
-        echo "CUDA 12.8 nvcc not found at $CUDA_12_8_NVCC. Installing CUDA 12.8..."
-        log "⚠️ CUDA 12.8 not found, installing..."
+        # If nvcc is NOT found even after setting the PATH and clearing hash
+        echo "NVCC not found after setting environment variables and clearing hash. Installing CUDA 12.8..."
+        log "⚠️ NVCC not found, installing CUDA 12.8..."
         install_cuda_12
+        # Re-clear hash after potential installation changes PATH again
         hash -r
     fi
 }
@@ -682,9 +529,9 @@ install_critical_packages() {
     return $failed_count
 }
 
-# Optimized SAM2 Installation Function with Wheel Caching
+# Optimized SAM2 Installation Function
 install_sam2_optimized() {
-    log "🚀 Installing SAM2 with wheel caching (similar to SageAttention)..."
+    log "🚀 Installing SAM2 with optimizations for faster installation..."
     
     # Temporarily disable set -e within this function
     set +e
@@ -693,125 +540,40 @@ install_sam2_optimized() {
     if python -c "import sam2" 2>/dev/null; then
         local sam2_version=$(python -c "import sam2; print(sam2.__version__)" 2>/dev/null || echo "unknown")
         log "✅ SAM2 $sam2_version already installed"
-        set -e
+        set -e  # Re-enable set -e
         return 0
     fi
-    
-    # Setup wheel cache directory (same as SageAttention)
-    local WHEEL_CACHE_DIR="/storage/.wheel_cache"
-    mkdir -p "$WHEEL_CACHE_DIR"
-    
-    # Get Python version and architecture for wheel matching
-    local python_executable="$VENV_DIR/sd_comfy-env/bin/python"
-    local py_version_short
-    py_version_short=$("$python_executable" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-    local python_version_tag="cp${py_version_short}"
-    local arch=$(uname -m)
-    
-    log "🔍 Checking for cached SAM2 wheel..."
-    log "  Python version: $python_version_tag"
-    log "  Architecture: $arch"
-    log "  Wheel cache dir: $WHEEL_CACHE_DIR"
-    
-    # Look for cached SAM2 wheel
-    local sam2_wheel
-    sam2_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sam2-*-${python_version_tag}-*-linux_${arch}.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
-    
-    if [[ -f "$sam2_wheel" ]]; then
-        log "✅ Found cached SAM2 wheel: $(basename "$sam2_wheel")"
-        log "   Installing from cached wheel (fast!)..."
-        
-        if pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$sam2_wheel"; then
-            log "✅ SAM2 installed successfully from cached wheel"
-            
-            # Verify installation
-            if python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} installed successfully')" 2>/dev/null; then
-                log "✅ SAM2 installation verified"
-                set -e
-                return 0
-            else
-                log_error "⚠️  SAM2 installed but import failed, will rebuild"
-                rm -f "$sam2_wheel"  # Remove corrupted wheel
-            fi
-        else
-            log_error "⚠️  Failed to install from cached wheel, will rebuild"
-            rm -f "$sam2_wheel"  # Remove corrupted wheel
-        fi
-    else
-        log "❌ No cached SAM2 wheel found, will build from source (this takes ~10-15 minutes)"
-    fi
-    
-    # Build from source if no cached wheel or installation failed
-    log "📦 Building SAM2 from source and creating wheel cache..."
     
     # Create a temporary directory for SAM2 installation
     local sam2_temp_dir="/tmp/sam2_install"
     mkdir -p "$sam2_temp_dir"
     cd "$sam2_temp_dir"
     
-    log "📥 Cloning SAM2 repository with shallow clone..."
+    log "📦 Cloning SAM2 repository with shallow clone (faster)..."
+    # Use shallow clone to reduce download time
     if git clone --depth 1 https://github.com/facebookresearch/sam2.git .; then
         log "✅ SAM2 repository cloned successfully"
     else
         log_error "❌ Failed to clone SAM2 repository"
-        cd /
-        rm -rf "$sam2_temp_dir"
-        set -e
         return 1
     fi
     
-    log "🔧 Building SAM2 wheel with optimized settings..."
+    log "🔧 Installing SAM2 with optimized settings..."
     # Install with optimizations
     export MAX_JOBS=$(nproc)  # Use all available cores
     export USE_NINJA=1        # Use Ninja for faster builds
     
-    # Build wheel instead of installing in development mode
-    log "   This will take ~10-15 minutes (compiling C++ extensions)..."
-    if python setup.py bdist_wheel; then
-        log "✅ SAM2 wheel built successfully"
+    # Install in development mode for faster installation
+    if pip install -e . --no-build-isolation --no-deps; then
+        log "✅ SAM2 installed successfully in development mode"
         
-        # Find the built wheel
-        local built_wheel
-        built_wheel=$(find "$sam2_temp_dir/dist" -name "sam2*.whl" -print -quit)
+        # Install dependencies separately
+        log "📦 Installing SAM2 dependencies..."
+        pip install --no-cache-dir --disable-pip-version-check \
+            "torch>=1.9.0" "torchvision>=0.10.0" "opencv-python" \
+            "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
+            "timm" "transformers" "huggingface_hub" 2>/dev/null || log "Some dependencies may have failed"
         
-        if [[ -n "$built_wheel" && -f "$built_wheel" ]]; then
-            # Copy wheel to cache
-            cp "$built_wheel" "$WHEEL_CACHE_DIR/"
-            log "✅ Cached SAM2 wheel to $WHEEL_CACHE_DIR/$(basename "$built_wheel")"
-            
-            # Install the wheel
-            log "📦 Installing SAM2 from newly built wheel..."
-            if pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$built_wheel"; then
-                log "✅ SAM2 installed successfully from built wheel"
-            else
-                log_error "❌ Failed to install SAM2 from built wheel"
-                cd /
-                rm -rf "$sam2_temp_dir"
-                set -e
-                return 1
-            fi
-        else
-            log_error "❌ Failed to find built SAM2 wheel"
-            cd /
-            rm -rf "$sam2_temp_dir"
-            set -e
-            return 1
-        fi
-    else
-        log_error "❌ Failed to build SAM2 wheel"
-        cd /
-        rm -rf "$sam2_temp_dir"
-        set -e
-        return 1
-    fi
-    
-    # Install dependencies separately
-    log "📦 Installing SAM2 dependencies..."
-    pip install --no-cache-dir --disable-pip-version-check \
-        "torch>=1.9.0" "torchvision>=0.10.0" "opencv-python" \
-        "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
-        "timm" "transformers" "huggingface_hub" 2>/dev/null || log "Some dependencies may have failed"
-    
     # Clean up
     cd /
     rm -rf "$sam2_temp_dir"
@@ -819,13 +581,20 @@ install_sam2_optimized() {
     # Verify installation
     if python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} installed successfully')" 2>/dev/null; then
         log "✅ SAM2 installation verified"
-        set -e
+        set -e  # Re-enable set -e
         return 0
     else
         log_error "❌ SAM2 installation verification failed"
-        set -e
+        set -e  # Re-enable set -e
         return 1
     fi
+else
+    log_error "❌ Failed to install SAM2"
+    cd /
+    rm -rf "$sam2_temp_dir"
+    set -e  # Re-enable set -e
+    return 1
+fi
 }
 
 # Function to fix common custom node import errors
@@ -1291,96 +1060,35 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                  "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
 
     # Virtual environment setup using storage Python 3.10
-    # Define venv path in storage (persistent across restarts)
-    VENV_PATH="$VENV_DIR/sd_comfy-env"
-    
-    # Check if venv exists and has core packages installed
-    CORE_INSTALLED=false
-    if [[ -d "$VENV_PATH" && -f "$VENV_PATH/bin/activate" ]]; then
-        log "🔍 Checking for existing virtual environment..."
-        
-        # Check for marker file first (faster)
-        if [[ -f "$VENV_PATH/.core_installed" ]]; then
-            # Try to activate and verify core packages are actually importable
-            if source "$VENV_PATH/bin/activate" 2>/dev/null; then
-                # Check if heavy core packages are installed and working
-                if python -c "import torch, tensorflow" 2>/dev/null; then
-                    log "✅ Core packages found in existing venv at $VENV_PATH"
-                    CORE_INSTALLED=true
-                else
-                    log "⚠️  Marker exists but core imports failed, will reinstall"
-                    rm -f "$VENV_PATH/.core_installed"
-                fi
-            fi
-        else
-            log "⚠️  Venv exists but no core marker found"
-        fi
-    fi
-    
-    # Create venv if needed or if REINSTALL_SD_COMFY is set
-    if [[ "$CORE_INSTALLED" == "false" || -n "$REINSTALL_SD_COMFY" ]]; then
-        if [[ -n "$REINSTALL_SD_COMFY" ]]; then
-            log "🔄 REINSTALL_SD_COMFY set - recreating venv"
-        else
-            log "🔨 Creating new venv at $VENV_PATH"
-        fi
-        
-        # Ensure parent directory exists in storage
+    if [ ! -d "$VENV_DIR/sd_comfy-env" ]; then
         mkdir -p "$VENV_DIR"
-        
-        # Remove old venv if exists
-        rm -rf "$VENV_PATH"
-        
-        # Create fresh venv
-        "$PYTHON_EXECUTABLE" -m venv "$VENV_PATH"
-        source "$VENV_PATH/bin/activate"
-        
-        log "📦 New venv created, will install all packages"
+        "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env"
+        echo "Created persistent virtual environment at $VENV_DIR/sd_comfy-env"
     else
-        source "$VENV_PATH/bin/activate"
-        log "✅ Reusing existing venv with core packages"
+        echo "Reusing existing persistent virtual environment at $VENV_DIR/sd_comfy-env"
     fi
-    
-    echo "Virtual environment: $VENV_PATH"
+    source "$VENV_DIR/sd_comfy-env/bin/activate"
+    echo "Virtual environment activated: $VENV_DIR/sd_comfy-env"
     echo "Using Python: $(which python)"
     echo "Python version: $(python --version)"
 
-    # ========================================
-    # DETERMINE INSTALLATION SCOPE (CORE vs CUSTOM)
-    # ========================================
-    
-    # Check if we need to install core packages (8GB heavy ML packages)
-    if [[ "$CORE_INSTALLED" == "false" || -n "$REINSTALL_SD_COMFY" ]]; then
-        log "📦 Installing CORE packages (8GB - this takes ~20 minutes)..."
-        log "   Packages: PyTorch, CUDA libs, TensorFlow, xformers, triton, etc."
-        INSTALL_CORE=true
-        
-        # System dependencies (only needed when installing core packages)
-        echo "Installing essential system dependencies..."
-        apt-get update && apt-get install -y \
-            libatlas-base-dev libblas-dev liblapack-dev \
-            libjpeg-dev libpng-dev \
-            python3-dev build-essential \
-            libgl1-mesa-dev \
-            espeak-ng || {
-            echo "Warning: Some packages failed to install"
-        }
+    # System dependencies
+    echo "Installing essential system dependencies..."
+    apt-get update && apt-get install -y \
+        libatlas-base-dev libblas-dev liblapack-dev \
+        libjpeg-dev libpng-dev \
+        python3-dev build-essential \
+        libgl1-mesa-dev \
+        espeak-ng || {
+        echo "Warning: Some packages failed to install"
+    }
 
-        # Python environment setup (only needed when installing core packages)
-        pip install pip==24.0
-        pip install --upgrade wheel setuptools
-        pip install "numpy>=1.26.0,<2.3.0"
-    else
-        log "✅ Core packages already installed in storage, skipping to custom node packages"
-        log "   This will save ~20 minutes and 8GB of downloads!"
-        INSTALL_CORE=false
-        
-        # Quick check: ensure basic pip tools are available (should already be in venv)
-        if ! python -c "import pip" 2>/dev/null; then
-            log "⚠️  pip not found in venv, installing basic tools..."
-            pip install pip==24.0 wheel setuptools
-        fi
-    fi
+    # Python environment setup
+    pip install pip==24.0
+    pip install --upgrade wheel setuptools
+    pip install "numpy>=1.26.0,<2.3.0"
+
+
 
     # ========================================
     # DEFINE ALL FUNCTIONS BEFORE EXECUTION
@@ -1710,29 +1418,19 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # EXECUTE INSTALLATION STEPS
     # ========================================
 
-    # --- STEP 4: SETUP PYTORCH ECOSYSTEM (CORE) ---
-    if [[ "$INSTALL_CORE" == "true" ]]; then
-        echo ""
-        echo "=================================================="
-        echo "         STEP 4: SETUP PYTORCH ECOSYSTEM (CORE)"
-        echo "=================================================="
-        echo ""
-        fix_torch_versions
-        fix_torch_status=$?
-        if [[ $fix_torch_status -ne 0 ]]; then
-            log_error "PyTorch ecosystem setup failed (Status: $fix_torch_status). Cannot proceed."
-            exit 1
-        else
-            echo "✅ PyTorch ecosystem setup completed successfully."
-        fi
+    # --- STEP 4: SETUP PYTORCH ECOSYSTEM ---
+    echo ""
+    echo "=================================================="
+    echo "         STEP 4: SETUP PYTORCH ECOSYSTEM"
+    echo "=================================================="
+    echo ""
+    fix_torch_versions
+    fix_torch_status=$?
+    if [[ $fix_torch_status -ne 0 ]]; then
+        log_error "PyTorch ecosystem setup failed (Status: $fix_torch_status). Cannot proceed."
+        exit 1
     else
-        echo ""
-        echo "=================================================="
-        echo "         STEP 4: PYTORCH ECOSYSTEM (SKIPPED)"
-        echo "=================================================="
-        echo ""
-        log "⏭️  Skipping PyTorch ecosystem installation (already installed in storage)"
-        log "   Saved ~15 minutes and 6GB of downloads!"
+        echo "✅ PyTorch ecosystem setup completed successfully."
     fi
 
     # --- STEP 5: INSTALL CUSTOM NODE DEPENDENCIES ---
@@ -1834,97 +1532,77 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         log_error "Some custom nodes may not be up-to-date"
     fi
 
-    # --- STEP 7: INSTALL NUNCHAKU QUANTIZATION (CORE) ---
-    if [[ "$INSTALL_CORE" == "true" ]]; then
-        echo ""
-        echo "=================================================="
-        echo "       STEP 7: INSTALL NUNCHAKU QUANTIZATION (CORE)"
-        echo "=================================================="
-        echo ""
-        
-        # Temporarily disable set -e and ERR trap to allow Nunchaku failure without script exit
+    # --- STEP 7: INSTALL NUNCHAKU QUANTIZATION ---
+    echo ""
+    echo "=================================================="
+    echo "       STEP 7: INSTALL NUNCHAKU QUANTIZATION"
+    echo "=================================================="
+    echo ""
+    
+    # Temporarily disable set -e and ERR trap to allow Nunchaku failure without script exit
+    set +e
+    disable_err_trap
+    
+    log "🚀 Starting Nunchaku installation..."
+    install_nunchaku
+    nunchaku_status=$?
+    log "🏁 Nunchaku installation completed with status: $nunchaku_status"
+    
+    # Test if we can continue
+    echo "🎯 Testing script continuation after Nunchaku installation..."
+    log "🎯 Script continuing to next step..."
+    
+    # Re-enable set -e and ERR trap
+    set -e
+    enable_err_trap
+    
+    if [[ $nunchaku_status -eq 0 ]]; then
+        echo "✅ Nunchaku installation completed successfully."
+    else
+        log_error "⚠️ Nunchaku installation had issues (Status: $nunchaku_status)"
+        log_error "ComfyUI will continue without Nunchaku quantization support"
+    fi
+    
+    # Force continue regardless of status to prevent script exit
+    echo "🔄 Continuing to next step regardless of Nunchaku status..."
+    nunchaku_status=0  # Force success to ensure continuation
+
+    # --- STEP 8: INSTALL SAGEATTENTION OPTIMIZATION ---
+    echo ""
+    echo "=================================================="
+    echo "      STEP 8: INSTALL SAGEATTENTION OPTIMIZATION"
+    echo "=================================================="
+    echo ""
+    
+    # Temporarily disable set -e and ERR trap to allow SageAttention failure without script exit
+    set +e
+    disable_err_trap
+    
+    install_sageattention
+    sageattention_status=$?
+    
+    # Re-enable set -e and ERR trap
+    enable_err_trap
+    
+    if [[ $sageattention_status -eq 0 ]]; then
+        echo "✅ SageAttention installation completed successfully."
+        # Complete SageAttention setup verification
         set +e
         disable_err_trap
-        
-        log "🚀 Starting Nunchaku installation..."
-        install_nunchaku
-        nunchaku_status=$?
-        log "🏁 Nunchaku installation completed with status: $nunchaku_status"
-        
-        # Test if we can continue
-        echo "🎯 Testing script continuation after Nunchaku installation..."
-        log "🎯 Script continuing to next step..."
-        
-        # Re-enable set -e and ERR trap
+        handle_successful_installation
+        sage_setup_status=$?
         set -e
         enable_err_trap
         
-        if [[ $nunchaku_status -eq 0 ]]; then
-            echo "✅ Nunchaku installation completed successfully."
+        if [[ $sage_setup_status -eq 0 ]]; then
+            echo "✅ SageAttention setup verification completed successfully."
         else
-            log_error "⚠️ Nunchaku installation had issues (Status: $nunchaku_status)"
-            log_error "ComfyUI will continue without Nunchaku quantization support"
-        fi
-        
-        # Force continue regardless of status to prevent script exit
-        echo "🔄 Continuing to next step regardless of Nunchaku status..."
-        nunchaku_status=0  # Force success to ensure continuation
-    else
-        echo ""
-        echo "=================================================="
-        echo "       STEP 7: NUNCHAKU QUANTIZATION (SKIPPED)"
-        echo "=================================================="
-        echo ""
-        log "⏭️  Skipping Nunchaku installation (already installed in storage)"
-        nunchaku_status=0
-    fi
-
-    # --- STEP 8: INSTALL SAGEATTENTION OPTIMIZATION (CORE) ---
-    if [[ "$INSTALL_CORE" == "true" ]]; then
-        echo ""
-        echo "=================================================="
-        echo "      STEP 8: INSTALL SAGEATTENTION OPTIMIZATION (CORE)"
-        echo "=================================================="
-        echo ""
-        
-        # Temporarily disable set -e and ERR trap to allow SageAttention failure without script exit
-        set +e
-        disable_err_trap
-        
-        install_sageattention
-        sageattention_status=$?
-        
-        # Re-enable set -e and ERR trap
-        enable_err_trap
-        
-        if [[ $sageattention_status -eq 0 ]]; then
-            echo "✅ SageAttention installation completed successfully."
-            # Complete SageAttention setup verification
-            set +e
-            disable_err_trap
-            handle_successful_installation
-            sage_setup_status=$?
-            set -e
-            enable_err_trap
-            
-            if [[ $sage_setup_status -eq 0 ]]; then
-                echo "✅ SageAttention setup verification completed successfully."
-            else
-                log_error "⚠️ SageAttention setup verification had issues (Status: $sage_setup_status)"
-                log_error "SageAttention may not work properly"
-            fi
-        else
-            log_error "⚠️ SageAttention installation had issues (Status: $sageattention_status)"
-            log_error "ComfyUI will continue without SageAttention optimizations"
+            log_error "⚠️ SageAttention setup verification had issues (Status: $sage_setup_status)"
+            log_error "SageAttention may not work properly"
         fi
     else
-        echo ""
-        echo "=================================================="
-        echo "      STEP 8: SAGEATTENTION OPTIMIZATION (SKIPPED)"
-        echo "=================================================="
-        echo ""
-        log "⏭️  Skipping SageAttention installation (already installed in storage)"
-        sageattention_status=0
+        log_error "⚠️ SageAttention installation had issues (Status: $sageattention_status)"
+        log_error "ComfyUI will continue without SageAttention optimizations"
     fi
 
     # Custom node dependencies already handled in Step 5
@@ -1932,12 +1610,21 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # --- STEP 6: INSTALL PYTHON DEPENDENCIES ---
     echo ""
     echo "=================================================="
-    echo "        STEP 6: PYTHON DEPENDENCIES"
+    echo "        STEP 6: INSTALL PYTHON DEPENDENCIES"
     echo "=================================================="
     echo ""
-    log "⏭️  Skipping TensorFlow installation during setup"
-    log "   TensorFlow (1.6GB) + TensorRT (4.4GB) will be installed to /tmp after ComfyUI starts"
-    log "   This keeps persistent storage at ~10GB instead of 16GB"
+    
+    # TensorFlow installation with error handling
+    echo "📦 Installing TensorFlow..."
+    set +e
+    disable_err_trap
+    if pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"; then
+        echo "✅ TensorFlow installed successfully"
+    else
+        log_error "⚠️ TensorFlow installation failed, but continuing"
+    fi
+    set -e
+    enable_err_trap
 
     # Optimized requirements processing with dependency caching
     process_requirements() {
@@ -2158,17 +1845,12 @@ EOF
     }
 
         # Call the function with the requirements file - with error handling
-    if [[ "$INSTALL_CORE" == "true" ]]; then
-        echo "Processing main ComfyUI requirements..."
-        if ! process_requirements "$REPO_DIR/requirements.txt"; then
-            log_error "⚠️ Failed to process main ComfyUI requirements, but continuing..."
-        fi
-    else
-        log "⏭️  Skipping main ComfyUI requirements (core packages already installed)"
+    echo "Processing main ComfyUI requirements..."
+    if ! process_requirements "$REPO_DIR/requirements.txt"; then
+        log_error "⚠️ Failed to process main ComfyUI requirements, but continuing..."
     fi
     
-    # Always process additional requirements (custom node packages may change)
-    echo "Processing additional requirements (custom node packages)..."
+    echo "Processing additional requirements..."
     if ! process_requirements "/notebooks/sd_comfy/additional_requirements.txt"; then
         log_error "⚠️ Failed to process additional requirements, but continuing..."
     fi
@@ -2414,14 +2096,6 @@ EOF
 
     # Final checks and marker file
     touch /tmp/sd_comfy.prepared
-    
-    # Mark core packages as installed if we just installed them
-    if [[ "$INSTALL_CORE" == "true" ]]; then
-        touch "$VENV_PATH/.core_installed"
-        log "✅ Core packages (8GB) installed and marked in storage"
-        log "   Next run will skip core installation and save ~20 minutes!"
-    fi
-    
     echo "Stable Diffusion Comfy setup complete."
 else
     echo "Stable Diffusion Comfy already prepared. Skipping setup."
@@ -2684,54 +2358,6 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Wait a moment for ComfyUI to start
   sleep 3
   log "✅ ComfyUI started successfully! You can now access it at http://localhost:$SD_COMFY_PORT"
-  
-  # Install TensorFlow to /tmp (non-persistent) in background after ComfyUI starts
-  install_tensorflow_to_tmp() {
-    local TF_TMP_DIR="/tmp/tensorflow_packages"
-    local TF_LOG="$LOG_DIR/tensorflow_install.log"
-    
-    log "📦 Starting TensorFlow installation to /tmp (non-persistent) in background..."
-    log "   This will install TensorFlow (1.6GB) + TensorRT (4.4GB) to $TF_TMP_DIR"
-    log "   Installation log: $TF_LOG"
-    log "   Note: This is installed to /tmp and will be deleted on restart (saves 6GB persistent storage)"
-    
-    # Create directory for TensorFlow packages
-    mkdir -p "$TF_TMP_DIR"
-    
-    # Install TensorFlow to /tmp using --target flag
-    # This installs to /tmp but makes it available via PYTHONPATH
-    (
-      source "$VENV_PATH/bin/activate"
-      
-      log "📥 Downloading and installing TensorFlow to $TF_TMP_DIR..."
-      log "   This may take 5-10 minutes..."
-      
-      if pip install --target="$TF_TMP_DIR" --no-cache-dir "tensorflow>=2.8.0,<2.19.0" >> "$TF_LOG" 2>&1; then
-        local tf_size=$(du -sh "$TF_TMP_DIR" 2>/dev/null | cut -f1)
-        log "✅ TensorFlow installed successfully to $TF_TMP_DIR"
-        log "   Size: $tf_size"
-        
-        # Create a .pth file in the venv to automatically add to PYTHONPATH
-        # Python automatically reads .pth files from site-packages
-        echo "$TF_TMP_DIR" > "$VENV_PATH/lib/python3.10/site-packages/tensorflow_tmp.pth"
-        log "✅ Created .pth file to auto-load TensorFlow from /tmp"
-        log "   TensorFlow is now available to ComfyUI (no restart needed)"
-      else
-        log_error "❌ TensorFlow installation failed. Check $TF_LOG for details"
-        log_error "   ComfyUI will continue without TensorFlow support"
-      fi
-    ) &
-    
-    local tf_install_pid=$!
-    echo "$tf_install_pid" > /tmp/tensorflow_install.pid
-    log "📋 TensorFlow installation started with PID: $tf_install_pid"
-    log "💡 ComfyUI is running - TensorFlow will be available once installation completes (~5-10 min)"
-    log "💡 Check progress: tail -f $TF_LOG"
-    log "💡 Stop installation: kill \$(cat /tmp/tensorflow_install.pid)"
-  }
-  
-  # Start TensorFlow installation in background
-  install_tensorflow_to_tmp
 fi
 
 #######################################
@@ -2785,3 +2411,4 @@ echo "           SCRIPT EXECUTION COMPLETE!"
 echo "=================================================="
 echo ""
 echo ""
+
