@@ -26,6 +26,12 @@ if [ ! -f ".env" ]; then
 fi
 source .env || { echo "Failed to source .env"; exit 1; }
 
+# OVERRIDE: Use persistent storage for virtual environment
+# This persists 8GB of core ML packages (PyTorch, CUDA, TensorFlow) between runs
+# Change this path if you want to use a different location
+export VENV_DIR="/storage/venvs"
+echo "📁 VENV_DIR: $VENV_DIR (persistent storage for 8GB core packages)"
+
 # Configure logging system
 LOG_DIR="/tmp/log"
 MAIN_LOG="$LOG_DIR/main_operations.log"
@@ -1055,10 +1061,57 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                  "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
 
     # Virtual environment setup using storage Python 3.10
-    rm -rf $VENV_DIR/sd_comfy-env
-    "$PYTHON_EXECUTABLE" -m venv $VENV_DIR/sd_comfy-env
-    source $VENV_DIR/sd_comfy-env/bin/activate
-    echo "Virtual environment activated: $VENV_DIR/sd_comfy-env"
+    # Define venv path in storage (persistent across restarts)
+    VENV_PATH="$VENV_DIR/sd_comfy-env"
+    
+    # Check if venv exists and has core packages installed
+    CORE_INSTALLED=false
+    if [[ -d "$VENV_PATH" && -f "$VENV_PATH/bin/activate" ]]; then
+        log "🔍 Checking for existing virtual environment..."
+        
+        # Check for marker file first (faster)
+        if [[ -f "$VENV_PATH/.core_installed" ]]; then
+            # Try to activate and verify core packages are actually importable
+            if source "$VENV_PATH/bin/activate" 2>/dev/null; then
+                # Check if heavy core packages are installed and working
+                if python -c "import torch, tensorflow" 2>/dev/null; then
+                    log "✅ Core packages found in existing venv at $VENV_PATH"
+                    CORE_INSTALLED=true
+                else
+                    log "⚠️  Marker exists but core imports failed, will reinstall"
+                    rm -f "$VENV_PATH/.core_installed"
+                fi
+            fi
+        else
+            log "⚠️  Venv exists but no core marker found"
+        fi
+    fi
+    
+    # Create venv if needed or if REINSTALL_SD_COMFY is set
+    if [[ "$CORE_INSTALLED" == "false" || -n "$REINSTALL_SD_COMFY" ]]; then
+        if [[ -n "$REINSTALL_SD_COMFY" ]]; then
+            log "🔄 REINSTALL_SD_COMFY set - recreating venv"
+        else
+            log "🔨 Creating new venv at $VENV_PATH"
+        fi
+        
+        # Ensure parent directory exists in storage
+        mkdir -p "$VENV_DIR"
+        
+        # Remove old venv if exists
+        rm -rf "$VENV_PATH"
+        
+        # Create fresh venv
+        "$PYTHON_EXECUTABLE" -m venv "$VENV_PATH"
+        source "$VENV_PATH/bin/activate"
+        
+        log "📦 New venv created, will install all packages"
+    else
+        source "$VENV_PATH/bin/activate"
+        log "✅ Reusing existing venv with core packages"
+    fi
+    
+    echo "Virtual environment: $VENV_PATH"
     echo "Using Python: $(which python)"
     echo "Python version: $(python --version)"
 
@@ -1078,7 +1131,20 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     pip install --upgrade wheel setuptools
     pip install "numpy>=1.26.0,<2.3.0"
 
-
+    # ========================================
+    # DETERMINE INSTALLATION SCOPE (CORE vs CUSTOM)
+    # ========================================
+    
+    # Check if we need to install core packages (8GB heavy ML packages)
+    if [[ "$CORE_INSTALLED" == "false" || -n "$REINSTALL_SD_COMFY" ]]; then
+        log "📦 Installing CORE packages (8GB - this takes ~20 minutes)..."
+        log "   Packages: PyTorch, CUDA libs, TensorFlow, xformers, triton, etc."
+        INSTALL_CORE=true
+    else
+        log "✅ Core packages already installed in storage, skipping to custom node packages"
+        log "   This will save ~20 minutes and 8GB of downloads!"
+        INSTALL_CORE=false
+    fi
 
     # ========================================
     # DEFINE ALL FUNCTIONS BEFORE EXECUTION
@@ -1408,19 +1474,29 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # EXECUTE INSTALLATION STEPS
     # ========================================
 
-    # --- STEP 4: SETUP PYTORCH ECOSYSTEM ---
-    echo ""
-    echo "=================================================="
-    echo "         STEP 4: SETUP PYTORCH ECOSYSTEM"
-    echo "=================================================="
-    echo ""
-    fix_torch_versions
-    fix_torch_status=$?
-    if [[ $fix_torch_status -ne 0 ]]; then
-        log_error "PyTorch ecosystem setup failed (Status: $fix_torch_status). Cannot proceed."
-        exit 1
+    # --- STEP 4: SETUP PYTORCH ECOSYSTEM (CORE) ---
+    if [[ "$INSTALL_CORE" == "true" ]]; then
+        echo ""
+        echo "=================================================="
+        echo "         STEP 4: SETUP PYTORCH ECOSYSTEM (CORE)"
+        echo "=================================================="
+        echo ""
+        fix_torch_versions
+        fix_torch_status=$?
+        if [[ $fix_torch_status -ne 0 ]]; then
+            log_error "PyTorch ecosystem setup failed (Status: $fix_torch_status). Cannot proceed."
+            exit 1
+        else
+            echo "✅ PyTorch ecosystem setup completed successfully."
+        fi
     else
-        echo "✅ PyTorch ecosystem setup completed successfully."
+        echo ""
+        echo "=================================================="
+        echo "         STEP 4: PYTORCH ECOSYSTEM (SKIPPED)"
+        echo "=================================================="
+        echo ""
+        log "⏭️  Skipping PyTorch ecosystem installation (already installed in storage)"
+        log "   Saved ~15 minutes and 6GB of downloads!"
     fi
 
     # --- STEP 5: INSTALL CUSTOM NODE DEPENDENCIES ---
@@ -1522,77 +1598,97 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         log_error "Some custom nodes may not be up-to-date"
     fi
 
-    # --- STEP 7: INSTALL NUNCHAKU QUANTIZATION ---
-    echo ""
-    echo "=================================================="
-    echo "       STEP 7: INSTALL NUNCHAKU QUANTIZATION"
-    echo "=================================================="
-    echo ""
-    
-    # Temporarily disable set -e and ERR trap to allow Nunchaku failure without script exit
-    set +e
-    disable_err_trap
-    
-    log "🚀 Starting Nunchaku installation..."
-    install_nunchaku
-    nunchaku_status=$?
-    log "🏁 Nunchaku installation completed with status: $nunchaku_status"
-    
-    # Test if we can continue
-    echo "🎯 Testing script continuation after Nunchaku installation..."
-    log "🎯 Script continuing to next step..."
-    
-    # Re-enable set -e and ERR trap
-    set -e
-    enable_err_trap
-    
-    if [[ $nunchaku_status -eq 0 ]]; then
-        echo "✅ Nunchaku installation completed successfully."
-    else
-        log_error "⚠️ Nunchaku installation had issues (Status: $nunchaku_status)"
-        log_error "ComfyUI will continue without Nunchaku quantization support"
-    fi
-    
-    # Force continue regardless of status to prevent script exit
-    echo "🔄 Continuing to next step regardless of Nunchaku status..."
-    nunchaku_status=0  # Force success to ensure continuation
-
-    # --- STEP 8: INSTALL SAGEATTENTION OPTIMIZATION ---
-    echo ""
-    echo "=================================================="
-    echo "      STEP 8: INSTALL SAGEATTENTION OPTIMIZATION"
-    echo "=================================================="
-    echo ""
-    
-    # Temporarily disable set -e and ERR trap to allow SageAttention failure without script exit
-    set +e
-    disable_err_trap
-    
-    install_sageattention
-    sageattention_status=$?
-    
-    # Re-enable set -e and ERR trap
-    enable_err_trap
-    
-    if [[ $sageattention_status -eq 0 ]]; then
-        echo "✅ SageAttention installation completed successfully."
-        # Complete SageAttention setup verification
+    # --- STEP 7: INSTALL NUNCHAKU QUANTIZATION (CORE) ---
+    if [[ "$INSTALL_CORE" == "true" ]]; then
+        echo ""
+        echo "=================================================="
+        echo "       STEP 7: INSTALL NUNCHAKU QUANTIZATION (CORE)"
+        echo "=================================================="
+        echo ""
+        
+        # Temporarily disable set -e and ERR trap to allow Nunchaku failure without script exit
         set +e
         disable_err_trap
-        handle_successful_installation
-        sage_setup_status=$?
+        
+        log "🚀 Starting Nunchaku installation..."
+        install_nunchaku
+        nunchaku_status=$?
+        log "🏁 Nunchaku installation completed with status: $nunchaku_status"
+        
+        # Test if we can continue
+        echo "🎯 Testing script continuation after Nunchaku installation..."
+        log "🎯 Script continuing to next step..."
+        
+        # Re-enable set -e and ERR trap
         set -e
         enable_err_trap
         
-        if [[ $sage_setup_status -eq 0 ]]; then
-            echo "✅ SageAttention setup verification completed successfully."
+        if [[ $nunchaku_status -eq 0 ]]; then
+            echo "✅ Nunchaku installation completed successfully."
         else
-            log_error "⚠️ SageAttention setup verification had issues (Status: $sage_setup_status)"
-            log_error "SageAttention may not work properly"
+            log_error "⚠️ Nunchaku installation had issues (Status: $nunchaku_status)"
+            log_error "ComfyUI will continue without Nunchaku quantization support"
+        fi
+        
+        # Force continue regardless of status to prevent script exit
+        echo "🔄 Continuing to next step regardless of Nunchaku status..."
+        nunchaku_status=0  # Force success to ensure continuation
+    else
+        echo ""
+        echo "=================================================="
+        echo "       STEP 7: NUNCHAKU QUANTIZATION (SKIPPED)"
+        echo "=================================================="
+        echo ""
+        log "⏭️  Skipping Nunchaku installation (already installed in storage)"
+        nunchaku_status=0
+    fi
+
+    # --- STEP 8: INSTALL SAGEATTENTION OPTIMIZATION (CORE) ---
+    if [[ "$INSTALL_CORE" == "true" ]]; then
+        echo ""
+        echo "=================================================="
+        echo "      STEP 8: INSTALL SAGEATTENTION OPTIMIZATION (CORE)"
+        echo "=================================================="
+        echo ""
+        
+        # Temporarily disable set -e and ERR trap to allow SageAttention failure without script exit
+        set +e
+        disable_err_trap
+        
+        install_sageattention
+        sageattention_status=$?
+        
+        # Re-enable set -e and ERR trap
+        enable_err_trap
+        
+        if [[ $sageattention_status -eq 0 ]]; then
+            echo "✅ SageAttention installation completed successfully."
+            # Complete SageAttention setup verification
+            set +e
+            disable_err_trap
+            handle_successful_installation
+            sage_setup_status=$?
+            set -e
+            enable_err_trap
+            
+            if [[ $sage_setup_status -eq 0 ]]; then
+                echo "✅ SageAttention setup verification completed successfully."
+            else
+                log_error "⚠️ SageAttention setup verification had issues (Status: $sage_setup_status)"
+                log_error "SageAttention may not work properly"
+            fi
+        else
+            log_error "⚠️ SageAttention installation had issues (Status: $sageattention_status)"
+            log_error "ComfyUI will continue without SageAttention optimizations"
         fi
     else
-        log_error "⚠️ SageAttention installation had issues (Status: $sageattention_status)"
-        log_error "ComfyUI will continue without SageAttention optimizations"
+        echo ""
+        echo "=================================================="
+        echo "      STEP 8: SAGEATTENTION OPTIMIZATION (SKIPPED)"
+        echo "=================================================="
+        echo ""
+        log "⏭️  Skipping SageAttention installation (already installed in storage)"
+        sageattention_status=0
     fi
 
     # Custom node dependencies already handled in Step 5
@@ -1604,17 +1700,21 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     echo "=================================================="
     echo ""
     
-    # TensorFlow installation with error handling
-    echo "📦 Installing TensorFlow..."
-    set +e
-    disable_err_trap
-    if pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"; then
-        echo "✅ TensorFlow installed successfully"
+    # TensorFlow installation with error handling (CORE)
+    if [[ "$INSTALL_CORE" == "true" ]]; then
+        echo "📦 Installing TensorFlow (CORE)..."
+        set +e
+        disable_err_trap
+        if pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"; then
+            echo "✅ TensorFlow installed successfully"
+        else
+            log_error "⚠️ TensorFlow installation failed, but continuing"
+        fi
+        set -e
+        enable_err_trap
     else
-        log_error "⚠️ TensorFlow installation failed, but continuing"
+        log "⏭️  Skipping TensorFlow installation (already in storage)"
     fi
-    set -e
-    enable_err_trap
 
     # Optimized requirements processing with dependency caching
     process_requirements() {
@@ -2086,6 +2186,14 @@ EOF
 
     # Final checks and marker file
     touch /tmp/sd_comfy.prepared
+    
+    # Mark core packages as installed if we just installed them
+    if [[ "$INSTALL_CORE" == "true" ]]; then
+        touch "$VENV_PATH/.core_installed"
+        log "✅ Core packages (8GB) installed and marked in storage"
+        log "   Next run will skip core installation and save ~20 minutes!"
+    fi
+    
     echo "Stable Diffusion Comfy setup complete."
 else
     echo "Stable Diffusion Comfy already prepared. Skipping setup."
