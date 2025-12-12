@@ -26,6 +26,13 @@ if [ ! -f ".env" ]; then
 fi
 source .env || { echo "Failed to source .env"; exit 1; }
 
+# Source helper functions (for prepare_link, etc.)
+if [[ -f "$current_dir/../utils/helper.sh" ]]; then
+    source "$current_dir/../utils/helper.sh"
+elif [[ -f "/notebooks/utils/helper.sh" ]]; then
+    source "/notebooks/utils/helper.sh"
+fi
+
 # Default to persistent locations when not provided in .env
 VENV_DIR=${VENV_DIR:-/storage/.venvs}
 if [[ "$VENV_DIR" != "/storage"* ]]; then
@@ -140,11 +147,73 @@ log "Working directory: $(pwd)"
 log "Environment file sourced"
 
 #######################################
-# STEP 2: CUDA AND ENVIRONMENT SETUP
+# STEP 2: CREATE MODEL SYMLINKS
 #######################################
 echo ""
 echo "=================================================="
-echo "        STEP 2: CUDA AND ENVIRONMENT SETUP"
+echo "           STEP 2: CREATE MODEL SYMLINKS"
+echo "=================================================="
+echo ""
+
+# Create symlinks for model directories
+echo "Creating model directory symlinks..."
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf diffusion_models && ln -s /tmp/stable-diffusion-models/sd diffusion_models
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf text_encoders && ln -s /tmp/stable-diffusion-models/lora text_encoders
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf sams && ln -s /tmp/stable-diffusion-models/upscaler sams
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
+cd "/storage/stable-diffusion-comfy/custom_nodes/comfyui_controlnet_aux/ckpts" && rm -rf lllyasviel && ln -s /tmp/stable-diffusion-models/controlnet lllyasviel
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf ipadapter && ln -s /tmp/stable-diffusion-models/upscaler ipadapter
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf inpaint && ln -s /tmp/stable-diffusion-models/vae inpaint
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf RMBG && ln -s /tmp/stable-diffusion-models/controlnet RMBG
+
+echo "✅ Model symlinks created successfully"
+
+# Create system directory symlinks (output, model directories, etc.)
+echo "Creating system directory symlinks..."
+prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy" \
+             "$MODEL_DIR:$WORKING_DIR/models" \
+             "$MODEL_DIR/sd:$LINK_MODEL_TO" \
+             "$MODEL_DIR/lora:$LINK_LORA_TO" \
+             "$MODEL_DIR/vae:$LINK_VAE_TO" \
+             "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO" \
+             "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO" \
+             "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO" \
+             "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
+
+echo "✅ System directory symlinks created successfully"
+
+#######################################
+# STEP 3: DOWNLOAD MODELS (BACKGROUND)
+#######################################
+if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
+  echo ""
+  echo "=================================================="
+  echo "        STEP 3: DOWNLOAD MODELS (BACKGROUND)"
+  echo "=================================================="
+  echo ""
+  echo "### Downloading Models for Stable Diffusion Comfy in Background ###"
+  log "Starting Model Download for Stable Diffusion Comfy in background..."
+  log "💡 Models will download in background while the rest of the setup continues!"
+  log "💡 You can start using ComfyUI as soon as it starts, even if models are still downloading!"
+  
+  # Start model download in background
+  bash $current_dir/../utils/sd_model_download/main.sh > /tmp/model_download.log 2>&1 &
+  download_pid=$!
+  echo "$download_pid" > /tmp/model_download.pid
+  log "📋 Model download started with PID: $download_pid in background"
+  log "📋 Check download progress with: tail -f /tmp/model_download.log"
+  log "📋 Stop download with: kill \$(cat /tmp/model_download.pid)"
+else
+  log "Skipping Model Download for Stable Diffusion Comfy"
+fi
+
+#######################################
+# STEP 4: CUDA AND ENVIRONMENT SETUP
+#######################################
+echo ""
+echo "=================================================="
+echo "        STEP 4: CUDA AND ENVIRONMENT SETUP"
 echo "=================================================="
 echo ""
 
@@ -188,94 +257,25 @@ log "✅ CUDA environment setup completed"
 install_cuda_12() {
     echo "Installing CUDA 12.8 and essential build tools..."
     local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log"
-    local CUDA_STORAGE="/storage/cuda-12.8"
-    local CUDA_TARBALL="/storage/cuda-12.8.tar.gz"
     
-    # Check if CUDA 12.8 is actually installed and working
+    # Clean up any old marker files (markers don't work for /usr/local/ which doesn't persist)
+    rm -f /storage/.cuda_12.8_installed /storage/.cuda_12.6_installed /storage/.cuda_12.1_installed
+    rm -f /storage/.system_deps_installed  # Also clean up system deps marker (not reliable)
+
+    # Check if CUDA 12.8 is actually installed (verify binary, not marker)
     setup_cuda_env
     hash -r
     if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
         echo "✅ CUDA 12.8 already installed and verified (found at $(which nvcc))."
         return 0
+    else
+        echo "CUDA 12.8 not found or wrong version. Installing..."
     fi
-    
-    echo "CUDA 12.8 not found in /usr/local/. Checking persistent storage cache..."
-    
-    # METHOD 1: If tarball exists in storage, extract it (FASTEST - ~5-10 seconds)
-    if [[ -f "$CUDA_TARBALL" ]]; then
-        echo "📦 Found CUDA tarball in storage. Extracting to /usr/local/ (fast method)..."
-        local start_time=$(date +%s)
-        
-        # Extract directly to /usr/local/
-        if tar -xzf "$CUDA_TARBALL" -C /usr/local/ 2>/dev/null; then
-            local end_time=$(date +%s)
-            local duration=$((end_time - start_time))
-            echo "✅ CUDA 12.8 extracted from tarball in ${duration} seconds"
-            
-            # Configure environment
-            setup_cuda_env
-            hash -r
-            
-            # Create profile script
-            cat > /etc/profile.d/cuda12.sh << 'EOL'
-export CUDA_HOME=/usr/local/cuda-12.8
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-export FORCE_CUDA=1
-EOL
-            chmod +x /etc/profile.d/cuda12.sh
-            
-            # Verify
-            if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
-                echo "✅ CUDA 12.8 ready (extracted from cache in ${duration}s)"
-                return 0
-            fi
-        fi
-        
-        echo "⚠️  Tarball extraction failed, falling back to full install..."
-    fi
-    
-    # METHOD 2: If directory exists in storage, copy it (FAST - ~30 seconds)
-    if [[ -d "$CUDA_STORAGE" ]]; then
-        echo "📁 Found CUDA directory in storage. Copying to /usr/local/ (medium-fast method)..."
-        local start_time=$(date +%s)
-        
-        if cp -r "$CUDA_STORAGE" /usr/local/cuda-12.8; then
-            local end_time=$(date +%s)
-            local duration=$((end_time - start_time))
-            echo "✅ CUDA 12.8 copied from storage in ${duration} seconds"
-            
-            # Configure environment
-            setup_cuda_env
-            hash -r
-            
-            cat > /etc/profile.d/cuda12.sh << 'EOL'
-export CUDA_HOME=/usr/local/cuda-12.8
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-export FORCE_CUDA=1
-EOL
-            chmod +x /etc/profile.d/cuda12.sh
-            
-            # Verify
-            if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
-                echo "✅ CUDA 12.8 ready (copied from cache in ${duration}s)"
-                return 0
-            fi
-        fi
-        
-        echo "⚠️  Copy failed, falling back to full install..."
-    fi
-    
-    # METHOD 3: Full apt installation (SLOW - ~2-5 minutes) - Only runs once
-    echo "📥 No cache found. Performing full CUDA installation (this will be slow, but only happens once)..."
-    echo "💡 Subsequent runs will use cached version and be much faster!"
-    local start_time=$(date +%s)
     
     # Clean up existing CUDA 11.x if present
     if dpkg -l | grep -q "cuda-11"; then
         echo "Removing existing CUDA 11.x installations..."
-        apt-get remove --purge -y 'cuda-11-*' 'cuda-repo-ubuntu*-11-*' 'nvidia-cuda-toolkit' 2>/dev/null || true
+        apt-get remove --purge -y 'cuda-11-*' 'cuda-repo-ubuntu*-11-*' 'nvidia-cuda-toolkit' || echo "No CUDA 11.x found or removal failed."
         apt-get autoremove -y
     fi
 
@@ -286,9 +286,13 @@ EOL
     rm -f /tmp/cuda-keyring.deb
 
     echo "Running apt-get update..."
-    apt-get update >> "$APT_INSTALL_LOG" 2>&1
+    if ! apt-get update >> "$APT_INSTALL_LOG" 2>&1; then
+        log_error "apt-get update failed. Check $APT_INSTALL_LOG for details."
+        cat "$APT_INSTALL_LOG"
+        return 1
+    fi
 
-    # Install CUDA packages
+    # List of CUDA packages to install
     local CUDA_PACKAGES=(
         "cuda-cudart-12-8"
         "cuda-cudart-dev-12-8"
@@ -309,7 +313,7 @@ EOL
         "libnpp-dev-12-8"
     )
     
-    echo "Installing CUDA packages (this may take 2-5 minutes)..."
+    echo "Installing CUDA packages..."
     apt-get install -y \
         build-essential \
         python3-dev \
@@ -321,20 +325,19 @@ EOL
         libgl1- \
         "${CUDA_PACKAGES[@]}" >> "$APT_INSTALL_LOG" 2>&1
     
-    if [ $? -ne 0 ]; then
-        log_error "CUDA installation failed. Check $APT_INSTALL_LOG"
+    local apt_exit_code=$?
+    
+    if [ $apt_exit_code -ne 0 ]; then
+        log_error "CUDA installation failed. Exit code: $apt_exit_code"
         cat "$APT_INSTALL_LOG"
         return 1
     fi
 
-    local end_time=$(date +%s)
-    local duration=$((end_time - start_time))
-    echo "✅ CUDA 12.8 installed via apt in ${duration} seconds"
-
-    # Configure environment
+    # Configure environment immediately after install
     setup_cuda_env
     hash -r
 
+    # Make environment persistent
     cat > /etc/profile.d/cuda12.sh << 'EOL'
 export CUDA_HOME=/usr/local/cuda-12.8
 export PATH=$CUDA_HOME/bin:$PATH
@@ -343,42 +346,25 @@ export FORCE_CUDA=1
 EOL
     chmod +x /etc/profile.d/cuda12.sh
 
-    # Verify installation
-    if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
-        echo "✅ CUDA 12.8 installation verified"
-        
-        # Cache for future runs - create both directory copy AND tarball
-        echo "💾 Caching CUDA installation to persistent storage for faster future startups..."
-        cache_start=$(date +%s)
-        
-        # Method 1: Copy directory to storage (backup method)
-        if [[ ! -d "$CUDA_STORAGE" ]]; then
-            echo "📁 Creating directory copy in storage..."
-            cp -r /usr/local/cuda-12.8 "$CUDA_STORAGE" && \
-            echo "✅ Directory copy created at $CUDA_STORAGE"
+    # Verify installation (no marker file needed - CUDA in /usr/local/ doesn't persist on Paperspace)
+    echo "Verifying CUDA 12.8 installation..."
+    if command -v nvcc &>/dev/null; then
+        local installed_version
+        installed_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
+        if [[ "$installed_version" == "12.8"* ]]; then
+            echo "✅ CUDA 12.8 installation verified successfully (Version: $installed_version)."
+            echo "   Note: CUDA is installed in /usr/local/ and will need reinstallation after reboot on Paperspace"
+            return 0
+        else
+            log_error "CUDA 12.8 installation verification failed. Found nvcc, but version is '$installed_version'."
+            log_error "Which nvcc: $(which nvcc)"
+            log_error "PATH: $PATH"
+            return 1
         fi
-        
-        # Method 2: Create compressed tarball (primary method - faster extraction)
-        if [[ ! -f "$CUDA_TARBALL" ]]; then
-            echo "📦 Creating compressed tarball for fastest future extraction..."
-            # Use pigz for parallel compression if available (much faster)
-            if command -v pigz &>/dev/null; then
-                tar -I pigz -cf "$CUDA_TARBALL" -C /usr/local cuda-12.8 && \
-                echo "✅ Compressed tarball created at $CUDA_TARBALL (with pigz)"
-            else
-                tar -czf "$CUDA_TARBALL" -C /usr/local cuda-12.8 && \
-                echo "✅ Compressed tarball created at $CUDA_TARBALL"
-            fi
-        fi
-        
-        cache_end=$(date +%s)
-        cache_duration=$((cache_end - cache_start))
-        echo "✅ Caching completed in ${cache_duration} seconds"
-        echo "💡 Next startup will extract from cache in ~5-10 seconds instead of ~${duration} seconds!"
-        
-        return 0
     else
-        log_error "CUDA 12.8 installation verification failed"
+        log_error "CUDA 12.8 installation verification failed. NVCC command not found after installation attempt."
+        log_error "Check /usr/local/cuda-12.8/bin exists and contains nvcc."
+        ls -l /usr/local/cuda-12.8/bin/nvcc || true
         return 1
     fi
 }
@@ -994,7 +980,7 @@ fix_torch_versions() {
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
 #######################################
-# STEP 4: STABLE DIFFUSION SETUP
+# STEP 5: STABLE DIFFUSION SETUP
 #######################################
 if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # Initialize environment
@@ -1143,17 +1129,6 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         echo "⚠️  ComfyUI repository not found or not a git repository"
     fi 
     
-
-    # Create directory symlinks
-    prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy" \
-                 "$MODEL_DIR:$WORKING_DIR/models" \
-                 "$MODEL_DIR/sd:$LINK_MODEL_TO" \
-                 "$MODEL_DIR/lora:$LINK_LORA_TO" \
-                 "$MODEL_DIR/vae:$LINK_VAE_TO" \
-                 "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO" \
-                 "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO" \
-                 "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO" \
-                 "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
 
     # Virtual environment setup using storage Python 3.10
     # Ensure VENV_DIR is set to persistent location
@@ -2226,60 +2201,12 @@ echo "=================================================="
 echo ""
 
 #######################################
-# STEP 9: CREATE MODEL SYMLINKS
-#######################################
-echo ""
-echo "=================================================="
-echo "           STEP 9: CREATE MODEL SYMLINKS"
-echo "=================================================="
-echo ""
-
-# Create symlinks for model directories
-echo "Creating model directory symlinks..."
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf diffusion_models && ln -s /tmp/stable-diffusion-models/sd diffusion_models
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf text_encoders && ln -s /tmp/stable-diffusion-models/lora text_encoders
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf sams && ln -s /tmp/stable-diffusion-models/upscaler sams
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
-cd "/storage/stable-diffusion-comfy/custom_nodes/comfyui_controlnet_aux/ckpts" && rm -rf lllyasviel && ln -s /tmp/stable-diffusion-models/controlnet lllyasviel
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf ipadapter && ln -s /tmp/stable-diffusion-models/upscaler ipadapter
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf inpaint && ln -s /tmp/stable-diffusion-models/vae inpaint
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf RMBG && ln -s /tmp/stable-diffusion-models/controlnet RMBG
-
-echo "✅ Model symlinks created successfully"
-
-#######################################
-# STEP 10: DOWNLOAD MODELS (BACKGROUND)
-#######################################
-if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
-  echo ""
-  echo "=================================================="
-  echo "        STEP 10: DOWNLOAD MODELS (BACKGROUND)"
-  echo "=================================================="
-  echo ""
-  echo "### Downloading Models for Stable Diffusion Comfy in Background ###"
-  log "Starting Model Download for Stable Diffusion Comfy in background..."
-  log "💡 Models will download in background while the rest of the setup continues!"
-  log "💡 You can start using ComfyUI as soon as it starts, even if models are still downloading!"
-  
-  # Start model download in background
-  bash $current_dir/../utils/sd_model_download/main.sh > /tmp/model_download.log 2>&1 &
-  download_pid=$!
-  echo "$download_pid" > /tmp/model_download.pid
-  log "📋 Model download started with PID: $download_pid in background"
-  log "📋 Check download progress with: tail -f /tmp/model_download.log"
-  log "📋 Stop download with: kill \$(cat /tmp/model_download.pid)"
-else
-  log "Skipping Model Download for Stable Diffusion Comfy"
-fi
-
-#######################################
-# STEP 11: START COMFYUI
+# STEP 9: START COMFYUI
 #######################################
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo ""
   echo "=================================================="
-  echo "             STEP 11: START COMFYUI"
+  echo "             STEP 9: START COMFYUI"
   echo "=================================================="
   echo ""
   
@@ -2438,11 +2365,11 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   log "✅ ComfyUI started successfully! You can now access it at http://localhost:$SD_COMFY_PORT"
   
   #######################################
-  # STEP 11.1: START OLLAMA (AFTER COMFYUI)
+  # STEP 9.1: START OLLAMA (AFTER COMFYUI)
   #######################################
   echo ""
   echo "=================================================="
-  echo "        STEP 11.1: START OLLAMA (AFTER COMFYUI)"
+  echo "        STEP 9.1: START OLLAMA (AFTER COMFYUI)"
   echo "=================================================="
   echo ""
   
@@ -2532,11 +2459,11 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   fi
   
   #######################################
-  # STEP 11.2: INSTALL TENSORFLOW (BACKGROUND)
+  # STEP 9.2: INSTALL TENSORFLOW (BACKGROUND)
   #######################################
   echo ""
   echo "=================================================="
-  echo "   STEP 11.2: INSTALL TENSORFLOW (BACKGROUND)"
+  echo "   STEP 9.2: INSTALL TENSORFLOW (BACKGROUND)"
   echo "=================================================="
   echo ""
   echo "📦 Installing TensorFlow in background (using /tmp venv)..."
@@ -2586,11 +2513,11 @@ TENSORFLOW_SCRIPT
   log "💡 TensorFlow will be available in /tmp/tensorflow-env (activate with: source /tmp/activate_tensorflow.sh)"
   
   #######################################
-  # STEP 11.3: INSTALL SAM2 (BACKGROUND)
+  # STEP 9.3: INSTALL SAM2 (BACKGROUND)
   #######################################
   echo ""
   echo "=================================================="
-  echo "        STEP 11.3: INSTALL SAM2 (BACKGROUND)"
+  echo "        STEP 9.3: INSTALL SAM2 (BACKGROUND)"
   echo "=================================================="
   echo ""
   echo "📦 Installing SAM2 in background..."
@@ -2613,11 +2540,11 @@ TENSORFLOW_SCRIPT
 fi
 
 #######################################
-# STEP 12: FINAL SETUP COMPLETION
+# STEP 10: FINAL SETUP COMPLETION
 #######################################
 echo ""
 echo "=================================================="
-echo "           STEP 12: FINAL SETUP COMPLETION"
+echo "           STEP 10: FINAL SETUP COMPLETION"
 echo "=================================================="
 echo ""
 send_to_discord "Stable Diffusion Comfy Started"
