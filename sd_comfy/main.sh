@@ -27,7 +27,8 @@ fi
 source .env || { echo "Failed to source .env"; exit 1; }
 
 # OVERRIDE: Use persistent storage for virtual environment
-# This persists 8GB of core ML packages (PyTorch, CUDA, TensorFlow) between runs
+# This persists ~7GB of core ML packages (PyTorch, CUDA) between runs
+# Note: TensorFlow excluded (not needed, saves 6GB including TensorRT)
 # Change this path if you want to use a different location
 export VENV_DIR="/storage/venvs"
 echo "📁 VENV_DIR: $VENV_DIR (persistent storage for 8GB core packages)"
@@ -337,16 +338,18 @@ install_cuda_12() {
     local CUDA_MARKER="/storage/.cuda_12.8_installed"
     local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log" # Log file for apt output
 
-    # Check marker and verify existing installation (logic from previous step)
+    # Check marker and verify existing installation using explicit path
+    local CUDA_12_8_NVCC="/usr/local/cuda-12.8/bin/nvcc"
     if [ -f "$CUDA_MARKER" ]; then
         echo "CUDA 12.8 marker file exists. Verifying installation..."
         setup_cuda_env
         hash -r
-        if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
-             echo "CUDA 12.8 already installed and verified."
+        # Use explicit path to avoid finding CUDA 11.6 from PATH
+        if [[ -x "$CUDA_12_8_NVCC" ]] && [[ "$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
+             echo "✅ CUDA 12.8 already installed and verified."
              return 0
         else
-             echo "Marker file exists, but verification failed. Proceeding with installation..."
+             echo "⚠️  Marker file exists, but verification failed. Proceeding with installation..."
         fi
     fi
 
@@ -426,69 +429,90 @@ export FORCE_CUDA=1
 EOL
     chmod +x /etc/profile.d/cuda12.sh
 
-    # Verify installation *before* creating marker
+    # Verify installation *before* creating marker using explicit path
     echo "Verifying CUDA 12.8 installation..."
-    if command -v nvcc &>/dev/null; then
+    local CUDA_12_8_NVCC="/usr/local/cuda-12.8/bin/nvcc"
+    if [[ -x "$CUDA_12_8_NVCC" ]]; then
         local installed_version
-        installed_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
+        installed_version=$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
         if [[ "$installed_version" == "12.8"* ]]; then
-            echo "CUDA 12.8 installation verified successfully (Version: $installed_version)."
+            echo "✅ CUDA 12.8 installation verified successfully (Version: $installed_version)."
             touch "$CUDA_MARKER"
             echo "Installation marker created: $CUDA_MARKER"
             return 0
         else
-            log_error "CUDA 12.8 installation verification failed. Found nvcc, but version is '$installed_version'."
-            log_error "Which nvcc: $(which nvcc)"
+            log_error "CUDA 12.8 installation verification failed. Found nvcc at $CUDA_12_8_NVCC, but version is '$installed_version'."
             log_error "PATH: $PATH"
             return 1
         fi
     else
-        log_error "CUDA 12.8 installation verification failed. NVCC command not found after installation attempt."
+        log_error "CUDA 12.8 installation verification failed. NVCC not found at $CUDA_12_8_NVCC."
         log_error "Check /usr/local/cuda-12.8/bin exists and contains nvcc."
-        ls -l /usr/local/cuda-12.8/bin/nvcc || true
+        ls -l "$CUDA_12_8_NVCC" || true
         return 1
     fi
 }
 
 setup_environment() {
     echo "Attempting to set up CUDA 12.8 environment..."
-    # Set the desired environment variables FIRST
+    local CUDA_MARKER="/storage/.cuda_12.8_installed"
+    local CUDA_12_8_NVCC="/usr/local/cuda-12.8/bin/nvcc"
+    
+    # FIRST: Check if marker file exists (fastest check)
+    if [ -f "$CUDA_MARKER" ]; then
+        echo "CUDA 12.8 marker file found. Verifying installation..."
+        setup_cuda_env
+        hash -r
+        
+        # Use explicit path to CUDA 12.8 nvcc (don't rely on PATH which might find 11.6)
+        if [[ -x "$CUDA_12_8_NVCC" ]]; then
+            local cuda_version
+            cuda_version=$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
+            
+            if [[ "$cuda_version" == "12.8"* ]]; then
+                echo "✅ CUDA 12.8 already installed and verified (version: $cuda_version)"
+                log "✅ CUDA 12.8 already configured correctly"
+                return 0
+            else
+                echo "⚠️  Marker exists but CUDA 12.8 nvcc reports version: $cuda_version"
+                log "⚠️  Will reinstall CUDA 12.8..."
+            fi
+        else
+            echo "⚠️  Marker exists but CUDA 12.8 nvcc not found at $CUDA_12_8_NVCC"
+            log "⚠️  Will reinstall CUDA 12.8..."
+        fi
+    fi
+    
+    # Set the desired environment variables
     setup_cuda_env
-
-    # Clear the shell's command hash to ensure PATH changes are recognized
     hash -r
     echo "Command hash cleared."
 
-    # Now check if nvcc is available in the configured PATH
-    if command -v nvcc &>/dev/null; then
-        # If nvcc is found, check its version
+    # Check explicit CUDA 12.8 path (don't use command -v which might find 11.6)
+    if [[ -x "$CUDA_12_8_NVCC" ]]; then
         local cuda_version
-        # Pipe stderr to stdout for grep, handle potential errors finding version string
-        cuda_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' || echo "unknown")
-        # Remove potential leading 'V' if present
-        cuda_version=${cuda_version#V}
-
-        echo "Detected CUDA Version (after setting env and clearing hash): $cuda_version"
-
-        # Verify if the detected version is the target 12.8
+        cuda_version=$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
+        
+        echo "Detected CUDA Version from explicit path: $cuda_version"
+        
         if [[ "$cuda_version" == "12.8"* ]]; then
-            echo "CUDA 12.8 environment appears correctly configured."
+            echo "✅ CUDA 12.8 environment appears correctly configured."
             log "✅ CUDA 12.8 already configured correctly"
-            # Environment is already set by setup_cuda_env above
+            # Create marker if it doesn't exist
+            touch "$CUDA_MARKER"
+            return 0
         else
-            echo "Found nvcc, but version is '$cuda_version', not 12.8. Attempting installation/reconfiguration..."
+            echo "Found CUDA 12.8 nvcc, but version is '$cuda_version', not 12.8. Attempting installation/reconfiguration..."
             log "⚠️ CUDA version mismatch: $cuda_version (expected 12.8)"
             log "🔧 Installing CUDA 12.8..."
             install_cuda_12
-            # Re-clear hash after potential installation changes PATH again
             hash -r
         fi
     else
-        # If nvcc is NOT found even after setting the PATH and clearing hash
-        echo "NVCC not found after setting environment variables and clearing hash. Installing CUDA 12.8..."
-        log "⚠️ NVCC not found, installing CUDA 12.8..."
+        # If CUDA 12.8 nvcc is NOT found
+        echo "CUDA 12.8 nvcc not found at $CUDA_12_8_NVCC. Installing CUDA 12.8..."
+        log "⚠️ CUDA 12.8 not found, installing..."
         install_cuda_12
-        # Re-clear hash after potential installation changes PATH again
         hash -r
     fi
 }
@@ -1074,7 +1098,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             # Try to activate and verify core packages are actually importable
             if source "$VENV_PATH/bin/activate" 2>/dev/null; then
                 # Check if heavy core packages are installed and working
-                if python -c "import torch, tensorflow" 2>/dev/null; then
+                if python -c "import torch" 2>/dev/null; then
                     log "✅ Core packages found in existing venv at $VENV_PATH"
                     CORE_INSTALLED=true
                 else
@@ -1115,35 +1139,42 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     echo "Using Python: $(which python)"
     echo "Python version: $(python --version)"
 
-    # System dependencies
-    echo "Installing essential system dependencies..."
-    apt-get update && apt-get install -y \
-        libatlas-base-dev libblas-dev liblapack-dev \
-        libjpeg-dev libpng-dev \
-        python3-dev build-essential \
-        libgl1-mesa-dev \
-        espeak-ng || {
-        echo "Warning: Some packages failed to install"
-    }
-
-    # Python environment setup
-    pip install pip==24.0
-    pip install --upgrade wheel setuptools
-    pip install "numpy>=1.26.0,<2.3.0"
-
     # ========================================
     # DETERMINE INSTALLATION SCOPE (CORE vs CUSTOM)
     # ========================================
     
     # Check if we need to install core packages (8GB heavy ML packages)
     if [[ "$CORE_INSTALLED" == "false" || -n "$REINSTALL_SD_COMFY" ]]; then
-        log "📦 Installing CORE packages (8GB - this takes ~20 minutes)..."
-        log "   Packages: PyTorch, CUDA libs, TensorFlow, xformers, triton, etc."
+        log "📦 Installing CORE packages (~7GB - this takes ~20 minutes)..."
+        log "   Packages: PyTorch, CUDA libs, xformers, triton, etc."
+        log "   Note: TensorFlow excluded (not needed for ComfyUI, saves 1.7GB + 4.4GB TensorRT)"
         INSTALL_CORE=true
+        
+        # System dependencies (only needed when installing core packages)
+        echo "Installing essential system dependencies..."
+        apt-get update && apt-get install -y \
+            libatlas-base-dev libblas-dev liblapack-dev \
+            libjpeg-dev libpng-dev \
+            python3-dev build-essential \
+            libgl1-mesa-dev \
+            espeak-ng || {
+            echo "Warning: Some packages failed to install"
+        }
+
+        # Python environment setup (only needed when installing core packages)
+        pip install pip==24.0
+        pip install --upgrade wheel setuptools
+        pip install "numpy>=1.26.0,<2.3.0"
     else
         log "✅ Core packages already installed in storage, skipping to custom node packages"
         log "   This will save ~20 minutes and 8GB of downloads!"
         INSTALL_CORE=false
+        
+        # Quick check: ensure basic pip tools are available (should already be in venv)
+        if ! python -c "import pip" 2>/dev/null; then
+            log "⚠️  pip not found in venv, installing basic tools..."
+            pip install pip==24.0 wheel setuptools
+        fi
     fi
 
     # ========================================
@@ -1694,26 +1725,24 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # Custom node dependencies already handled in Step 5
 
     # --- STEP 6: INSTALL PYTHON DEPENDENCIES ---
-    echo ""
-    echo "=================================================="
-    echo "        STEP 6: INSTALL PYTHON DEPENDENCIES"
-    echo "=================================================="
-    echo ""
-    
-    # TensorFlow installation with error handling (CORE)
     if [[ "$INSTALL_CORE" == "true" ]]; then
-        echo "📦 Installing TensorFlow (CORE)..."
-        set +e
-        disable_err_trap
-        if pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"; then
-            echo "✅ TensorFlow installed successfully"
-        else
-            log_error "⚠️ TensorFlow installation failed, but continuing"
-        fi
-        set -e
-        enable_err_trap
+        echo ""
+        echo "=================================================="
+        echo "        STEP 6: INSTALL PYTHON DEPENDENCIES"
+        echo "=================================================="
+        echo ""
+        
+        # TensorFlow is NOT installed - ComfyUI uses PyTorch, not TensorFlow
+        # Excluding TensorFlow saves ~6GB (1.7GB TensorFlow + 4.4GB TensorRT dependency)
+        log "⏭️  Skipping TensorFlow installation (not needed for ComfyUI)"
+        log "   ComfyUI uses PyTorch exclusively. Excluding TensorFlow saves ~6GB."
     else
-        log "⏭️  Skipping TensorFlow installation (already in storage)"
+        echo ""
+        echo "=================================================="
+        echo "        STEP 6: PYTHON DEPENDENCIES (SKIPPED)"
+        echo "=================================================="
+        echo ""
+        log "⏭️  Skipping core Python dependencies (already in storage)"
     fi
 
     # Optimized requirements processing with dependency caching
@@ -1753,7 +1782,8 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             [[ ! -f "$file" ]] && return 0
             
             # Add requirements from this file (with error handling)
-            if ! grep -v "^-r\|^#\|^$" "$file" >> "$combined_reqs" 2>/dev/null; then
+            # Exclude TensorFlow and TensorRT packages (not needed for ComfyUI, saves 6GB)
+            if ! grep -v "^-r\|^#\|^$\|tensorflow\|tensorrt\|polygraphy" "$file" >> "$combined_reqs" 2>/dev/null; then
                 echo "${ind}Warning: Failed to read requirements from $file"
                 return 0
             fi
@@ -1900,16 +1930,25 @@ EOF
         if [[ -s "/tmp/missing_packages.txt" ]]; then
             echo "${indent}Installing missing packages in batches..."
             
+            # Filter out TensorFlow and TensorRT packages (not needed for ComfyUI, saves 6GB)
+            grep -v -i "tensorflow\|tensorrt\|polygraphy" "/tmp/missing_packages.txt" > "/tmp/missing_packages_filtered.txt" 2>/dev/null || cp "/tmp/missing_packages.txt" "/tmp/missing_packages_filtered.txt"
+            
             # Split into smaller batches of 10 packages each
-            split -l 10 "/tmp/missing_packages.txt" "/tmp/pkg_batch_"
+            split -l 10 "/tmp/missing_packages_filtered.txt" "/tmp/pkg_batch_" 2>/dev/null || true
             
             # Install each batch separately
             for batch in /tmp/pkg_batch_*; do
+                [[ ! -f "$batch" ]] && continue
                 echo "${indent}Installing batch $(basename "$batch")..."
                 # Add timeout of 60 seconds (1 minute) to pip batch installation
                 if ! timeout 60s pip install --no-cache-dir --disable-pip-version-check -r "$batch" 2>/dev/null; then
                     echo "${indent}Batch installation failed or timed out after 1 minute, falling back to individual installation..."
                     while read -r pkg; do
+                        # Skip TensorFlow/TensorRT packages
+                        if echo "$pkg" | grep -qi "tensorflow\|tensorrt\|polygraphy"; then
+                            echo "${indent}  Skipping: $pkg (TensorFlow/TensorRT excluded - saves 6GB)"
+                            continue
+                        fi
                         echo "${indent}  Installing: $pkg"
                         pip install --no-cache-dir --disable-pip-version-check "$pkg" 2>/dev/null || echo "${indent}  Failed to install: $pkg (continuing)"
                     done < "$batch"
@@ -1935,12 +1974,17 @@ EOF
     }
 
         # Call the function with the requirements file - with error handling
-    echo "Processing main ComfyUI requirements..."
-    if ! process_requirements "$REPO_DIR/requirements.txt"; then
-        log_error "⚠️ Failed to process main ComfyUI requirements, but continuing..."
+    if [[ "$INSTALL_CORE" == "true" ]]; then
+        echo "Processing main ComfyUI requirements..."
+        if ! process_requirements "$REPO_DIR/requirements.txt"; then
+            log_error "⚠️ Failed to process main ComfyUI requirements, but continuing..."
+        fi
+    else
+        log "⏭️  Skipping main ComfyUI requirements (core packages already installed)"
     fi
     
-    echo "Processing additional requirements..."
+    # Always process additional requirements (custom node packages may change)
+    echo "Processing additional requirements (custom node packages)..."
     if ! process_requirements "/notebooks/sd_comfy/additional_requirements.txt"; then
         log_error "⚠️ Failed to process additional requirements, but continuing..."
     fi
