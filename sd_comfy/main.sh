@@ -27,19 +27,13 @@ fi
 source .env || { echo "Failed to source .env"; exit 1; }
 
 # Default to persistent locations when not provided in .env
-# IMPORTANT: Force VENV_DIR to /storage/.venvs to ensure persistence
 VENV_DIR=${VENV_DIR:-/storage/.venvs}
-# Override if .env set it to a non-persistent location (like /tmp)
 if [[ "$VENV_DIR" != "/storage"* ]]; then
-    echo "⚠️  WARNING: VENV_DIR was set to non-persistent location: $VENV_DIR"
-    echo "   Overriding to persistent location: /storage/.venvs"
     VENV_DIR="/storage/.venvs"
 fi
-export VENV_DIR  # Export immediately to ensure it persists
+export VENV_DIR
 export PIP_CACHE_DIR=${PIP_CACHE_DIR:-/storage/.pip_cache}
-mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR" || { echo "ERROR: Failed to create directories $VENV_DIR or $PIP_CACHE_DIR"; exit 1; }
-echo "✅ Virtual environment directory: $VENV_DIR"
-echo "✅ PIP cache directory: $PIP_CACHE_DIR"
+mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR"
 
 # Configure logging system
 LOG_DIR="/tmp/log"
@@ -1299,69 +1293,22 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                  "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
 
     # Virtual environment setup using storage Python 3.10
-    echo ""
-    echo "🔧 Setting up virtual environment..."
-    echo "   VENV_DIR: $VENV_DIR"
-    echo "   Target path: $VENV_DIR/sd_comfy-env"
-    
     # Ensure VENV_DIR is set to persistent location
     if [[ "$VENV_DIR" != "/storage"* ]]; then
-        log_error "⚠️  VENV_DIR is not in /storage! Current value: $VENV_DIR"
-        log_error "   Forcing to /storage/.venvs for persistence"
         VENV_DIR="/storage/.venvs"
         export VENV_DIR
     fi
     
-    # Create parent directory if it doesn't exist
-    if [ ! -d "$VENV_DIR" ]; then
-        echo "📁 Creating VENV_DIR: $VENV_DIR"
-        mkdir -p "$VENV_DIR" || { log_error "Failed to create VENV_DIR: $VENV_DIR"; exit 1; }
-    fi
+    mkdir -p "$VENV_DIR"
     
     if [ ! -d "$VENV_DIR/sd_comfy-env" ]; then
-        echo "📦 Creating new virtual environment at $VENV_DIR/sd_comfy-env"
-        echo "   Using Python: $PYTHON_EXECUTABLE"
-        
-        # Create the virtual environment
-        if "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env"; then
-            echo "✅ Successfully created virtual environment at $VENV_DIR/sd_comfy-env"
-            
-            # Verify it was actually created
-            if [ -d "$VENV_DIR/sd_comfy-env" ] && [ -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
-                echo "✅ Verified: Virtual environment exists and activate script is present"
-            else
-                log_error "❌ Virtual environment creation failed - directory or activate script missing"
-                log_error "   Expected: $VENV_DIR/sd_comfy-env/bin/activate"
-                exit 1
-            fi
-        else
-            log_error "❌ Failed to create virtual environment at $VENV_DIR/sd_comfy-env"
-            exit 1
-        fi
-    else
-        echo "✅ Reusing existing virtual environment at $VENV_DIR/sd_comfy-env"
-        
-        # Verify existing venv is valid
-        if [ ! -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
-            log_error "⚠️  Existing venv directory found but activate script missing"
-            log_error "   Removing corrupted venv and recreating..."
-            rm -rf "$VENV_DIR/sd_comfy-env"
-            "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env" || { log_error "Failed to recreate venv"; exit 1; }
-        fi
+        echo "Creating virtual environment at $VENV_DIR/sd_comfy-env"
+        "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env" || { log_error "Failed to create virtual environment"; exit 1; }
     fi
     
     # Activate the virtual environment
     source "$VENV_DIR/sd_comfy-env/bin/activate" || { log_error "Failed to activate virtual environment"; exit 1; }
-    echo "✅ Virtual environment activated: $VENV_DIR/sd_comfy-env"
-    echo "   Using Python: $(which python)"
-    echo "   Python version: $(python --version)"
-    
-    # Final verification
-    if [[ "$(which python)" != "$VENV_DIR/sd_comfy-env"* ]]; then
-        log_error "⚠️  WARNING: Python path doesn't match venv location!"
-        log_error "   Python: $(which python)"
-        log_error "   Expected: $VENV_DIR/sd_comfy-env/bin/python"
-    fi
+    echo "Virtual environment activated: $VENV_DIR/sd_comfy-env"
 
     # System dependencies (apt-get is smart enough to skip installed packages)
     echo "Checking/installing system dependencies..."
@@ -1906,18 +1853,8 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     echo "=================================================="
     echo ""
     
-    # TensorFlow installation with error handling
-    echo "📦 Installing TensorFlow..."
-    set +e
-    disable_err_trap
-    if pip install --cache-dir="$PIP_CACHE_DIR" "tensorflow>=2.8.0,<2.19.0"; then
-        echo "✅ TensorFlow installed successfully"
-    else
-        log_error "⚠️ TensorFlow installation failed, but continuing"
-    fi
-    set -e
-    enable_err_trap
-
+    # Note: TensorFlow installation moved to background after ComfyUI starts (Step 11.5)
+    
     # Optimized requirements processing with dependency caching
     process_requirements() {
         local req_file="$1"
@@ -2400,21 +2337,15 @@ else
     echo ""
     
     # Activate venv even if skipping setup
-    # Ensure VENV_DIR is set to persistent location
     if [[ "$VENV_DIR" != "/storage"* ]]; then
-        log_error "⚠️  VENV_DIR is not in /storage! Current value: $VENV_DIR"
-        log_error "   Forcing to /storage/.venvs for persistence"
         VENV_DIR="/storage/.venvs"
         export VENV_DIR
     fi
     
-    echo "🔍 Looking for virtual environment at: $VENV_DIR/sd_comfy-env"
     if [ -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
         source "$VENV_DIR/sd_comfy-env/bin/activate"
-        echo "✅ Virtual environment activated: $VENV_DIR/sd_comfy-env"
     else
-        log_error "❌ Virtual environment not found at $VENV_DIR/sd_comfy-env"
-        log_error "   Please run the setup again to create the virtual environment"
+        log_error "Virtual environment not found at $VENV_DIR/sd_comfy-env"
         exit 1
     fi
         
@@ -2463,11 +2394,6 @@ else
         else
             echo "⚠️  ComfyUI repository not found or not a git repository"
         fi
-        
-    else
-        log_error "Virtual environment activation script not found!"
-        exit 1
-    fi
 fi
 
 log "Finished Preparing Environment for Stable Diffusion Comfy"
@@ -2664,6 +2590,60 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Wait a moment for ComfyUI to start
   sleep 3
   log "✅ ComfyUI started successfully! You can now access it at http://localhost:$SD_COMFY_PORT"
+  
+  #######################################
+  # STEP 10.5: INSTALL TENSORFLOW (BACKGROUND)
+  #######################################
+  echo ""
+  echo "=================================================="
+  echo "   STEP 10.5: INSTALL TENSORFLOW (BACKGROUND)"
+  echo "=================================================="
+  echo ""
+  echo "📦 Installing TensorFlow in background (using /tmp venv)..."
+  log "Starting TensorFlow installation in background..."
+  
+  # Create a background script to install TensorFlow in /tmp
+  cat > /tmp/install_tensorflow.sh << 'TENSORFLOW_SCRIPT'
+#!/bin/bash
+set +e  # Don't exit on errors
+
+# Create temporary venv for TensorFlow
+if [ ! -d "/tmp/tensorflow-env" ]; then
+  echo "Creating temporary TensorFlow environment in /tmp..."
+  /storage/python_versions/python3.10/bin/python3.10 -m venv /tmp/tensorflow-env || exit 1
+fi
+
+# Activate and install
+source /tmp/tensorflow-env/bin/activate || exit 1
+echo "Installing TensorFlow in /tmp environment..."
+pip install --quiet --no-cache-dir "tensorflow>=2.8.0,<2.19.0" > /tmp/tensorflow_install.log 2>&1
+
+if [ $? -eq 0 ]; then
+  echo "✅ TensorFlow installed successfully in /tmp/tensorflow-env" >> /tmp/tensorflow_install.log
+else
+  echo "⚠️ TensorFlow installation failed (optional dependency)" >> /tmp/tensorflow_install.log
+fi
+
+# Create activation helper script
+cat > /tmp/activate_tensorflow.sh << 'HELPER'
+#!/bin/bash
+# Helper script to activate TensorFlow environment
+source /tmp/tensorflow-env/bin/activate
+echo "TensorFlow environment activated from /tmp"
+echo "Python: $(which python)"
+HELPER
+chmod +x /tmp/activate_tensorflow.sh
+
+TENSORFLOW_SCRIPT
+
+  # Make script executable and run in background
+  chmod +x /tmp/install_tensorflow.sh
+  /tmp/install_tensorflow.sh > /tmp/tensorflow_bg.log 2>&1 &
+  echo $! > /tmp/tensorflow_install.pid
+  
+  log "📋 TensorFlow installation started in background (PID: $(cat /tmp/tensorflow_install.pid))"
+  log "📋 Check installation progress: tail -f /tmp/tensorflow_install.log"
+  log "💡 TensorFlow will be available in /tmp/tensorflow-env (activate with: source /tmp/activate_tensorflow.sh)"
 fi
 
 #######################################
