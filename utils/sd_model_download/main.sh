@@ -8,17 +8,19 @@ source $current_dir/../helper.sh
 trap 'error_exit "### ERROR ###"' ERR
 
 echo "### Setting up Model Download ###"
+# Dependencies (aria2 + Python modules) should be installed by caller script
+# This keeps the background process focused on downloading models with aria2
+# If running standalone, install dependencies here
 if ! dpkg -s aria2 >/dev/null 2>&1; then
-    apt-get install -qq aria2 -y > /dev/null
+    echo "⚠️  aria2 not found - installing (this should be done by caller script)"
+    apt-get install -qq aria2 -y > /dev/null 2>&1 || echo "Failed to install aria2"
 fi
 
 MODULES=("requests" "gdown" "bs4" "python-dotenv")
-# Loop through the modules and check if they are installed
 for module in "${MODULES[@]}"; do
     if ! pip show $module >/dev/null 2>&1; then
-        # Module is not installed, install it with pip
-        echo "Module $module is not installed. Installing it now..."
-        pip install $module
+        echo "⚠️  $module not found - installing (this should be done by caller script)"
+        pip install --quiet --no-cache-dir $module 2>/dev/null || echo "Failed to install $module"
     fi
 done
 
