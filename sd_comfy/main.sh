@@ -337,12 +337,63 @@ install_cuda_12() {
     local CUDA_MARKER="/storage/.cuda_12.8_installed"
     local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log" # Log file for apt output
 
-    # Check marker and verify existing installation using explicit path
+    # FIRST: Check if CUDA 12.8 packages are already installed via apt
+    if dpkg -l | grep -q "cuda-cudart-12-8\|cuda-nvcc-12-8"; then
+        echo "🔍 CUDA 12.8 packages detected via apt. Checking installation..."
+        setup_cuda_env
+        hash -r
+        
+        # Find where nvcc is actually installed (apt packages install to /usr, not /usr/local)
+        local nvcc_path
+        nvcc_path=$(which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | grep -E "cuda.*12.*8|12-8" | head -1)
+        
+        if [[ -n "$nvcc_path" && -x "$nvcc_path" ]]; then
+            local cuda_version
+            cuda_version=$("$nvcc_path" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
+            if [[ "$cuda_version" == "12.8"* ]]; then
+                echo "✅ CUDA 12.8 already installed via apt packages (version: $cuda_version)"
+                echo "   NVCC found at: $nvcc_path"
+                
+                # Create symlink to /usr/local/cuda-12.8 if it doesn't exist (for compatibility)
+                if [[ ! -d "/usr/local/cuda-12.8" ]]; then
+                    local cuda_base_dir
+                    cuda_base_dir=$(dirname "$(dirname "$nvcc_path")")
+                    echo "   Creating symlink: /usr/local/cuda-12.8 -> $cuda_base_dir"
+                    ln -sf "$cuda_base_dir" /usr/local/cuda-12.8
+                fi
+                
+                # Create/update marker file
+                touch "$CUDA_MARKER"
+                return 0
+            else
+                echo "⚠️  CUDA packages installed but version mismatch: $cuda_version (expected 12.8)"
+            fi
+        else
+            echo "⚠️  CUDA packages installed but nvcc not found. Checking package locations..."
+            # Try to find CUDA installation directory
+            local cuda_dirs
+            cuda_dirs=$(find /usr -type d -name "*cuda*12*8*" 2>/dev/null | head -1)
+            if [[ -n "$cuda_dirs" ]]; then
+                echo "   Found CUDA directory: $cuda_dirs"
+                ln -sf "$cuda_dirs" /usr/local/cuda-12.8 2>/dev/null || true
+            fi
+        fi
+    fi
+    
+    # SECOND: Check marker file and verify /usr/local/cuda-12.8 path
     local CUDA_12_8_NVCC="/usr/local/cuda-12.8/bin/nvcc"
     if [ -f "$CUDA_MARKER" ]; then
         echo "CUDA 12.8 marker file exists. Verifying installation..."
         setup_cuda_env
         hash -r
+        
+        # Check if symlink exists and points to valid CUDA
+        if [[ -L "/usr/local/cuda-12.8" ]]; then
+            local symlink_target
+            symlink_target=$(readlink -f /usr/local/cuda-12.8)
+            echo "   Symlink found: /usr/local/cuda-12.8 -> $symlink_target"
+        fi
+        
         # Use explicit path to avoid finding CUDA 11.6 from PATH
         if [[ -x "$CUDA_12_8_NVCC" ]] && [[ "$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
              echo "✅ CUDA 12.8 already installed and verified."
@@ -428,26 +479,41 @@ export FORCE_CUDA=1
 EOL
     chmod +x /etc/profile.d/cuda12.sh
 
-    # Verify installation *before* creating marker using explicit path
+    # Verify installation *before* creating marker
     echo "Verifying CUDA 12.8 installation..."
-    local CUDA_12_8_NVCC="/usr/local/cuda-12.8/bin/nvcc"
-    if [[ -x "$CUDA_12_8_NVCC" ]]; then
+    
+    # Find where nvcc was actually installed (apt packages install to /usr, not /usr/local)
+    local nvcc_path
+    nvcc_path=$(which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | head -1)
+    
+    if [[ -n "$nvcc_path" && -x "$nvcc_path" ]]; then
         local installed_version
-        installed_version=$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
+        installed_version=$("$nvcc_path" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
+        
         if [[ "$installed_version" == "12.8"* ]]; then
             echo "✅ CUDA 12.8 installation verified successfully (Version: $installed_version)."
+            echo "   NVCC found at: $nvcc_path"
+            
+            # Create symlink to /usr/local/cuda-12.8 for compatibility (if it doesn't exist)
+            if [[ ! -d "/usr/local/cuda-12.8" ]]; then
+                local cuda_base_dir
+                cuda_base_dir=$(dirname "$(dirname "$nvcc_path")")
+                echo "   Creating symlink: /usr/local/cuda-12.8 -> $cuda_base_dir"
+                ln -sf "$cuda_base_dir" /usr/local/cuda-12.8
+            fi
+            
             touch "$CUDA_MARKER"
             echo "Installation marker created: $CUDA_MARKER"
             return 0
         else
-            log_error "CUDA 12.8 installation verification failed. Found nvcc at $CUDA_12_8_NVCC, but version is '$installed_version'."
+            log_error "CUDA 12.8 installation verification failed. Found nvcc at $nvcc_path, but version is '$installed_version'."
             log_error "PATH: $PATH"
             return 1
         fi
     else
-        log_error "CUDA 12.8 installation verification failed. NVCC not found at $CUDA_12_8_NVCC."
-        log_error "Check /usr/local/cuda-12.8/bin exists and contains nvcc."
-        ls -l "$CUDA_12_8_NVCC" || true
+        log_error "CUDA 12.8 installation verification failed. NVCC not found after installation."
+        log_error "Checking for CUDA packages..."
+        dpkg -l | grep -i cuda | head -10
         return 1
     fi
 }
@@ -457,11 +523,74 @@ setup_environment() {
     local CUDA_MARKER="/storage/.cuda_12.8_installed"
     local CUDA_12_8_NVCC="/usr/local/cuda-12.8/bin/nvcc"
     
-    # FIRST: Check if marker file exists (fastest check)
+    # FIRST: Check if CUDA 12.8 packages are already installed via apt (most reliable)
+    if dpkg -l | grep -q "cuda-cudart-12-8\|cuda-nvcc-12-8"; then
+        echo "🔍 CUDA 12.8 packages detected via apt. Verifying installation..."
+        setup_cuda_env
+        hash -r
+        
+        # Find where nvcc is actually installed (apt packages install to /usr, not /usr/local)
+        local nvcc_path
+        nvcc_path=$(which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | grep -E "cuda.*12.*8|12-8" | head -1 || find /usr -name "nvcc" -type f 2>/dev/null | head -1)
+        
+        if [[ -n "$nvcc_path" && -x "$nvcc_path" ]]; then
+            local cuda_version
+            cuda_version=$("$nvcc_path" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
+            
+            if [[ "$cuda_version" == "12.8"* ]]; then
+                echo "✅ CUDA 12.8 already installed via apt packages (version: $cuda_version)"
+                echo "   NVCC found at: $nvcc_path"
+                log "✅ CUDA 12.8 already configured correctly"
+                
+                # Create symlink to /usr/local/cuda-12.8 if it doesn't exist (for compatibility)
+                if [[ ! -d "/usr/local/cuda-12.8" ]]; then
+                    local cuda_base_dir
+                    cuda_base_dir=$(dirname "$(dirname "$nvcc_path")")
+                    echo "   Creating symlink: /usr/local/cuda-12.8 -> $cuda_base_dir"
+                    ln -sf "$cuda_base_dir" /usr/local/cuda-12.8
+                fi
+                
+                # Create/update marker file
+                touch "$CUDA_MARKER"
+                return 0
+            else
+                echo "⚠️  CUDA packages installed but version mismatch: $cuda_version (expected 12.8)"
+                log "⚠️  Will reinstall CUDA 12.8..."
+            fi
+        else
+            echo "⚠️  CUDA packages installed but nvcc not found. Checking package locations..."
+            # Try to find CUDA installation directory and create symlink
+            local cuda_dirs
+            cuda_dirs=$(find /usr -type d -name "*cuda*12*8*" -o -type d -name "*cuda-12-8*" 2>/dev/null | head -1)
+            if [[ -n "$cuda_dirs" ]]; then
+                echo "   Found CUDA directory: $cuda_dirs"
+                ln -sf "$cuda_dirs" /usr/local/cuda-12.8 2>/dev/null || true
+                # Try again with symlink
+                if [[ -x "$CUDA_12_8_NVCC" ]]; then
+                    local cuda_version
+                    cuda_version=$("$CUDA_12_8_NVCC" --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
+                    if [[ "$cuda_version" == "12.8"* ]]; then
+                        echo "✅ CUDA 12.8 verified after creating symlink"
+                        touch "$CUDA_MARKER"
+                        return 0
+                    fi
+                fi
+            fi
+        fi
+    fi
+    
+    # SECOND: Check if marker file exists and verify /usr/local/cuda-12.8 path
     if [ -f "$CUDA_MARKER" ]; then
         echo "CUDA 12.8 marker file found. Verifying installation..."
         setup_cuda_env
         hash -r
+        
+        # Check if symlink exists and points to valid CUDA
+        if [[ -L "/usr/local/cuda-12.8" ]]; then
+            local symlink_target
+            symlink_target=$(readlink -f /usr/local/cuda-12.8)
+            echo "   Symlink found: /usr/local/cuda-12.8 -> $symlink_target"
+        fi
         
         # Use explicit path to CUDA 12.8 nvcc (don't rely on PATH which might find 11.6)
         if [[ -x "$CUDA_12_8_NVCC" ]]; then
@@ -553,9 +682,9 @@ install_critical_packages() {
     return $failed_count
 }
 
-# Optimized SAM2 Installation Function
+# Optimized SAM2 Installation Function with Wheel Caching
 install_sam2_optimized() {
-    log "🚀 Installing SAM2 with optimizations for faster installation..."
+    log "🚀 Installing SAM2 with wheel caching (similar to SageAttention)..."
     
     # Temporarily disable set -e within this function
     set +e
@@ -564,40 +693,125 @@ install_sam2_optimized() {
     if python -c "import sam2" 2>/dev/null; then
         local sam2_version=$(python -c "import sam2; print(sam2.__version__)" 2>/dev/null || echo "unknown")
         log "✅ SAM2 $sam2_version already installed"
-        set -e  # Re-enable set -e
+        set -e
         return 0
     fi
+    
+    # Setup wheel cache directory (same as SageAttention)
+    local WHEEL_CACHE_DIR="/storage/.wheel_cache"
+    mkdir -p "$WHEEL_CACHE_DIR"
+    
+    # Get Python version and architecture for wheel matching
+    local python_executable="$VENV_DIR/sd_comfy-env/bin/python"
+    local py_version_short
+    py_version_short=$("$python_executable" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+    local python_version_tag="cp${py_version_short}"
+    local arch=$(uname -m)
+    
+    log "🔍 Checking for cached SAM2 wheel..."
+    log "  Python version: $python_version_tag"
+    log "  Architecture: $arch"
+    log "  Wheel cache dir: $WHEEL_CACHE_DIR"
+    
+    # Look for cached SAM2 wheel
+    local sam2_wheel
+    sam2_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sam2-*-${python_version_tag}-*-linux_${arch}.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
+    
+    if [[ -f "$sam2_wheel" ]]; then
+        log "✅ Found cached SAM2 wheel: $(basename "$sam2_wheel")"
+        log "   Installing from cached wheel (fast!)..."
+        
+        if pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$sam2_wheel"; then
+            log "✅ SAM2 installed successfully from cached wheel"
+            
+            # Verify installation
+            if python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} installed successfully')" 2>/dev/null; then
+                log "✅ SAM2 installation verified"
+                set -e
+                return 0
+            else
+                log_error "⚠️  SAM2 installed but import failed, will rebuild"
+                rm -f "$sam2_wheel"  # Remove corrupted wheel
+            fi
+        else
+            log_error "⚠️  Failed to install from cached wheel, will rebuild"
+            rm -f "$sam2_wheel"  # Remove corrupted wheel
+        fi
+    else
+        log "❌ No cached SAM2 wheel found, will build from source (this takes ~10-15 minutes)"
+    fi
+    
+    # Build from source if no cached wheel or installation failed
+    log "📦 Building SAM2 from source and creating wheel cache..."
     
     # Create a temporary directory for SAM2 installation
     local sam2_temp_dir="/tmp/sam2_install"
     mkdir -p "$sam2_temp_dir"
     cd "$sam2_temp_dir"
     
-    log "📦 Cloning SAM2 repository with shallow clone (faster)..."
-    # Use shallow clone to reduce download time
+    log "📥 Cloning SAM2 repository with shallow clone..."
     if git clone --depth 1 https://github.com/facebookresearch/sam2.git .; then
         log "✅ SAM2 repository cloned successfully"
     else
         log_error "❌ Failed to clone SAM2 repository"
+        cd /
+        rm -rf "$sam2_temp_dir"
+        set -e
         return 1
     fi
     
-    log "🔧 Installing SAM2 with optimized settings..."
+    log "🔧 Building SAM2 wheel with optimized settings..."
     # Install with optimizations
     export MAX_JOBS=$(nproc)  # Use all available cores
     export USE_NINJA=1        # Use Ninja for faster builds
     
-    # Install in development mode for faster installation
-    if pip install -e . --no-build-isolation --no-deps; then
-        log "✅ SAM2 installed successfully in development mode"
+    # Build wheel instead of installing in development mode
+    log "   This will take ~10-15 minutes (compiling C++ extensions)..."
+    if python setup.py bdist_wheel; then
+        log "✅ SAM2 wheel built successfully"
         
-        # Install dependencies separately
-        log "📦 Installing SAM2 dependencies..."
-        pip install --no-cache-dir --disable-pip-version-check \
-            "torch>=1.9.0" "torchvision>=0.10.0" "opencv-python" \
-            "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
-            "timm" "transformers" "huggingface_hub" 2>/dev/null || log "Some dependencies may have failed"
+        # Find the built wheel
+        local built_wheel
+        built_wheel=$(find "$sam2_temp_dir/dist" -name "sam2*.whl" -print -quit)
         
+        if [[ -n "$built_wheel" && -f "$built_wheel" ]]; then
+            # Copy wheel to cache
+            cp "$built_wheel" "$WHEEL_CACHE_DIR/"
+            log "✅ Cached SAM2 wheel to $WHEEL_CACHE_DIR/$(basename "$built_wheel")"
+            
+            # Install the wheel
+            log "📦 Installing SAM2 from newly built wheel..."
+            if pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$built_wheel"; then
+                log "✅ SAM2 installed successfully from built wheel"
+            else
+                log_error "❌ Failed to install SAM2 from built wheel"
+                cd /
+                rm -rf "$sam2_temp_dir"
+                set -e
+                return 1
+            fi
+        else
+            log_error "❌ Failed to find built SAM2 wheel"
+            cd /
+            rm -rf "$sam2_temp_dir"
+            set -e
+            return 1
+        fi
+    else
+        log_error "❌ Failed to build SAM2 wheel"
+        cd /
+        rm -rf "$sam2_temp_dir"
+        set -e
+        return 1
+    fi
+    
+    # Install dependencies separately
+    log "📦 Installing SAM2 dependencies..."
+    pip install --no-cache-dir --disable-pip-version-check \
+        "torch>=1.9.0" "torchvision>=0.10.0" "opencv-python" \
+        "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
+        "timm" "transformers" "huggingface_hub" 2>/dev/null || log "Some dependencies may have failed"
+    
     # Clean up
     cd /
     rm -rf "$sam2_temp_dir"
@@ -605,20 +819,13 @@ install_sam2_optimized() {
     # Verify installation
     if python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} installed successfully')" 2>/dev/null; then
         log "✅ SAM2 installation verified"
-        set -e  # Re-enable set -e
+        set -e
         return 0
     else
         log_error "❌ SAM2 installation verification failed"
-        set -e  # Re-enable set -e
+        set -e
         return 1
     fi
-else
-    log_error "❌ Failed to install SAM2"
-    cd /
-    rm -rf "$sam2_temp_dir"
-    set -e  # Re-enable set -e
-    return 1
-fi
 }
 
 # Function to fix common custom node import errors
