@@ -27,9 +27,19 @@ fi
 source .env || { echo "Failed to source .env"; exit 1; }
 
 # Default to persistent locations when not provided in .env
+# IMPORTANT: Force VENV_DIR to /storage/.venvs to ensure persistence
 VENV_DIR=${VENV_DIR:-/storage/.venvs}
+# Override if .env set it to a non-persistent location (like /tmp)
+if [[ "$VENV_DIR" != "/storage"* ]]; then
+    echo "⚠️  WARNING: VENV_DIR was set to non-persistent location: $VENV_DIR"
+    echo "   Overriding to persistent location: /storage/.venvs"
+    VENV_DIR="/storage/.venvs"
+fi
+export VENV_DIR  # Export immediately to ensure it persists
 export PIP_CACHE_DIR=${PIP_CACHE_DIR:-/storage/.pip_cache}
-mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR"
+mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR" || { echo "ERROR: Failed to create directories $VENV_DIR or $PIP_CACHE_DIR"; exit 1; }
+echo "✅ Virtual environment directory: $VENV_DIR"
+echo "✅ PIP cache directory: $PIP_CACHE_DIR"
 
 # Configure logging system
 LOG_DIR="/tmp/log"
@@ -356,22 +366,26 @@ fi
 
 install_cuda_12() {
     echo "Installing CUDA 12.8 and essential build tools..."
-    local CUDA_MARKER="/storage/.cuda_12.8_installed"
-    local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log" # Log file for apt output
+    local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log"
+    local CUDA_CACHE_DIR="/storage/.cuda_packages_cache"
+    
+    # Clean up any old marker files (markers don't work for /usr/local/ which doesn't persist)
+    rm -f /storage/.cuda_12.8_installed /storage/.cuda_12.6_installed /storage/.cuda_12.1_installed
+    rm -f /storage/.system_deps_installed  # Also clean up system deps marker (not reliable)
 
-    # Check marker and verify existing installation (logic from previous step)
-    if [ -f "$CUDA_MARKER" ]; then
-        echo "CUDA 12.8 marker file exists. Verifying installation..."
-        setup_cuda_env
-        hash -r
-        if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
-             echo "CUDA 12.8 already installed and verified."
-             return 0
-        else
-             echo "Marker file exists, but verification failed. Proceeding with installation..."
-        fi
+    # Check if CUDA 12.8 is actually installed (verify binary, not marker)
+    setup_cuda_env
+    hash -r
+    if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
+        echo "✅ CUDA 12.8 already installed and verified (found at $(which nvcc))."
+        return 0
+    else
+        echo "CUDA 12.8 not found or wrong version. Installing..."
     fi
 
+    # Create cache directory for CUDA packages
+    mkdir -p "$CUDA_CACHE_DIR"
+    
     # Clean up existing CUDA 11.x if present
     if dpkg -l | grep -q "cuda-11"; then
         echo "Removing existing CUDA 11.x installations..."
@@ -379,60 +393,100 @@ install_cuda_12() {
         apt-get autoremove -y
     fi
 
-    # Install only essential CUDA components
+    # Install CUDA repository key
     echo "Adding CUDA repository key..."
     wget -qO /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
     dpkg -i /tmp/cuda-keyring.deb
     rm -f /tmp/cuda-keyring.deb
 
-    echo "Running apt-get update (output will be logged)..."
-    # Remove -qq to see output
+    echo "Running apt-get update..."
     if ! apt-get update >> "$APT_INSTALL_LOG" 2>&1; then
         log_error "apt-get update failed. Check $APT_INSTALL_LOG for details."
-        cat "$APT_INSTALL_LOG" # Print log content to main log
+        cat "$APT_INSTALL_LOG"
         return 1
     fi
-    echo "apt-get update completed."
 
-    # Install minimal CUDA components AND general build dependencies
-    echo "Installing CUDA components and general build tools... Output logged to $APT_INSTALL_LOG"
-    apt-get install -y \
-        build-essential \
-        python3-dev \
-        libatlas-base-dev \
-        libblas-dev \
-        liblapack-dev \
-        libjpeg-dev \
-        libpng-dev \
-        libgl1- \
-        cuda-cudart-12-8 \
-        cuda-cudart-dev-12-8 \
-        cuda-nvcc-12-8 \
-        cuda-cupti-12-8 \
-        cuda-cupti-dev-12-8 \
-        libcublas-12-8 \
-        libcublas-dev-12-8 \
-        libcufft-12-8 \
-        libcufft-dev-12-8 \
-        libcurand-12-8 \
-        libcurand-dev-12-8 \
-        libcusolver-12-8 \
-        libcusolver-dev-12-8 \
-        libcusparse-12-8 \
-        libcusparse-dev-12-8 \
-        libnpp-12-8 \
-        libnpp-dev-12-8 >> "$APT_INSTALL_LOG" 2>&1
-    local apt_exit_code=$? # Capture exit code immediately
+    # List of CUDA packages to install
+    local CUDA_PACKAGES=(
+        "cuda-cudart-12-8"
+        "cuda-cudart-dev-12-8"
+        "cuda-nvcc-12-8"
+        "cuda-cupti-12-8"
+        "cuda-cupti-dev-12-8"
+        "libcublas-12-8"
+        "libcublas-dev-12-8"
+        "libcufft-12-8"
+        "libcufft-dev-12-8"
+        "libcurand-12-8"
+        "libcurand-dev-12-8"
+        "libcusolver-12-8"
+        "libcusolver-dev-12-8"
+        "libcusparse-12-8"
+        "libcusparse-dev-12-8"
+        "libnpp-12-8"
+        "libnpp-dev-12-8"
+    )
 
-    echo "apt-get install finished with exit code: $apt_exit_code"
-    # Print the log content regardless of exit code for inspection
-    echo "--- APT Install Log ($APT_INSTALL_LOG) ---"
-    cat "$APT_INSTALL_LOG"
-    echo "--- End APT Install Log ---"
-
-    if [ $apt_exit_code -ne 0 ]; then
-        log_error "apt-get install failed for CUDA 12.6 and build tools. Exit code: $apt_exit_code. See log above."
-        return 1 # Exit if install fails
+    # Check if we have cached packages
+    local cached_packages=$(find "$CUDA_CACHE_DIR" -name "*.deb" 2>/dev/null | wc -l)
+    
+    if [ "$cached_packages" -gt 10 ]; then
+        echo "📦 Found $cached_packages cached CUDA packages in $CUDA_CACHE_DIR"
+        echo "🚀 Installing from cache (much faster!)..."
+        
+        # Install from cache using dpkg
+        if dpkg -i "$CUDA_CACHE_DIR"/*.deb >> "$APT_INSTALL_LOG" 2>&1; then
+            echo "✅ CUDA installed from cache successfully"
+            # Fix any dependency issues
+            apt-get install -f -y >> "$APT_INSTALL_LOG" 2>&1
+        else
+            echo "⚠️  Cache install failed, falling back to fresh download..."
+            rm -rf "$CUDA_CACHE_DIR"/*.deb
+            cached_packages=0
+        fi
+    fi
+    
+    # If cache doesn't exist or failed, download and cache
+    if [ "$cached_packages" -le 10 ]; then
+        echo "📥 Downloading CUDA packages to cache (will be faster next time)..."
+        
+        # Download packages to cache directory
+        cd "$CUDA_CACHE_DIR"
+        apt-get install -y --download-only -o Dir::Cache::Archives="$CUDA_CACHE_DIR" \
+            build-essential \
+            python3-dev \
+            libatlas-base-dev \
+            libblas-dev \
+            liblapack-dev \
+            libjpeg-dev \
+            libpng-dev \
+            libgl1- \
+            "${CUDA_PACKAGES[@]}" >> "$APT_INSTALL_LOG" 2>&1
+        
+        echo "📦 Installing CUDA packages..."
+        # Now install normally (packages are already downloaded to cache)
+        apt-get install -y \
+            build-essential \
+            python3-dev \
+            libatlas-base-dev \
+            libblas-dev \
+            liblapack-dev \
+            libjpeg-dev \
+            libpng-dev \
+            libgl1- \
+            "${CUDA_PACKAGES[@]}" >> "$APT_INSTALL_LOG" 2>&1
+        
+        local apt_exit_code=$?
+        cd - > /dev/null
+        
+        if [ $apt_exit_code -ne 0 ]; then
+            log_error "CUDA installation failed. Exit code: $apt_exit_code"
+            cat "$APT_INSTALL_LOG"
+            return 1
+        fi
+        
+        echo "✅ CUDA packages downloaded and cached to $CUDA_CACHE_DIR"
+        echo "   Cache size: $(du -sh "$CUDA_CACHE_DIR" | cut -f1)"
     fi
 
     # Configure environment immediately after install
@@ -448,15 +502,14 @@ export FORCE_CUDA=1
 EOL
     chmod +x /etc/profile.d/cuda12.sh
 
-    # Verify installation *before* creating marker
+    # Verify installation (no marker file needed - CUDA in /usr/local/ doesn't persist on Paperspace)
     echo "Verifying CUDA 12.8 installation..."
     if command -v nvcc &>/dev/null; then
         local installed_version
         installed_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
         if [[ "$installed_version" == "12.8"* ]]; then
-            echo "CUDA 12.8 installation verified successfully (Version: $installed_version)."
-            touch "$CUDA_MARKER"
-            echo "Installation marker created: $CUDA_MARKER"
+            echo "✅ CUDA 12.8 installation verified successfully (Version: $installed_version)."
+            echo "   Note: CUDA is installed in /usr/local/ and will need reinstallation after reboot on Paperspace"
             return 0
         else
             log_error "CUDA 12.8 installation verification failed. Found nvcc, but version is '$installed_version'."
@@ -1246,28 +1299,81 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                  "$MODEL_DIR/llm_checkpoints:$LINK_LLM_TO"
 
     # Virtual environment setup using storage Python 3.10
-    if [ ! -d "$VENV_DIR/sd_comfy-env" ]; then
-        mkdir -p "$VENV_DIR"
-        "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env"
-        echo "Created persistent virtual environment at $VENV_DIR/sd_comfy-env"
-    else
-        echo "Reusing existing persistent virtual environment at $VENV_DIR/sd_comfy-env"
+    echo ""
+    echo "🔧 Setting up virtual environment..."
+    echo "   VENV_DIR: $VENV_DIR"
+    echo "   Target path: $VENV_DIR/sd_comfy-env"
+    
+    # Ensure VENV_DIR is set to persistent location
+    if [[ "$VENV_DIR" != "/storage"* ]]; then
+        log_error "⚠️  VENV_DIR is not in /storage! Current value: $VENV_DIR"
+        log_error "   Forcing to /storage/.venvs for persistence"
+        VENV_DIR="/storage/.venvs"
+        export VENV_DIR
     fi
-    source "$VENV_DIR/sd_comfy-env/bin/activate"
-    echo "Virtual environment activated: $VENV_DIR/sd_comfy-env"
-    echo "Using Python: $(which python)"
-    echo "Python version: $(python --version)"
+    
+    # Create parent directory if it doesn't exist
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "📁 Creating VENV_DIR: $VENV_DIR"
+        mkdir -p "$VENV_DIR" || { log_error "Failed to create VENV_DIR: $VENV_DIR"; exit 1; }
+    fi
+    
+    if [ ! -d "$VENV_DIR/sd_comfy-env" ]; then
+        echo "📦 Creating new virtual environment at $VENV_DIR/sd_comfy-env"
+        echo "   Using Python: $PYTHON_EXECUTABLE"
+        
+        # Create the virtual environment
+        if "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env"; then
+            echo "✅ Successfully created virtual environment at $VENV_DIR/sd_comfy-env"
+            
+            # Verify it was actually created
+            if [ -d "$VENV_DIR/sd_comfy-env" ] && [ -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
+                echo "✅ Verified: Virtual environment exists and activate script is present"
+            else
+                log_error "❌ Virtual environment creation failed - directory or activate script missing"
+                log_error "   Expected: $VENV_DIR/sd_comfy-env/bin/activate"
+                exit 1
+            fi
+        else
+            log_error "❌ Failed to create virtual environment at $VENV_DIR/sd_comfy-env"
+            exit 1
+        fi
+    else
+        echo "✅ Reusing existing virtual environment at $VENV_DIR/sd_comfy-env"
+        
+        # Verify existing venv is valid
+        if [ ! -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
+            log_error "⚠️  Existing venv directory found but activate script missing"
+            log_error "   Removing corrupted venv and recreating..."
+            rm -rf "$VENV_DIR/sd_comfy-env"
+            "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env" || { log_error "Failed to recreate venv"; exit 1; }
+        fi
+    fi
+    
+    # Activate the virtual environment
+    source "$VENV_DIR/sd_comfy-env/bin/activate" || { log_error "Failed to activate virtual environment"; exit 1; }
+    echo "✅ Virtual environment activated: $VENV_DIR/sd_comfy-env"
+    echo "   Using Python: $(which python)"
+    echo "   Python version: $(python --version)"
+    
+    # Final verification
+    if [[ "$(which python)" != "$VENV_DIR/sd_comfy-env"* ]]; then
+        log_error "⚠️  WARNING: Python path doesn't match venv location!"
+        log_error "   Python: $(which python)"
+        log_error "   Expected: $VENV_DIR/sd_comfy-env/bin/python"
+    fi
 
-    # System dependencies
-    echo "Installing essential system dependencies..."
-    apt-get update && apt-get install -y \
+    # System dependencies (apt-get is smart enough to skip installed packages)
+    echo "Checking/installing system dependencies..."
+    apt-get update -qq && apt-get install -y \
         libatlas-base-dev libblas-dev liblapack-dev \
         libjpeg-dev libpng-dev \
         python3-dev build-essential \
         libgl1-mesa-dev \
-        espeak-ng || {
+        espeak-ng > /dev/null 2>&1 || {
         echo "Warning: Some packages failed to install"
     }
+    echo "✅ System dependencies check completed"
 
     # Python environment setup
     pip install pip==24.0
@@ -2294,9 +2400,23 @@ else
     echo ""
     
     # Activate venv even if skipping setup
+    # Ensure VENV_DIR is set to persistent location
+    if [[ "$VENV_DIR" != "/storage"* ]]; then
+        log_error "⚠️  VENV_DIR is not in /storage! Current value: $VENV_DIR"
+        log_error "   Forcing to /storage/.venvs for persistence"
+        VENV_DIR="/storage/.venvs"
+        export VENV_DIR
+    fi
+    
+    echo "🔍 Looking for virtual environment at: $VENV_DIR/sd_comfy-env"
     if [ -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
-        source $VENV_DIR/sd_comfy-env/bin/activate
-        echo "Virtual environment activated: $VENV_DIR/sd_comfy-env"
+        source "$VENV_DIR/sd_comfy-env/bin/activate"
+        echo "✅ Virtual environment activated: $VENV_DIR/sd_comfy-env"
+    else
+        log_error "❌ Virtual environment not found at $VENV_DIR/sd_comfy-env"
+        log_error "   Please run the setup again to create the virtual environment"
+        exit 1
+    fi
         
         # Check current ComfyUI version
         if [ -d "$REPO_DIR/.git" ]; then
