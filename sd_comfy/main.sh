@@ -193,11 +193,29 @@ if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
   echo "=================================================="
   echo ""
   echo "### Downloading Models for Stable Diffusion Comfy in Background ###"
+  
+  # Install dependencies upfront to avoid blocking CUDA installation
+  log "📦 Installing model download dependencies (aria2 + Python modules)..."
+  
+  # Install aria2 (apt-get - must happen before backgrounding to avoid dpkg conflicts)
+  if ! dpkg -s aria2 >/dev/null 2>&1; then
+    apt-get install -qq aria2 -y > /dev/null 2>&1 || log_error "Failed to install aria2"
+  fi
+  
+  # Install Python modules for model download script (pip - quick)
+  MODULES=("requests" "gdown" "bs4" "python-dotenv")
+  for module in "${MODULES[@]}"; do
+    if ! pip show $module >/dev/null 2>&1; then
+      pip install --quiet --no-cache-dir $module 2>/dev/null || log_error "Failed to install $module"
+    fi
+  done
+  
+  log "✅ Model download dependencies ready"
   log "Starting Model Download for Stable Diffusion Comfy in background..."
   log "💡 Models will download in background while the rest of the setup continues!"
   log "💡 You can start using ComfyUI as soon as it starts, even if models are still downloading!"
   
-  # Start model download in background
+  # Start model download in background (now it's 99% just aria2 downloads)
   bash $current_dir/../utils/sd_model_download/main.sh > /tmp/model_download.log 2>&1 &
   download_pid=$!
   echo "$download_pid" > /tmp/model_download.pid
