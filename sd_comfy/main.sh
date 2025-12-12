@@ -184,202 +184,98 @@ log "🔧 Setting up CUDA environment..."
 setup_cuda_env
 log "✅ CUDA environment setup completed"
 
-#######################################
-# STEP 2.5: INSTALL AND START OLLAMA (AFTER CUDA)
-#######################################
-echo ""
-echo "=================================================="
-echo "     STEP 2.5: INSTALL AND START OLLAMA (AFTER CUDA)"
-echo "=================================================="
-echo ""
-
-# Function to check CUDA availability and GPU status
-check_cuda_for_ollama() {
-    log "🔍 Checking CUDA availability for Ollama..."
-    
-    # Check if nvcc is available
-    local cuda_available=false
-    local cuda_version="unknown"
-    local nvidia_gpu_available=false
-    local gpu_name="unknown"
-    
-    if command -v nvcc &>/dev/null; then
-        cuda_available=true
-        cuda_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
-        log "✅ CUDA detected: Version $cuda_version"
-        log "   NVCC path: $(which nvcc)"
-    else
-        log "⚠️  CUDA not detected (nvcc not found)"
-        log "   Ollama will run in CPU mode"
-    fi
-    
-    # Check for NVIDIA GPU
-    if command -v nvidia-smi &>/dev/null; then
-        local nvidia_smi_output
-        nvidia_smi_output=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "")
-        if [[ -n "$nvidia_smi_output" ]]; then
-            nvidia_gpu_available=true
-            gpu_name="$nvidia_smi_output"
-            log "✅ NVIDIA GPU detected: $gpu_name"
-            
-            # Get GPU memory info
-            local gpu_memory
-            gpu_memory=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "unknown")
-            if [[ "$gpu_memory" != "unknown" ]]; then
-                log "   GPU Memory: ${gpu_memory} MB"
-            fi
-        else
-            log "⚠️  nvidia-smi found but no GPU detected"
-        fi
-    else
-        log "⚠️  nvidia-smi not found - cannot detect GPU"
-    fi
-    
-    # Check CUDA environment variables
-    log "🔍 CUDA Environment Variables:"
-    log "   CUDA_HOME: ${CUDA_HOME:-not set}"
-    log "   LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-not set}"
-    
-    # Summary
-    echo ""
-    if [[ "$cuda_available" == "true" && "$nvidia_gpu_available" == "true" ]]; then
-        log "✅ CUDA and GPU detected - Ollama will use GPU acceleration"
-        return 0
-    elif [[ "$cuda_available" == "true" ]]; then
-        log "⚠️  CUDA detected but no GPU found - Ollama will use CPU"
-        return 1
-    else
-        log "⚠️  No CUDA detected - Ollama will run in CPU mode"
-        return 2
-    fi
-}
-
-# Start Ollama LLM API server (after CUDA setup)
-# Uses existing /textgen/ nginx path on port 7009
-if [[ -z "$INSTALL_ONLY" ]]; then
-  # Check CUDA status first
-  check_cuda_for_ollama
-  cuda_status=$?
-  
-  # Install Ollama if not already installed
-  if ! command -v ollama &> /dev/null; then
-    log "📦 Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh || {
-      log_error "⚠️  Ollama installation failed, continuing..."
-      log "💡 You can install it manually: curl -fsSL https://ollama.com/install.sh | sh"
-    }
-  else
-    ollama_version=$(ollama --version 2>/dev/null || echo "unknown")
-    log "✅ Ollama already installed: $ollama_version"
-  fi
-  
-  # Kill any existing Ollama processes
-  if [[ -f "/tmp/ollama.pid" ]]; then
-    pid=$(cat /tmp/ollama.pid 2>/dev/null)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      log "🛑 Stopping existing Ollama process (PID: $pid)..."
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 1
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f /tmp/ollama.pid
-  fi
-  pkill -f "ollama serve" 2>/dev/null || true
-  
-  # Ensure CUDA environment is available for Ollama
-  setup_cuda_env
-  
-  # Start Ollama server on port 7009 (same as textgen was using)
-  log "🚀 Starting Ollama API server on port 7009..."
-  log "📡 API will be available at: http://localhost:7009/api/generate"
-  log "🌐 Accessible via: https://your-domain/textgen/api/generate"
-  
-  # Set OLLAMA_HOST to bind to all interfaces and use port 7009
-  export OLLAMA_HOST=0.0.0.0:7009
-  
-  # Start Ollama with CUDA environment
-  ollama serve > $LOG_DIR/ollama.log 2>&1 &
-  echo $! > /tmp/ollama.pid
-  sleep 5  # Give it more time to start and detect CUDA
-  
-  # Check if Ollama started successfully
-  if kill -0 $(cat /tmp/ollama.pid) 2>/dev/null; then
-    log "✅ Ollama API server started (PID: $(cat /tmp/ollama.pid))"
-    
-    # Check Ollama logs for CUDA/GPU detection
-    log "🔍 Checking Ollama startup logs for CUDA/GPU detection..."
-    sleep 2
-    if [[ -f "$LOG_DIR/ollama.log" ]]; then
-      # Look for GPU-related messages in Ollama logs
-      if grep -i "gpu\|cuda\|cublas\|metal" "$LOG_DIR/ollama.log" 2>/dev/null | head -5; then
-        log "✅ Found GPU/CUDA references in Ollama logs"
-      else
-        log "⚠️  No GPU/CUDA references found in Ollama logs (may be using CPU)"
-      fi
-      
-      # Show recent log entries
-      log "📋 Recent Ollama log entries:"
-      tail -10 "$LOG_DIR/ollama.log" 2>/dev/null | sed 's/^/   /' || log "   (log file not readable yet)"
-    fi
-    
-    # Try to query Ollama to verify it's running and check GPU usage
-    log "🔍 Verifying Ollama API and checking GPU acceleration..."
-    sleep 2
-    if command -v curl &>/dev/null; then
-      ollama_response=$(curl -s http://localhost:7009/api/tags 2>/dev/null || echo "")
-      if [[ -n "$ollama_response" ]]; then
-        log "✅ Ollama API is responding"
-      else
-        log "⚠️  Ollama API not responding yet (may need more time to start)"
-      fi
-    fi
-    
-    # Final summary
-    echo ""
-    if [[ $cuda_status -eq 0 ]]; then
-      log "✅ Ollama started with GPU acceleration support"
-      log "   CUDA and GPU detected - models will use GPU when available"
-    elif [[ $cuda_status -eq 1 ]]; then
-      log "⚠️  Ollama started but GPU not detected"
-      log "   CUDA available but no GPU found - will use CPU"
-    else
-      log "⚠️  Ollama started in CPU mode"
-      log "   No CUDA detected - all processing will use CPU"
-    fi
-    
-    log "💡 To pull a model: ollama pull llama2"
-    log "💡 API endpoint: http://localhost:7009/api/generate"
-    log "💡 Check GPU usage: nvidia-smi (if GPU is available)"
-  else
-    log_error "❌ Failed to start Ollama server"
-    log_error "   Check logs at: $LOG_DIR/ollama.log"
-  fi
-else
-  log "Skipping Ollama startup (INSTALL_ONLY mode)"
-fi
 
 install_cuda_12() {
     echo "Installing CUDA 12.8 and essential build tools..."
     local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log"
+    local CUDA_STORAGE="/storage/cuda-12.8"
+    local CUDA_TARBALL="/storage/cuda-12.8.tar.gz"
     
-    # Clean up any old marker files (markers don't work for /usr/local/ which doesn't persist)
-    rm -f /storage/.cuda_12.8_installed /storage/.cuda_12.6_installed /storage/.cuda_12.1_installed
-    rm -f /storage/.system_deps_installed  # Also clean up system deps marker (not reliable)
-
-    # Check if CUDA 12.8 is actually installed (verify binary, not marker)
+    # Check if CUDA 12.8 is actually installed and working
     setup_cuda_env
     hash -r
     if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
         echo "✅ CUDA 12.8 already installed and verified (found at $(which nvcc))."
         return 0
-    else
-        echo "CUDA 12.8 not found or wrong version. Installing..."
     fi
+    
+    echo "CUDA 12.8 not found in /usr/local/. Checking persistent storage cache..."
+    
+    # METHOD 1: If tarball exists in storage, extract it (FASTEST - ~5-10 seconds)
+    if [[ -f "$CUDA_TARBALL" ]]; then
+        echo "📦 Found CUDA tarball in storage. Extracting to /usr/local/ (fast method)..."
+        local start_time=$(date +%s)
+        
+        # Extract directly to /usr/local/
+        if tar -xzf "$CUDA_TARBALL" -C /usr/local/ 2>/dev/null; then
+            local end_time=$(date +%s)
+            local duration=$((end_time - start_time))
+            echo "✅ CUDA 12.8 extracted from tarball in ${duration} seconds"
+            
+            # Configure environment
+            setup_cuda_env
+            hash -r
+            
+            # Create profile script
+            cat > /etc/profile.d/cuda12.sh << 'EOL'
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export FORCE_CUDA=1
+EOL
+            chmod +x /etc/profile.d/cuda12.sh
+            
+            # Verify
+            if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
+                echo "✅ CUDA 12.8 ready (extracted from cache in ${duration}s)"
+                return 0
+            fi
+        fi
+        
+        echo "⚠️  Tarball extraction failed, falling back to full install..."
+    fi
+    
+    # METHOD 2: If directory exists in storage, copy it (FAST - ~30 seconds)
+    if [[ -d "$CUDA_STORAGE" ]]; then
+        echo "📁 Found CUDA directory in storage. Copying to /usr/local/ (medium-fast method)..."
+        local start_time=$(date +%s)
+        
+        if cp -r "$CUDA_STORAGE" /usr/local/cuda-12.8; then
+            local end_time=$(date +%s)
+            local duration=$((end_time - start_time))
+            echo "✅ CUDA 12.8 copied from storage in ${duration} seconds"
+            
+            # Configure environment
+            setup_cuda_env
+            hash -r
+            
+            cat > /etc/profile.d/cuda12.sh << 'EOL'
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export FORCE_CUDA=1
+EOL
+            chmod +x /etc/profile.d/cuda12.sh
+            
+            # Verify
+            if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
+                echo "✅ CUDA 12.8 ready (copied from cache in ${duration}s)"
+                return 0
+            fi
+        fi
+        
+        echo "⚠️  Copy failed, falling back to full install..."
+    fi
+    
+    # METHOD 3: Full apt installation (SLOW - ~2-5 minutes) - Only runs once
+    echo "📥 No cache found. Performing full CUDA installation (this will be slow, but only happens once)..."
+    echo "💡 Subsequent runs will use cached version and be much faster!"
+    local start_time=$(date +%s)
     
     # Clean up existing CUDA 11.x if present
     if dpkg -l | grep -q "cuda-11"; then
         echo "Removing existing CUDA 11.x installations..."
-        apt-get remove --purge -y 'cuda-11-*' 'cuda-repo-ubuntu*-11-*' 'nvidia-cuda-toolkit' || echo "No CUDA 11.x found or removal failed."
+        apt-get remove --purge -y 'cuda-11-*' 'cuda-repo-ubuntu*-11-*' 'nvidia-cuda-toolkit' 2>/dev/null || true
         apt-get autoremove -y
     fi
 
@@ -390,13 +286,9 @@ install_cuda_12() {
     rm -f /tmp/cuda-keyring.deb
 
     echo "Running apt-get update..."
-    if ! apt-get update >> "$APT_INSTALL_LOG" 2>&1; then
-        log_error "apt-get update failed. Check $APT_INSTALL_LOG for details."
-        cat "$APT_INSTALL_LOG"
-        return 1
-    fi
+    apt-get update >> "$APT_INSTALL_LOG" 2>&1
 
-    # List of CUDA packages to install
+    # Install CUDA packages
     local CUDA_PACKAGES=(
         "cuda-cudart-12-8"
         "cuda-cudart-dev-12-8"
@@ -417,7 +309,7 @@ install_cuda_12() {
         "libnpp-dev-12-8"
     )
     
-    echo "Installing CUDA packages..."
+    echo "Installing CUDA packages (this may take 2-5 minutes)..."
     apt-get install -y \
         build-essential \
         python3-dev \
@@ -429,19 +321,20 @@ install_cuda_12() {
         libgl1- \
         "${CUDA_PACKAGES[@]}" >> "$APT_INSTALL_LOG" 2>&1
     
-    local apt_exit_code=$?
-    
-    if [ $apt_exit_code -ne 0 ]; then
-        log_error "CUDA installation failed. Exit code: $apt_exit_code"
+    if [ $? -ne 0 ]; then
+        log_error "CUDA installation failed. Check $APT_INSTALL_LOG"
         cat "$APT_INSTALL_LOG"
         return 1
     fi
 
-    # Configure environment immediately after install
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    echo "✅ CUDA 12.8 installed via apt in ${duration} seconds"
+
+    # Configure environment
     setup_cuda_env
     hash -r
 
-    # Make environment persistent
     cat > /etc/profile.d/cuda12.sh << 'EOL'
 export CUDA_HOME=/usr/local/cuda-12.8
 export PATH=$CUDA_HOME/bin:$PATH
@@ -450,25 +343,42 @@ export FORCE_CUDA=1
 EOL
     chmod +x /etc/profile.d/cuda12.sh
 
-    # Verify installation (no marker file needed - CUDA in /usr/local/ doesn't persist on Paperspace)
-    echo "Verifying CUDA 12.8 installation..."
-    if command -v nvcc &>/dev/null; then
-        local installed_version
-        installed_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')
-        if [[ "$installed_version" == "12.8"* ]]; then
-            echo "✅ CUDA 12.8 installation verified successfully (Version: $installed_version)."
-            echo "   Note: CUDA is installed in /usr/local/ and will need reinstallation after reboot on Paperspace"
-            return 0
-        else
-            log_error "CUDA 12.8 installation verification failed. Found nvcc, but version is '$installed_version'."
-            log_error "Which nvcc: $(which nvcc)"
-            log_error "PATH: $PATH"
-            return 1
+    # Verify installation
+    if command -v nvcc &>/dev/null && [[ "$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//')" == "12.8"* ]]; then
+        echo "✅ CUDA 12.8 installation verified"
+        
+        # Cache for future runs - create both directory copy AND tarball
+        echo "💾 Caching CUDA installation to persistent storage for faster future startups..."
+        cache_start=$(date +%s)
+        
+        # Method 1: Copy directory to storage (backup method)
+        if [[ ! -d "$CUDA_STORAGE" ]]; then
+            echo "📁 Creating directory copy in storage..."
+            cp -r /usr/local/cuda-12.8 "$CUDA_STORAGE" && \
+            echo "✅ Directory copy created at $CUDA_STORAGE"
         fi
+        
+        # Method 2: Create compressed tarball (primary method - faster extraction)
+        if [[ ! -f "$CUDA_TARBALL" ]]; then
+            echo "📦 Creating compressed tarball for fastest future extraction..."
+            # Use pigz for parallel compression if available (much faster)
+            if command -v pigz &>/dev/null; then
+                tar -I pigz -cf "$CUDA_TARBALL" -C /usr/local cuda-12.8 && \
+                echo "✅ Compressed tarball created at $CUDA_TARBALL (with pigz)"
+            else
+                tar -czf "$CUDA_TARBALL" -C /usr/local cuda-12.8 && \
+                echo "✅ Compressed tarball created at $CUDA_TARBALL"
+            fi
+        fi
+        
+        cache_end=$(date +%s)
+        cache_duration=$((cache_end - cache_start))
+        echo "✅ Caching completed in ${cache_duration} seconds"
+        echo "💡 Next startup will extract from cache in ~5-10 seconds instead of ~${duration} seconds!"
+        
+        return 0
     else
-        log_error "CUDA 12.8 installation verification failed. NVCC command not found after installation attempt."
-        log_error "Check /usr/local/cuda-12.8/bin exists and contains nvcc."
-        ls -l /usr/local/cuda-12.8/bin/nvcc || true
+        log_error "CUDA 12.8 installation verification failed"
         return 1
     fi
 }
@@ -535,22 +445,116 @@ install_critical_packages() {
         "huggingface_hub>=0.34.0" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate" "pyOpenSSL"
     )
     
-    local installed_count=0
-    local failed_count=0
+    # Create Python script to check all packages at once (much faster)
+    cat > /tmp/check_packages.py << 'CHECKEOF'
+import sys
+import importlib.util
+
+# Package name mapping for imports that differ from package names
+PACKAGE_MAPPING = {
+    'opencv-python': 'cv2',
+    'opencv-python-headless': 'cv2',
+    'opencv-contrib-python': 'cv2',
+    'scikit-image': 'skimage',
+    'scikit-learn': 'sklearn',
+    'Pillow': 'PIL',
+    'pillow': 'PIL',
+    'pyOpenSSL': 'OpenSSL',
+}
+
+def normalize_package_name(pkg):
+    """Extract base package name and normalize"""
+    # Remove version specifiers
+    base = pkg.split('>=')[0].split('==')[0].split('<')[0].split('>')[0].split('!=')[0].strip()
+    return PACKAGE_MAPPING.get(base, base.replace('-', '_'))
+
+def is_installed(pkg):
+    """Check if package is importable"""
+    try:
+        module_name = normalize_package_name(pkg)
+        spec = importlib.util.find_spec(module_name)
+        return spec is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+# Read packages from command line arguments
+packages = sys.argv[1:]
+missing = [pkg for pkg in packages if not is_installed(pkg)]
+
+# Print missing packages (one per line)
+for pkg in missing:
+    print(pkg)
+CHECKEOF
     
-    for pkg in "${critical_packages[@]}"; do
-        log "📦 Installing: $pkg"
-        if pip install --quiet --no-cache-dir "$pkg" 2>/dev/null; then
-            log "✅ Successfully installed: $pkg"
-            ((installed_count++))
-        else
-            log_error "❌ Failed to install: $pkg"
-            ((failed_count++))
+    log "🔍 Checking which packages are already installed..."
+    local missing_packages
+    missing_packages=$(python /tmp/check_packages.py "${critical_packages[@]}" 2>/dev/null)
+    
+    if [[ -z "$missing_packages" ]]; then
+        log "✅ All critical packages already installed (0 to install)"
+        rm -f /tmp/check_packages.py
+        return 0
+    fi
+    
+    # Count missing packages
+    local missing_count=$(echo "$missing_packages" | wc -l)
+    log "📊 Found $missing_count packages to install"
+    
+    # Convert to array for pip
+    local missing_array=()
+    while IFS= read -r pkg; do
+        [[ -n "$pkg" ]] && missing_array+=("$pkg")
+    done <<< "$missing_packages"
+    
+    # Setup wheel cache for faster future installs
+    local WHEEL_CACHE="/storage/.critical_packages_wheels"
+    mkdir -p "$WHEEL_CACHE"
+    
+    # Install all missing packages in ONE batch command (much faster!)
+    log "📦 Installing all missing packages in batch (faster than one-by-one)..."
+    local start_time=$(date +%s)
+    
+    # Batch install with pip (parallel downloads, single dependency resolution)
+    # Try to use cached wheels first, then download if needed
+    if pip install --quiet --find-links="$WHEEL_CACHE" --no-cache-dir "${missing_array[@]}" 2>/dev/null; then
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        log "✅ Successfully installed $missing_count packages in ${duration} seconds"
+        if [[ $missing_count -gt 0 ]]; then
+            local avg=$((duration / missing_count))
+            log "📊 Average: ${avg} seconds per package (batch mode)"
         fi
-    done
-    
-    log "📊 Critical packages: $installed_count installed, $failed_count failed"
-    return $failed_count
+        
+        # Cache wheels for future instant installs
+        log "💾 Caching wheels to storage for future instant installs..."
+        pip download --no-deps --dest "$WHEEL_CACHE" "${missing_array[@]}" 2>/dev/null || true
+        
+        rm -f /tmp/check_packages.py
+        return 0
+    else
+        log_error "❌ Batch installation failed, falling back to individual installation..."
+        
+        # Fallback: Install individually (slower but more reliable)
+        local installed_count=0
+        local failed_count=0
+        
+        for pkg in "${missing_array[@]}"; do
+            log "📦 Installing: $pkg"
+            if pip install --quiet --no-cache-dir "$pkg" 2>/dev/null; then
+                log "✅ Successfully installed: $pkg"
+                # Cache this wheel too
+                pip download --no-deps --dest "$WHEEL_CACHE" "$pkg" 2>/dev/null || true
+                ((installed_count++))
+            else
+                log_error "❌ Failed to install: $pkg"
+                ((failed_count++))
+            fi
+        done
+        
+        log "📊 Individual install: $installed_count installed, $failed_count failed"
+        rm -f /tmp/check_packages.py
+        return $failed_count
+    fi
 }
 
 # SAM2 Installation Process (with wheel caching like SageAttention)
@@ -1176,10 +1180,11 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         libjpeg-dev libpng-dev \
         python3-dev build-essential \
         libgl1-mesa-dev \
-        espeak-ng > /dev/null 2>&1 || {
+        espeak-ng \
+        pigz > /dev/null 2>&1 || {
         echo "Warning: Some packages failed to install"
     }
-    echo "✅ System dependencies check completed"
+    echo "✅ System dependencies check completed (including pigz for fast CUDA caching)"
 
     # Python environment setup
     pip install pip==24.0
@@ -2244,12 +2249,37 @@ cd "/storage/stable-diffusion-comfy/models/" && rm -rf RMBG && ln -s /tmp/stable
 echo "✅ Model symlinks created successfully"
 
 #######################################
-# STEP 10: START COMFYUI
+# STEP 10: DOWNLOAD MODELS (BACKGROUND)
+#######################################
+if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
+  echo ""
+  echo "=================================================="
+  echo "        STEP 10: DOWNLOAD MODELS (BACKGROUND)"
+  echo "=================================================="
+  echo ""
+  echo "### Downloading Models for Stable Diffusion Comfy in Background ###"
+  log "Starting Model Download for Stable Diffusion Comfy in background..."
+  log "💡 Models will download in background while the rest of the setup continues!"
+  log "💡 You can start using ComfyUI as soon as it starts, even if models are still downloading!"
+  
+  # Start model download in background
+  bash $current_dir/../utils/sd_model_download/main.sh > /tmp/model_download.log 2>&1 &
+  download_pid=$!
+  echo "$download_pid" > /tmp/model_download.pid
+  log "📋 Model download started with PID: $download_pid in background"
+  log "📋 Check download progress with: tail -f /tmp/model_download.log"
+  log "📋 Stop download with: kill \$(cat /tmp/model_download.pid)"
+else
+  log "Skipping Model Download for Stable Diffusion Comfy"
+fi
+
+#######################################
+# STEP 11: START COMFYUI
 #######################################
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo ""
   echo "=================================================="
-  echo "             STEP 10: START COMFYUI"
+  echo "             STEP 11: START COMFYUI"
   echo "=================================================="
   echo ""
   
@@ -2408,11 +2438,105 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   log "✅ ComfyUI started successfully! You can now access it at http://localhost:$SD_COMFY_PORT"
   
   #######################################
-  # STEP 10.5: INSTALL TENSORFLOW (BACKGROUND)
+  # STEP 11.1: START OLLAMA (AFTER COMFYUI)
   #######################################
   echo ""
   echo "=================================================="
-  echo "   STEP 10.5: INSTALL TENSORFLOW (BACKGROUND)"
+  echo "        STEP 11.1: START OLLAMA (AFTER COMFYUI)"
+  echo "=================================================="
+  echo ""
+  
+  # Function to check CUDA availability and GPU status
+  check_cuda_for_ollama() {
+    log "🔍 Checking CUDA availability for Ollama..."
+    
+    local cuda_available=false
+    local cuda_version="unknown"
+    local nvidia_gpu_available=false
+    local gpu_name="unknown"
+    
+    if command -v nvcc &>/dev/null; then
+        cuda_available=true
+        cuda_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
+        log "✅ CUDA detected: Version $cuda_version"
+    else
+        log "⚠️  CUDA not detected (nvcc not found)"
+    fi
+    
+    if command -v nvidia-smi &>/dev/null; then
+        local nvidia_smi_output
+        nvidia_smi_output=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "")
+        if [[ -n "$nvidia_smi_output" ]]; then
+            nvidia_gpu_available=true
+            gpu_name="$nvidia_smi_output"
+            log "✅ NVIDIA GPU detected: $gpu_name"
+        fi
+    fi
+    
+    if [[ "$cuda_available" == "true" && "$nvidia_gpu_available" == "true" ]]; then
+        log "✅ CUDA and GPU detected - Ollama will use GPU acceleration"
+        return 0
+    elif [[ "$cuda_available" == "true" ]]; then
+        log "⚠️  CUDA detected but no GPU found - Ollama will use CPU"
+        return 1
+    else
+        log "⚠️  No CUDA detected - Ollama will run in CPU mode"
+        return 2
+    fi
+  }
+  
+  # Check CUDA status
+  check_cuda_for_ollama
+  cuda_status=$?
+  
+  # Install Ollama if not already installed
+  if ! command -v ollama &> /dev/null; then
+    log "📦 Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh || {
+      log_error "⚠️  Ollama installation failed, continuing..."
+    }
+  else
+    ollama_version=$(ollama --version 2>/dev/null || echo "unknown")
+    log "✅ Ollama already installed: $ollama_version"
+  fi
+  
+  # Kill any existing Ollama processes
+  if [[ -f "/tmp/ollama.pid" ]]; then
+    pid=$(cat /tmp/ollama.pid 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      log "🛑 Stopping existing Ollama process (PID: $pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f /tmp/ollama.pid
+  fi
+  pkill -f "ollama serve" 2>/dev/null || true
+  
+  # Ensure CUDA environment is available for Ollama
+  setup_cuda_env
+  
+  # Start Ollama server on port 7009
+  log "🚀 Starting Ollama API server on port 7009..."
+  export OLLAMA_HOST=0.0.0.0:7009
+  
+  ollama serve > $LOG_DIR/ollama.log 2>&1 &
+  echo $! > /tmp/ollama.pid
+  sleep 3
+  
+  if kill -0 $(cat /tmp/ollama.pid) 2>/dev/null; then
+    log "✅ Ollama API server started (PID: $(cat /tmp/ollama.pid))"
+    log "📡 API endpoint: http://localhost:7009/api/generate"
+  else
+    log_error "❌ Failed to start Ollama server"
+  fi
+  
+  #######################################
+  # STEP 11.2: INSTALL TENSORFLOW (BACKGROUND)
+  #######################################
+  echo ""
+  echo "=================================================="
+  echo "   STEP 11.2: INSTALL TENSORFLOW (BACKGROUND)"
   echo "=================================================="
   echo ""
   echo "📦 Installing TensorFlow in background (using /tmp venv)..."
@@ -2462,11 +2586,11 @@ TENSORFLOW_SCRIPT
   log "💡 TensorFlow will be available in /tmp/tensorflow-env (activate with: source /tmp/activate_tensorflow.sh)"
   
   #######################################
-  # STEP 10.6: INSTALL SAM2 (BACKGROUND)
+  # STEP 11.3: INSTALL SAM2 (BACKGROUND)
   #######################################
   echo ""
   echo "=================================================="
-  echo "        STEP 10.6: INSTALL SAM2 (BACKGROUND)"
+  echo "        STEP 11.3: INSTALL SAM2 (BACKGROUND)"
   echo "=================================================="
   echo ""
   echo "📦 Installing SAM2 in background..."
@@ -2486,30 +2610,6 @@ TENSORFLOW_SCRIPT
   
   log "📋 SAM2 installation started in background (PID: $(cat /tmp/sam2_install.pid))"
   log "📋 Check installation progress: tail -f /tmp/sam2_install.log"
-fi
-
-#######################################
-# STEP 11: DOWNLOAD MODELS (BACKGROUND)
-#######################################
-if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
-  echo ""
-  echo "=================================================="
-  echo "        STEP 11: DOWNLOAD MODELS (BACKGROUND)"
-  echo "=================================================="
-  echo ""
-  echo "### Downloading Models for Stable Diffusion Comfy in Background ###"
-  log "Starting Model Download for Stable Diffusion Comfy in background..."
-  log "💡 Models will download in background while ComfyUI is running 💡 You can start using ComfyUI immediately!"
-  
-  # Start model download in background
-  bash $current_dir/../utils/sd_model_download/main.sh > /tmp/model_download.log 2>&1 &
-  download_pid=$!
-  echo "$download_pid" > /tmp/model_download.pid
-  log "📋 Model download started with PID: $download_pid in background"
-  log "📋 Check download progress with: tail -f /tmp/model_download.log"
-  log "📋 Stop download with: kill \$(cat /tmp/model_download.pid)"
-else
-  log "Skipping Model Download for Stable Diffusion Comfy"
 fi
 
 #######################################
