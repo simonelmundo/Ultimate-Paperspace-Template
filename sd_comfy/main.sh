@@ -560,10 +560,6 @@ install_sam2_optimized() {
     # Setup environment
     setup_cuda_env
     
-    # Ensure wheel cache directory exists
-    export WHEEL_CACHE_DIR="/storage/.wheel_cache"
-    mkdir -p "$WHEEL_CACHE_DIR"
-    
     # First, just try to import it. If it works, we're done.
     if python -c "import sam2" &>/dev/null; then
         log "✅ SAM2 is already installed and importable."
@@ -571,111 +567,22 @@ install_sam2_optimized() {
     fi
 
     log "SAM2 not found. Proceeding with installation..."
-
-    # Now, check for a compatible cached wheel.
-    if check_and_install_cached_wheel_sam2; then
-        log "✅ Successfully installed SAM2 from cached wheel."
-        # Final verification
-        if python -c "import sam2" &>/dev/null; then
-             log "✅ SAM2 import confirmed after wheel installation."
-             return 0
-        else
-             log_error "Installed from wheel, but import still fails. This likely means the cached wheel is incompatible."
-             # Fall through to build
-        fi
-    fi
-
-    log "No suitable cached wheel found or installation from wheel failed. Proceeding with full build."
     
     # Proceed with full installation from source
     install_sam2_dependencies
     if clone_or_update_sam2_repo; then
-         build_and_install_sam2 # This function will cache the wheel on success
+         build_and_install_sam2
     else
          log_error "Failed to clone or update SAM2 repository. Skipping build."
-         return 1 # Cannot proceed
+         return 1
     fi
 
     # Final check after building from source
-    log "Performing final SAM2 verification..."
-    pushd /tmp > /dev/null # Change to neutral directory to avoid import conflicts
-    local final_import_output
-    local final_import_status
-    final_import_output=$(python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} successfully built and installed from source.')" 2>&1)
-    final_import_status=$?
-    popd > /dev/null # Return to original directory
-    
-    if [[ $final_import_status -eq 0 ]]; then
-        log "$final_import_output"
+    if python -c "import sam2" &>/dev/null; then
+        log "✅ SAM2 successfully built and installed."
         return 0
     else
-        log_error "❌ Final SAM2 verification failed."
-        log_error "Import error output:"
-        log_error "$final_import_output"
-        # Don't fail completely since previous verification passed
-        log_error "Previous verification passed, so SAM2 may still be functional."
-        return 0  # Return success to continue script
-    fi
-}
-
-# SAM2 Helper Functions
-check_and_install_cached_wheel_sam2() {
-    local arch=$(uname -m)
-    local python_executable="$VENV_DIR/sd_comfy-env/bin/python"
-
-    local py_version_short
-    py_version_short=$("$python_executable" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-    if [[ -z "$py_version_short" ]]; then
-        log_error "Could not determine Python version for wheel search."
-        return 1
-    fi
-    local python_version_tag="cp${py_version_short}"
-
-    log "🔍 Checking for cached SAM2 wheel..."
-    log "  Python version: $python_version_tag"
-    log "  Architecture: $arch"
-    log "  Wheel cache dir: $WHEEL_CACHE_DIR"
-
-    # Debug: Show all SAM2 wheels in cache
-    log "  All SAM2 wheels in cache:"
-    find "$WHEEL_CACHE_DIR" -name "sam2*.whl" -type f 2>/dev/null | sed 's/^/    /' || log "    No wheels found"
-
-    # Look for ANY SAM2 wheel in the wheel cache (version-agnostic, more flexible pattern)
-    # Try exact match first, then fall back to any sam2 wheel with matching Python version
-    local sam2_wheel
-    sam2_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sam2-*-${python_version_tag}-*-linux_${arch}.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
-    
-    # If exact match not found, try more flexible pattern (any sam2 wheel with Python version)
-    if [[ ! -f "$sam2_wheel" ]]; then
-        sam2_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "*sam2*-${python_version_tag}*.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
-    fi
-    
-    # Last resort: any sam2 wheel (will verify compatibility during install)
-    if [[ ! -f "$sam2_wheel" ]]; then
-        sam2_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sam2*.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
-    fi
-
-    if [[ ! -f "$sam2_wheel" ]]; then
-        log "❌ No suitable cached wheel found in $WHEEL_CACHE_DIR for Python ${python_version_tag}."
-        log "  Searched for patterns: sam2-*-${python_version_tag}-*-linux_${arch}.whl, *sam2*-${python_version_tag}*.whl, sam2*.whl"
-        return 1
-    fi
-
-    log "Found cached wheel: $(basename "$sam2_wheel"). Attempting installation..."
-    
-    # Check if SAM2 is already working
-    if python -c "import sam2" 2>/dev/null; then
-        log "✅ SAM2 is already working, skipping cached wheel installation"
-        return 0
-    fi
-    
-    if "$python_executable" -m pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$sam2_wheel"; then
-        log "Installation of cached wheel succeeded."
-        return 0
-    else
-        log_error "Installation of cached wheel $(basename "$sam2_wheel") failed."
-        log_error "This wheel may be corrupt or incompatible. Deleting it."
-        rm -f "$sam2_wheel"
+        log_error "❌ SAM2 installation verification failed."
         return 1
     fi
 }
@@ -766,9 +673,6 @@ build_and_install_sam2() {
 
     if [[ -n "$built_wheel" ]]; then
         log "Found built wheel: $built_wheel"
-        cp "$built_wheel" "$WHEEL_CACHE_DIR/"
-        log "Cached built wheel to $WHEEL_CACHE_DIR/$(basename "$built_wheel")"
-
         log "Installing newly built wheel: $built_wheel"
         if pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$built_wheel"; then
             log "✅ SAM2 wheel installed successfully"
@@ -786,36 +690,37 @@ build_and_install_sam2() {
 
 # Function to fix common custom node import errors
 fix_custom_node_import_errors() {
-    log "🔧 Fixing common custom node import errors..."
+    log "🔧 Checking for missing custom node dependencies..."
     
-    # Fix relative import issues (like in comfyui-impact-pack)
-    log "🔧 Checking for relative import issues..."
+    # Use a single Python script to check all imports at once (much faster)
+    local missing_packages=$(python -c "
+import sys
+missing = []
+try:
+    import rembg
+except ImportError:
+    missing.append('rembg')
+try:
+    import onnxruntime
+except ImportError:
+    missing.append('onnxruntime')
+try:
+    import cv2
+except ImportError:
+    missing.append('opencv-python')
+try:
+    import trimesh
+except ImportError:
+    missing.append('trimesh')
+print(' '.join(missing))
+" 2>/dev/null || echo "")
     
-    # Fix rembg import issues
-    if ! python -c "import rembg" 2>/dev/null; then
-        log "📦 Installing rembg for ComfyUI-Hunyuan3d-2-1..."
-        pip install --quiet --no-cache-dir rembg 2>/dev/null || log_error "rembg installation failed"
+    if [[ -n "$missing_packages" ]]; then
+        log "📦 Installing missing packages: $missing_packages"
+        pip install --quiet --no-cache-dir $missing_packages 2>/dev/null || log_error "Some packages failed to install"
     fi
     
-    # Fix onnxruntime import issues
-    if ! python -c "import onnxruntime" 2>/dev/null; then
-        log "📦 Installing onnxruntime for comfyui_controlnet_aux..."
-        pip install --quiet --no-cache-dir onnxruntime 2>/dev/null || log_error "onnxruntime installation failed"
-    fi
-    
-    # Fix OpenCV import issues
-    if ! python -c "import cv2" 2>/dev/null; then
-        log "📦 Installing opencv-python for various nodes..."
-        pip install --quiet --no-cache-dir opencv-python 2>/dev/null || log_error "opencv-python installation failed"
-    fi
-    
-    # Fix trimesh import issues
-    if ! python -c "import trimesh" 2>/dev/null; then
-        log "📦 Installing trimesh for 3D models..."
-        pip install --quiet --no-cache-dir trimesh 2>/dev/null || log_error "trimesh installation failed"
-    fi
-    
-    log "✅ Custom node import error fixes completed"
+    log "✅ Custom node dependencies check completed"
 }
 
 # Function removed - redundant with install_xformers()
@@ -1575,14 +1480,14 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     install_nunchaku() {
         log "🔧 Installing Nunchaku quantization library..."
         
-        # Check if already installed and working
-        if python -c "import nunchaku" 2>/dev/null; then
-            local current_version=$(python -c "import nunchaku; print(nunchaku.__version__)" 2>/dev/null)
-            log "✅ Nunchaku $current_version already installed and working"
+        # Check if already installed and working (single Python call to check and get version)
+        local nunchaku_check=$(python -c "import nunchaku; print(nunchaku.__version__)" 2>/dev/null)
+        if [[ -n "$nunchaku_check" ]]; then
+            log "✅ Nunchaku $nunchaku_check already installed and working"
             return 0
         fi
         
-        # Check PyTorch compatibility first
+        # Check PyTorch compatibility (only if not already installed)
         if ! python -c "import torch; v=torch.__version__.split('+')[0]; major,minor=map(int,v.split('.')[:2]); exit(0 if major>2 or (major==2 and minor>=5) else 1)" 2>/dev/null; then
             log_error "❌ Nunchaku requires PyTorch >=2.5"
             return 1
@@ -1590,11 +1495,10 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         
         # Install Nunchaku wheel directly from URL
         log "🔄 Installing Nunchaku wheel from GitHub releases..."
-        log "🔧 Command: pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-tech/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.8-cp310-cp310-linux_x86_64.whl"
-        
         if pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-tech/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.8-cp310-cp310-linux_x86_64.whl; then
             log "✅ Nunchaku wheel installed successfully"
-            if python -c "import nunchaku; print(f'✅ Nunchaku {nunchaku.__version__} imported successfully')" 2>/dev/null; then
+            # Quick verification
+            if python -c "import nunchaku" 2>/dev/null; then
                 log "✅ Nunchaku installation verified"
                 return 0
             else
@@ -1736,14 +1640,8 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     set +e
     disable_err_trap
     
-    log "🚀 Starting Nunchaku installation..."
     install_nunchaku
     nunchaku_status=$?
-    log "🏁 Nunchaku installation completed with status: $nunchaku_status"
-    
-    # Test if we can continue
-    echo "🎯 Testing script continuation after Nunchaku installation..."
-    log "🎯 Script continuing to next step..."
     
     # Re-enable set -e and ERR trap
     set -e
@@ -1755,10 +1653,6 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         log_error "⚠️ Nunchaku installation had issues (Status: $nunchaku_status)"
         log_error "ComfyUI will continue without Nunchaku quantization support"
     fi
-    
-    # Force continue regardless of status to prevent script exit
-    echo "🔄 Continuing to next step regardless of Nunchaku status..."
-    nunchaku_status=0  # Force success to ensure continuation
 
     # --- STEP 8: INSTALL SAGEATTENTION OPTIMIZATION ---
     echo ""
@@ -2058,38 +1952,6 @@ EOF
         log_error "Some custom nodes may not work properly"
     fi
 
-    # --- STEP 7.5: INSTALL SAM2 OPTIMIZED ---
-    echo ""
-    echo "=================================================="
-    echo "        STEP 7.5: INSTALL SAM2 OPTIMIZED"
-    echo "=================================================="
-    echo ""
-    
-    # Temporarily disable set -e and ERR trap for SAM2 installation
-    set +e
-    disable_err_trap
-    
-    log "🚀 Installing SAM2 with optimizations (faster than Git install)..."
-    # Force SAM2 installation to never fail the script
-    install_sam2_optimized 2>/dev/null || true
-    sam2_status=$?
-    
-    # Re-enable set -e and ERR trap
-    set -e
-    enable_err_trap
-    
-    # Always report status but never fail the script
-    if [[ $sam2_status -eq 0 ]]; then
-        echo "✅ SAM2 installation completed successfully."
-    else
-        log_error "⚠️ SAM2 installation had issues (Status: $sam2_status)"
-        log_error "Some custom nodes requiring SAM2 may not work properly"
-        log_error "Continuing with script execution..."
-    fi
-    
-    # Force continue regardless of SAM2 status
-    echo "🔄 Continuing to next step regardless of SAM2 status..."
-    sam2_status=0  # Force success to ensure continuation
 
     # --- STEP 8: VERIFY INSTALLATIONS ---
     echo ""
@@ -2598,6 +2460,32 @@ TENSORFLOW_SCRIPT
   log "📋 TensorFlow installation started in background (PID: $(cat /tmp/tensorflow_install.pid))"
   log "📋 Check installation progress: tail -f /tmp/tensorflow_install.log"
   log "💡 TensorFlow will be available in /tmp/tensorflow-env (activate with: source /tmp/activate_tensorflow.sh)"
+  
+  #######################################
+  # STEP 10.6: INSTALL SAM2 (BACKGROUND)
+  #######################################
+  echo ""
+  echo "=================================================="
+  echo "        STEP 10.6: INSTALL SAM2 (BACKGROUND)"
+  echo "=================================================="
+  echo ""
+  echo "📦 Installing SAM2 in background..."
+  log "Starting SAM2 installation in background..."
+  
+  # Run SAM2 installation in background (functions are already defined)
+  (
+    set +e
+    install_sam2_optimized > /tmp/sam2_install.log 2>&1
+    if [ $? -eq 0 ]; then
+      echo "✅ SAM2 installed successfully" >> /tmp/sam2_install.log
+    else
+      echo "⚠️ SAM2 installation failed (optional dependency)" >> /tmp/sam2_install.log
+    fi
+  ) &
+  echo $! > /tmp/sam2_install.pid
+  
+  log "📋 SAM2 installation started in background (PID: $(cat /tmp/sam2_install.pid))"
+  log "📋 Check installation progress: tail -f /tmp/sam2_install.log"
 fi
 
 #######################################
