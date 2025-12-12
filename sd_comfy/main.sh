@@ -27,8 +27,7 @@ fi
 source .env || { echo "Failed to source .env"; exit 1; }
 
 # OVERRIDE: Use persistent storage for virtual environment
-# This persists ~7GB of core ML packages (PyTorch, CUDA) between runs
-# Note: TensorFlow excluded (not needed, saves 6GB including TensorRT)
+# This persists 8GB of core ML packages (PyTorch, CUDA, TensorFlow) between runs
 # Change this path if you want to use a different location
 export VENV_DIR="/storage/venvs"
 echo "📁 VENV_DIR: $VENV_DIR (persistent storage for 8GB core packages)"
@@ -1098,7 +1097,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             # Try to activate and verify core packages are actually importable
             if source "$VENV_PATH/bin/activate" 2>/dev/null; then
                 # Check if heavy core packages are installed and working
-                if python -c "import torch" 2>/dev/null; then
+                if python -c "import torch, tensorflow" 2>/dev/null; then
                     log "✅ Core packages found in existing venv at $VENV_PATH"
                     CORE_INSTALLED=true
                 else
@@ -1145,9 +1144,8 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     
     # Check if we need to install core packages (8GB heavy ML packages)
     if [[ "$CORE_INSTALLED" == "false" || -n "$REINSTALL_SD_COMFY" ]]; then
-        log "📦 Installing CORE packages (~7GB - this takes ~20 minutes)..."
-        log "   Packages: PyTorch, CUDA libs, xformers, triton, etc."
-        log "   Note: TensorFlow excluded (not needed for ComfyUI, saves 1.7GB + 4.4GB TensorRT)"
+        log "📦 Installing CORE packages (8GB - this takes ~20 minutes)..."
+        log "   Packages: PyTorch, CUDA libs, TensorFlow, xformers, triton, etc."
         INSTALL_CORE=true
         
         # System dependencies (only needed when installing core packages)
@@ -1725,25 +1723,14 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     # Custom node dependencies already handled in Step 5
 
     # --- STEP 6: INSTALL PYTHON DEPENDENCIES ---
-    if [[ "$INSTALL_CORE" == "true" ]]; then
-        echo ""
-        echo "=================================================="
-        echo "        STEP 6: INSTALL PYTHON DEPENDENCIES"
-        echo "=================================================="
-        echo ""
-        
-        # TensorFlow is NOT installed - ComfyUI uses PyTorch, not TensorFlow
-        # Excluding TensorFlow saves ~6GB (1.7GB TensorFlow + 4.4GB TensorRT dependency)
-        log "⏭️  Skipping TensorFlow installation (not needed for ComfyUI)"
-        log "   ComfyUI uses PyTorch exclusively. Excluding TensorFlow saves ~6GB."
-    else
-        echo ""
-        echo "=================================================="
-        echo "        STEP 6: PYTHON DEPENDENCIES (SKIPPED)"
-        echo "=================================================="
-        echo ""
-        log "⏭️  Skipping core Python dependencies (already in storage)"
-    fi
+    echo ""
+    echo "=================================================="
+    echo "        STEP 6: PYTHON DEPENDENCIES"
+    echo "=================================================="
+    echo ""
+    log "⏭️  Skipping TensorFlow installation during setup"
+    log "   TensorFlow (1.6GB) + TensorRT (4.4GB) will be installed to /tmp after ComfyUI starts"
+    log "   This keeps persistent storage at ~10GB instead of 16GB"
 
     # Optimized requirements processing with dependency caching
     process_requirements() {
@@ -1782,8 +1769,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             [[ ! -f "$file" ]] && return 0
             
             # Add requirements from this file (with error handling)
-            # Exclude TensorFlow and TensorRT packages (not needed for ComfyUI, saves 6GB)
-            if ! grep -v "^-r\|^#\|^$\|tensorflow\|tensorrt\|polygraphy" "$file" >> "$combined_reqs" 2>/dev/null; then
+            if ! grep -v "^-r\|^#\|^$" "$file" >> "$combined_reqs" 2>/dev/null; then
                 echo "${ind}Warning: Failed to read requirements from $file"
                 return 0
             fi
@@ -1930,25 +1916,16 @@ EOF
         if [[ -s "/tmp/missing_packages.txt" ]]; then
             echo "${indent}Installing missing packages in batches..."
             
-            # Filter out TensorFlow and TensorRT packages (not needed for ComfyUI, saves 6GB)
-            grep -v -i "tensorflow\|tensorrt\|polygraphy" "/tmp/missing_packages.txt" > "/tmp/missing_packages_filtered.txt" 2>/dev/null || cp "/tmp/missing_packages.txt" "/tmp/missing_packages_filtered.txt"
-            
             # Split into smaller batches of 10 packages each
-            split -l 10 "/tmp/missing_packages_filtered.txt" "/tmp/pkg_batch_" 2>/dev/null || true
+            split -l 10 "/tmp/missing_packages.txt" "/tmp/pkg_batch_"
             
             # Install each batch separately
             for batch in /tmp/pkg_batch_*; do
-                [[ ! -f "$batch" ]] && continue
                 echo "${indent}Installing batch $(basename "$batch")..."
                 # Add timeout of 60 seconds (1 minute) to pip batch installation
                 if ! timeout 60s pip install --no-cache-dir --disable-pip-version-check -r "$batch" 2>/dev/null; then
                     echo "${indent}Batch installation failed or timed out after 1 minute, falling back to individual installation..."
                     while read -r pkg; do
-                        # Skip TensorFlow/TensorRT packages
-                        if echo "$pkg" | grep -qi "tensorflow\|tensorrt\|polygraphy"; then
-                            echo "${indent}  Skipping: $pkg (TensorFlow/TensorRT excluded - saves 6GB)"
-                            continue
-                        fi
                         echo "${indent}  Installing: $pkg"
                         pip install --no-cache-dir --disable-pip-version-check "$pkg" 2>/dev/null || echo "${indent}  Failed to install: $pkg (continuing)"
                     done < "$batch"
@@ -2500,6 +2477,54 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Wait a moment for ComfyUI to start
   sleep 3
   log "✅ ComfyUI started successfully! You can now access it at http://localhost:$SD_COMFY_PORT"
+  
+  # Install TensorFlow to /tmp (non-persistent) in background after ComfyUI starts
+  install_tensorflow_to_tmp() {
+    local TF_TMP_DIR="/tmp/tensorflow_packages"
+    local TF_LOG="$LOG_DIR/tensorflow_install.log"
+    
+    log "📦 Starting TensorFlow installation to /tmp (non-persistent) in background..."
+    log "   This will install TensorFlow (1.6GB) + TensorRT (4.4GB) to $TF_TMP_DIR"
+    log "   Installation log: $TF_LOG"
+    log "   Note: This is installed to /tmp and will be deleted on restart (saves 6GB persistent storage)"
+    
+    # Create directory for TensorFlow packages
+    mkdir -p "$TF_TMP_DIR"
+    
+    # Install TensorFlow to /tmp using --target flag
+    # This installs to /tmp but makes it available via PYTHONPATH
+    (
+      source "$VENV_PATH/bin/activate"
+      
+      log "📥 Downloading and installing TensorFlow to $TF_TMP_DIR..."
+      log "   This may take 5-10 minutes..."
+      
+      if pip install --target="$TF_TMP_DIR" --no-cache-dir "tensorflow>=2.8.0,<2.19.0" >> "$TF_LOG" 2>&1; then
+        local tf_size=$(du -sh "$TF_TMP_DIR" 2>/dev/null | cut -f1)
+        log "✅ TensorFlow installed successfully to $TF_TMP_DIR"
+        log "   Size: $tf_size"
+        
+        # Create a .pth file in the venv to automatically add to PYTHONPATH
+        # Python automatically reads .pth files from site-packages
+        echo "$TF_TMP_DIR" > "$VENV_PATH/lib/python3.10/site-packages/tensorflow_tmp.pth"
+        log "✅ Created .pth file to auto-load TensorFlow from /tmp"
+        log "   TensorFlow is now available to ComfyUI (no restart needed)"
+      else
+        log_error "❌ TensorFlow installation failed. Check $TF_LOG for details"
+        log_error "   ComfyUI will continue without TensorFlow support"
+      fi
+    ) &
+    
+    local tf_install_pid=$!
+    echo "$tf_install_pid" > /tmp/tensorflow_install.pid
+    log "📋 TensorFlow installation started with PID: $tf_install_pid"
+    log "💡 ComfyUI is running - TensorFlow will be available once installation completes (~5-10 min)"
+    log "💡 Check progress: tail -f $TF_LOG"
+    log "💡 Stop installation: kill \$(cat /tmp/tensorflow_install.pid)"
+  }
+  
+  # Start TensorFlow installation in background
+  install_tensorflow_to_tmp
 fi
 
 #######################################
