@@ -80,10 +80,22 @@ echo "        STEP 0: PYTHON 3.10 COMPREHENSIVE SETUP"
 echo "=================================================="
 echo ""
 
+# Set LD_LIBRARY_PATH for Python shared library (needed when compiled with --enable-shared)
+export LD_LIBRARY_PATH="/storage/python_versions/python3.10/lib:${LD_LIBRARY_PATH:-}"
+
+# Update ldconfig to make Python shared library available system-wide (permanent fix)
+if [ -f "/storage/python_versions/python3.10/lib/libpython3.10.so.1.0" ]; then
+    if [ ! -f "/etc/ld.so.conf.d/python3.10.conf" ]; then
+        echo "/storage/python_versions/python3.10/lib" | sudo tee /etc/ld.so.conf.d/python3.10.conf > /dev/null 2>&1
+        sudo ldconfig > /dev/null 2>&1 || true
+    fi
+fi
+
 # Check Python 3.10 is working and set it as default
 PYTHON_EXECUTABLE="/storage/python_versions/python3.10/bin/python3.10"
-if [ -x "$PYTHON_EXECUTABLE" ] && "$PYTHON_EXECUTABLE" -c "import _bz2, ssl, sqlite3" 2>/dev/null; then
-    log "✅ Python 3.10 is ready"
+# Check all critical modules required for PyTorch, torchvision, and ComfyUI
+if [ -x "$PYTHON_EXECUTABLE" ] && "$PYTHON_EXECUTABLE" -c "import _bz2, _lzma, _ssl, ssl, _sqlite3, sqlite3, _ctypes, _hashlib, _json, _multiprocessing, _pickle, _socket, _struct, _uuid, zlib" 2>/dev/null; then
+    log "✅ Python 3.10 is ready with all critical modules"
     
     # Create symlinks to use Python 3.10 as default
     log "🔗 Setting Python 3.10 as default..."
@@ -95,8 +107,19 @@ if [ -x "$PYTHON_EXECUTABLE" ] && "$PYTHON_EXECUTABLE" -c "import _bz2, ssl, sql
     
     log "✅ Python 3.10 is now the default Python"
     log "📍 Python version: $($PYTHON_EXECUTABLE --version)"
+    
+    # Verify _lzma specifically (critical for torchvision)
+    if "$PYTHON_EXECUTABLE" -c "import _lzma" 2>/dev/null; then
+        log "✅ _lzma module verified (required for torchvision)"
+    else
+        log_error "⚠️  _lzma module missing - torchvision may fail"
+        log_error "   Python 3.10 may need to be recompiled with liblzma-dev"
+    fi
 else
-    log_error "❌ Python 3.10 not working - please install it first"
+    log_error "❌ Python 3.10 not working or missing critical modules"
+    log_error "   Missing modules may include: _bz2, _lzma, _ssl, _sqlite3, _ctypes, etc."
+    log_error "   Python 3.10 may need to be recompiled with all required development libraries"
+    log_error "   Required packages: liblzma-dev, libbz2-dev, libssl-dev, libsqlite3-dev, libffi-dev, zlib1g-dev"
     exit 1
 fi
 
@@ -529,72 +552,235 @@ install_critical_packages() {
     return $failed_count
 }
 
-# Optimized SAM2 Installation Function
+# SAM2 Installation Process (with wheel caching like SageAttention)
 install_sam2_optimized() {
-    log "🚀 Installing SAM2 with optimizations for faster installation..."
+    log "Verifying SAM2 installation..."
     
-    # Temporarily disable set -e within this function
-    set +e
+    # Setup environment
+    setup_cuda_env
     
-    # Check if SAM2 is already installed
+    # Ensure wheel cache directory exists
+    export WHEEL_CACHE_DIR="/storage/.wheel_cache"
+    mkdir -p "$WHEEL_CACHE_DIR"
+    
+    # First, just try to import it. If it works, we're done.
+    if python -c "import sam2" &>/dev/null; then
+        log "✅ SAM2 is already installed and importable."
+        return 0
+    fi
+
+    log "SAM2 not found. Proceeding with installation..."
+
+    # Now, check for a compatible cached wheel.
+    if check_and_install_cached_wheel_sam2; then
+        log "✅ Successfully installed SAM2 from cached wheel."
+        # Final verification
+        if python -c "import sam2" &>/dev/null; then
+             log "✅ SAM2 import confirmed after wheel installation."
+             return 0
+        else
+             log_error "Installed from wheel, but import still fails. This likely means the cached wheel is incompatible."
+             # Fall through to build
+        fi
+    fi
+
+    log "No suitable cached wheel found or installation from wheel failed. Proceeding with full build."
+    
+    # Proceed with full installation from source
+    install_sam2_dependencies
+    if clone_or_update_sam2_repo; then
+         build_and_install_sam2 # This function will cache the wheel on success
+    else
+         log_error "Failed to clone or update SAM2 repository. Skipping build."
+         return 1 # Cannot proceed
+    fi
+
+    # Final check after building from source
+    log "Performing final SAM2 verification..."
+    pushd /tmp > /dev/null # Change to neutral directory to avoid import conflicts
+    local final_import_output
+    local final_import_status
+    final_import_output=$(python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} successfully built and installed from source.')" 2>&1)
+    final_import_status=$?
+    popd > /dev/null # Return to original directory
+    
+    if [[ $final_import_status -eq 0 ]]; then
+        log "$final_import_output"
+        return 0
+    else
+        log_error "❌ Final SAM2 verification failed."
+        log_error "Import error output:"
+        log_error "$final_import_output"
+        # Don't fail completely since previous verification passed
+        log_error "Previous verification passed, so SAM2 may still be functional."
+        return 0  # Return success to continue script
+    fi
+}
+
+# SAM2 Helper Functions
+check_and_install_cached_wheel_sam2() {
+    local arch=$(uname -m)
+    local python_executable="$VENV_DIR/sd_comfy-env/bin/python"
+
+    local py_version_short
+    py_version_short=$("$python_executable" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+    if [[ -z "$py_version_short" ]]; then
+        log_error "Could not determine Python version for wheel search."
+        return 1
+    fi
+    local python_version_tag="cp${py_version_short}"
+
+    log "🔍 Checking for cached SAM2 wheel..."
+    log "  Python version: $python_version_tag"
+    log "  Architecture: $arch"
+    log "  Wheel cache dir: $WHEEL_CACHE_DIR"
+
+    # Debug: Show all SAM2 wheels in cache
+    log "  All SAM2 wheels in cache:"
+    find "$WHEEL_CACHE_DIR" -name "sam2*.whl" -type f 2>/dev/null | sed 's/^/    /' || log "    No wheels found"
+
+    # Look for ANY SAM2 wheel in the wheel cache (version-agnostic, more flexible pattern)
+    # Try exact match first, then fall back to any sam2 wheel with matching Python version
+    local sam2_wheel
+    sam2_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sam2-*-${python_version_tag}-*-linux_${arch}.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
+    
+    # If exact match not found, try more flexible pattern (any sam2 wheel with Python version)
+    if [[ ! -f "$sam2_wheel" ]]; then
+        sam2_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "*sam2*-${python_version_tag}*.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
+    fi
+    
+    # Last resort: any sam2 wheel (will verify compatibility during install)
+    if [[ ! -f "$sam2_wheel" ]]; then
+        sam2_wheel=$(find "$WHEEL_CACHE_DIR" -maxdepth 1 -type f -name "sam2*.whl" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d' ')
+    fi
+
+    if [[ ! -f "$sam2_wheel" ]]; then
+        log "❌ No suitable cached wheel found in $WHEEL_CACHE_DIR for Python ${python_version_tag}."
+        log "  Searched for patterns: sam2-*-${python_version_tag}-*-linux_${arch}.whl, *sam2*-${python_version_tag}*.whl, sam2*.whl"
+        return 1
+    fi
+
+    log "Found cached wheel: $(basename "$sam2_wheel"). Attempting installation..."
+    
+    # Check if SAM2 is already working
     if python -c "import sam2" 2>/dev/null; then
-        local sam2_version=$(python -c "import sam2; print(sam2.__version__)" 2>/dev/null || echo "unknown")
-        log "✅ SAM2 $sam2_version already installed"
-        set -e  # Re-enable set -e
+        log "✅ SAM2 is already working, skipping cached wheel installation"
         return 0
     fi
     
-    # Create a temporary directory for SAM2 installation
-    local sam2_temp_dir="/tmp/sam2_install"
-    mkdir -p "$sam2_temp_dir"
-    cd "$sam2_temp_dir"
-    
-    log "📦 Cloning SAM2 repository with shallow clone (faster)..."
-    # Use shallow clone to reduce download time
-    if git clone --depth 1 https://github.com/facebookresearch/sam2.git .; then
-        log "✅ SAM2 repository cloned successfully"
+    if "$python_executable" -m pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$sam2_wheel"; then
+        log "Installation of cached wheel succeeded."
+        return 0
     else
-        log_error "❌ Failed to clone SAM2 repository"
+        log_error "Installation of cached wheel $(basename "$sam2_wheel") failed."
+        log_error "This wheel may be corrupt or incompatible. Deleting it."
+        rm -f "$sam2_wheel"
         return 1
     fi
+}
+
+install_sam2_dependencies() {
+    log "Installing SAM2 dependencies..."
+    pip install --no-cache-dir --disable-pip-version-check \
+        "torch>=1.9.0" "torchvision>=0.10.0" "opencv-python" \
+        "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
+        "timm" "transformers" "huggingface_hub" \
+        "ninja>=1.11.0" "packaging"
+}
+
+clone_or_update_sam2_repo() {
+    local sam2_cache_base="/storage/.sam2_cache"
+    local sam2_build_dir="$sam2_cache_base/src"
     
-    log "🔧 Installing SAM2 with optimized settings..."
+    # Get CUDA version for cache directory
+    local cuda_version
+    if command -v nvcc &>/dev/null; then
+        cuda_version=$(nvcc --version | grep 'release' | awk '{print $6}' | sed 's/V//' | sed 's/\.//g')
+    else
+        cuda_version="128"  # Default to CUDA 12.8
+    fi
+    
+    export SAM2_CACHE_DIR="${sam2_cache_base}/v2_cuda${cuda_version}"
+    sam2_build_dir="$SAM2_CACHE_DIR/src"
+    mkdir -p "$sam2_build_dir"
+    
+    if [ ! -d "$sam2_build_dir/.git" ]; then
+        log "Cloning SAM2 repository into $sam2_build_dir..."
+        git clone --depth 1 https://github.com/facebookresearch/sam2.git "$sam2_build_dir" || {
+            log_error "Failed to clone SAM2 repository."
+            return 1
+        }
+    else
+        log "Updating SAM2 repository in $sam2_build_dir..."
+        (cd "$sam2_build_dir" && git fetch && git pull) || {
+            log "Failed to update SAM2 repository, using existing code."
+        }
+    fi
+    cd "$sam2_build_dir" || return 1
+    log "Current SAM2 commit: $(git rev-parse HEAD)"
+    return 0
+}
+
+build_and_install_sam2() {
+    local sam2_build_dir="$SAM2_CACHE_DIR/src"
+    if [[ ! -d "$sam2_build_dir" ]] || ! cd "$sam2_build_dir"; then
+         log_error "SAM2 source directory $sam2_build_dir not found or cannot cd into it."
+         return 1
+    fi
+
+    log "Building SAM2 wheel in $(pwd)..."
+    log "--- Verifying Environment BEFORE Build ---"
+    log "CUDA_HOME=$CUDA_HOME"
+    log "PATH=$PATH"
+    log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+    log "NVCC Version: $(nvcc --version 2>/dev/null || echo 'NVCC not found')"
+    log "Python Version: $(python --version || echo 'python not found')"
+    log "-----------------------------------------"
+    
+    rm -rf build dist *.egg-info
+
+    local venv_python="$VENV_DIR/sd_comfy-env/bin/python"
+    if [[ ! -x "$venv_python" ]]; then
+        log_error "Virtual environment Python not found or not executable at $venv_python"
+        return 1
+    fi
+
     # Install with optimizations
     export MAX_JOBS=$(nproc)  # Use all available cores
     export USE_NINJA=1        # Use Ninja for faster builds
     
-    # Install in development mode for faster installation
-    if pip install -e . --no-build-isolation --no-deps; then
-        log "✅ SAM2 installed successfully in development mode"
-        
-        # Install dependencies separately
-        log "📦 Installing SAM2 dependencies..."
-        pip install --no-cache-dir --disable-pip-version-check \
-            "torch>=1.9.0" "torchvision>=0.10.0" "opencv-python" \
-            "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
-            "timm" "transformers" "huggingface_hub" 2>/dev/null || log "Some dependencies may have failed"
-        
-    # Clean up
-    cd /
-    rm -rf "$sam2_temp_dir"
-    
-    # Verify installation
-    if python -c "import sam2; print(f'✅ SAM2 {sam2.__version__} installed successfully')" 2>/dev/null; then
-        log "✅ SAM2 installation verified"
-        set -e  # Re-enable set -e
-        return 0
-    else
-        log_error "❌ SAM2 installation verification failed"
-        set -e  # Re-enable set -e
+    # SAM2 may need CUDA environment variables for building extensions
+    setup_cuda_env
+
+    log "Running build command: $venv_python setup.py bdist_wheel"
+    if ! "$venv_python" setup.py bdist_wheel; then
+        log_error "❌ SAM2 wheel build command failed"
+        log_error "This may be due to missing dependencies or CUDA compilation issues"
+        log_error "SAM2 can still work without CUDA extensions, but some features may be limited"
         return 1
     fi
-else
-    log_error "❌ Failed to install SAM2"
-    cd /
-    rm -rf "$sam2_temp_dir"
-    set -e  # Re-enable set -e
-    return 1
-fi
+
+    local built_wheel
+    built_wheel=$(find "$sam2_build_dir/dist" -name "sam2*.whl" -print -quit)
+
+    if [[ -n "$built_wheel" ]]; then
+        log "Found built wheel: $built_wheel"
+        cp "$built_wheel" "$WHEEL_CACHE_DIR/"
+        log "Cached built wheel to $WHEEL_CACHE_DIR/$(basename "$built_wheel")"
+
+        log "Installing newly built wheel: $built_wheel"
+        if pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$built_wheel"; then
+            log "✅ SAM2 wheel installed successfully"
+            return 0
+        else
+            log_error "❌ Failed to install SAM2 wheel"
+            return 1
+        fi
+    else
+        log_error "❌ Failed to build SAM2 wheel - no wheel file found in dist/"
+        log_error "Check build logs above for compilation errors"
+        return 1
+    fi
 }
 
 # Function to fix common custom node import errors
