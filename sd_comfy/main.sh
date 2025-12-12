@@ -361,7 +361,6 @@ fi
 install_cuda_12() {
     echo "Installing CUDA 12.8 and essential build tools..."
     local APT_INSTALL_LOG="$LOG_DIR/apt_cuda_install.log"
-    local CUDA_CACHE_DIR="/storage/.cuda_packages_cache"
     
     # Clean up any old marker files (markers don't work for /usr/local/ which doesn't persist)
     rm -f /storage/.cuda_12.8_installed /storage/.cuda_12.6_installed /storage/.cuda_12.1_installed
@@ -376,9 +375,6 @@ install_cuda_12() {
     else
         echo "CUDA 12.8 not found or wrong version. Installing..."
     fi
-
-    # Create cache directory for CUDA packages
-    mkdir -p "$CUDA_CACHE_DIR"
     
     # Clean up existing CUDA 11.x if present
     if dpkg -l | grep -q "cuda-11"; then
@@ -420,67 +416,25 @@ install_cuda_12() {
         "libnpp-12-8"
         "libnpp-dev-12-8"
     )
-
-    # Check if we have cached packages
-    local cached_packages=$(find "$CUDA_CACHE_DIR" -name "*.deb" 2>/dev/null | wc -l)
     
-    if [ "$cached_packages" -gt 10 ]; then
-        echo "📦 Found $cached_packages cached CUDA packages in $CUDA_CACHE_DIR"
-        echo "🚀 Installing from cache (much faster!)..."
-        
-        # Install from cache using dpkg
-        if dpkg -i "$CUDA_CACHE_DIR"/*.deb >> "$APT_INSTALL_LOG" 2>&1; then
-            echo "✅ CUDA installed from cache successfully"
-            # Fix any dependency issues
-            apt-get install -f -y >> "$APT_INSTALL_LOG" 2>&1
-        else
-            echo "⚠️  Cache install failed, falling back to fresh download..."
-            rm -rf "$CUDA_CACHE_DIR"/*.deb
-            cached_packages=0
-        fi
-    fi
+    echo "Installing CUDA packages..."
+    apt-get install -y \
+        build-essential \
+        python3-dev \
+        libatlas-base-dev \
+        libblas-dev \
+        liblapack-dev \
+        libjpeg-dev \
+        libpng-dev \
+        libgl1- \
+        "${CUDA_PACKAGES[@]}" >> "$APT_INSTALL_LOG" 2>&1
     
-    # If cache doesn't exist or failed, download and cache
-    if [ "$cached_packages" -le 10 ]; then
-        echo "📥 Downloading CUDA packages to cache (will be faster next time)..."
-        
-        # Download packages to cache directory
-        cd "$CUDA_CACHE_DIR"
-        apt-get install -y --download-only -o Dir::Cache::Archives="$CUDA_CACHE_DIR" \
-            build-essential \
-            python3-dev \
-            libatlas-base-dev \
-            libblas-dev \
-            liblapack-dev \
-            libjpeg-dev \
-            libpng-dev \
-            libgl1- \
-            "${CUDA_PACKAGES[@]}" >> "$APT_INSTALL_LOG" 2>&1
-        
-        echo "📦 Installing CUDA packages..."
-        # Now install normally (packages are already downloaded to cache)
-        apt-get install -y \
-            build-essential \
-            python3-dev \
-            libatlas-base-dev \
-            libblas-dev \
-            liblapack-dev \
-            libjpeg-dev \
-            libpng-dev \
-            libgl1- \
-            "${CUDA_PACKAGES[@]}" >> "$APT_INSTALL_LOG" 2>&1
-        
-        local apt_exit_code=$?
-        cd - > /dev/null
-        
-        if [ $apt_exit_code -ne 0 ]; then
-            log_error "CUDA installation failed. Exit code: $apt_exit_code"
-            cat "$APT_INSTALL_LOG"
-            return 1
-        fi
-        
-        echo "✅ CUDA packages downloaded and cached to $CUDA_CACHE_DIR"
-        echo "   Cache size: $(du -sh "$CUDA_CACHE_DIR" | cut -f1)"
+    local apt_exit_code=$?
+    
+    if [ $apt_exit_code -ne 0 ]; then
+        log_error "CUDA installation failed. Exit code: $apt_exit_code"
+        cat "$APT_INSTALL_LOG"
+        return 1
     fi
 
     # Configure environment immediately after install
