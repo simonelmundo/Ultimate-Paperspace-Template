@@ -2578,6 +2578,44 @@ if [[ -n "${CF_TOKEN}" ]]; then
   bash $current_dir/../cloudflare_reload.sh
 fi
 
+#######################################
+# STEP 11: START KEEPALIVE PROCESS
+#######################################
+echo ""
+echo "=================================================="
+echo "        STEP 11: START KEEPALIVE PROCESS"
+echo "=================================================="
+echo ""
+
+# Kill any existing keepalive process
+if [[ -f "/tmp/keepalive.pid" ]]; then
+  pid=$(cat /tmp/keepalive.pid 2>/dev/null)
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    log "🛑 Stopping existing keepalive process (PID: $pid)..."
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f /tmp/keepalive.pid
+fi
+
+# Start keepalive process in background with nohup to ensure it survives script exit
+log "🔄 Starting Paperspace keepalive process..."
+nohup bash -c "while true; do touch /tmp/.keepalive_tmp && rm -f /tmp/.keepalive_tmp; sleep 30; done" > /tmp/keepalive.log 2>&1 &
+KEEPALIVE_PID=$!
+echo $KEEPALIVE_PID > /tmp/keepalive.pid
+disown $KEEPALIVE_PID 2>/dev/null || true
+
+# Verify it started
+sleep 1
+if kill -0 $KEEPALIVE_PID 2>/dev/null; then
+  log "✅ Keepalive process started (PID: $KEEPALIVE_PID)"
+  log "💡 This process will prevent Paperspace notebook from shutting down due to inactivity"
+  log "📋 Keepalive logs: tail -f /tmp/keepalive.log"
+else
+  log_error "❌ Failed to start keepalive process"
+fi
+
 echo ""
 echo "=================================================="
 echo "           SCRIPT EXECUTION COMPLETE!"
