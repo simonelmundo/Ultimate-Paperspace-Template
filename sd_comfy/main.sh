@@ -1493,7 +1493,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         
         # Install Nunchaku wheel directly from URL
         log "🔄 Installing Nunchaku wheel from GitHub releases..."
-        if pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-tech/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.8-cp310-cp310-linux_x86_64.whl; then
+        if pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.0/nunchaku-1.2.0+torch2.8-cp310-cp310-linux_x86_64.whl; then
             log "✅ Nunchaku wheel installed successfully"
             # Quick verification
             if python -c "import nunchaku" 2>/dev/null; then
