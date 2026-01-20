@@ -23,13 +23,35 @@ if [[ "$REINSTALL_IMAGE_BROWSER" || ! -f "/tmp/image_browser.prepared" ]]; then
     
     python3 -m venv /tmp/image_browser-env
     
+    # Install FFmpeg 7 development libraries required for av package (v14+)
+    log "📦 Installing FFmpeg 7 development libraries for av package..."
+    apt-get update -qq && apt-get install -y \
+        ffmpeg \
+        libavformat-dev \
+        libavcodec-dev \
+        libavdevice-dev \
+        libavutil-dev \
+        libavfilter-dev \
+        libswscale-dev \
+        libswresample-dev \
+        pkg-config \
+        build-essential \
+        > /dev/null 2>&1 || {
+        log_error "Warning: Some FFmpeg packages failed to install"
+    }
+    
     source $VENV_DIR/image_browser-env/bin/activate
 
     pip install pip==24.0
     pip install --upgrade wheel setuptools
     
     cd $REPO_DIR
-    pip install -r requirements.txt
+    # Try to prefer binary wheels first (faster, no compilation needed)
+    # If wheels aren't available, fall back to building from source (requires FFmpeg)
+    pip install --prefer-binary -r requirements.txt || {
+        log "⚠️ Binary wheels not available, building from source (requires FFmpeg)..."
+        pip install -r requirements.txt
+    }
     
     touch /tmp/image_browser.prepared
 else
@@ -39,7 +61,11 @@ else
 fi
 log "Finished Preparing Environment for Image Browser"
 
-# Image browser runs without authentication (no IIB_SECRET_KEY set)
+# Explicitly disable authentication by unsetting IIB_SECRET_KEY
+# This ensures the image browser runs without password protection
+unset IIB_SECRET_KEY
+export IIB_SECRET_KEY=""
+log "🔓 Authentication disabled (IIB_SECRET_KEY unset)"
 
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo "### Starting Image Browser ###"
@@ -49,7 +75,8 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   else
       cd $REPO_DIR
   fi
-  PYTHONUNBUFFERED=1 service_loop "python $REPO_DIR/app.py --port 7002" > $LOG_DIR/image_browser.log 2>&1 &
+  # Start with IIB_SECRET_KEY explicitly unset to disable authentication
+  IIB_SECRET_KEY="" PYTHONUNBUFFERED=1 service_loop "python $REPO_DIR/app.py --port 7002" > $LOG_DIR/image_browser.log 2>&1 &
   echo $! > /tmp/image_browser.pid
 fi
 
