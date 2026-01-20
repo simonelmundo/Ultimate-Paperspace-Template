@@ -23,7 +23,7 @@ def is_url(url_str):
 def dl_web_file(web_dl_file, filename=None,  token=None):
     web_dl_file = is_url(web_dl_file)[0] # clean the URL string
     filename_cmd = f'--out="{filename}"' if filename else ''
-    token_cmd = f"--header='Authorization: Bearer {token}'" if token else ''
+    token_cmd = f'--header="Authorization: Bearer {token}"' if token else ''
     # We're going to use aria2 to split the download into threads which will allow us to download
     # the file very fast even if the site serves the file slow.
     command = f'''aria2c {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
