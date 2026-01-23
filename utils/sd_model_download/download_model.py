@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 model_storage_dir = os.environ['MODEL_DIR']
-hf_token = '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'
+hf_token = os.environ.get('HF_TOKEN', '')
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
 
 # Add new environment variable for Civitai token
