@@ -68,6 +68,11 @@ server {
             proxy_pass http://localhost:7005;
         }
     
+        if ($first_subpath ~* ai-toolkit) {
+            rewrite ^/ai-toolkit/(.*)$ /$1 break;
+            proxy_pass http://localhost:8675;
+        }
+    
         if ($first_subpath ~* sd-fooocus) {
             rewrite ^/sd-fooocus/(.*)$ /$1 break;
             proxy_pass http://localhost:7015;
@@ -204,6 +209,15 @@ server {
         
         rewrite ^/sd-comfy/(.*) /$1 break;
         proxy_pass http://localhost:7005;
+        
+    }
+    
+
+    # ai_toolkit
+    location ~* ^/ai-toolkit/(.*)$ {
+        
+        rewrite ^/ai-toolkit/(.*) /$1 break;
+        proxy_pass http://localhost:8675;
         
     }
     
