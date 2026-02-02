@@ -15,6 +15,21 @@ server {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
 
+    # AI Toolkit (Next.js basePath /ai-toolkit) – pass full path so UI and API work
+    location /ai-toolkit/ {
+        proxy_pass http://localhost:8675/ai-toolkit/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+    location = /ai-toolkit {
+        return 301 /ai-toolkit/;
+    }
+
     # jupyter lab
     location / {
     
@@ -68,10 +83,7 @@ server {
             proxy_pass http://localhost:7005;
         }
     
-        if ($first_subpath ~* ai-toolkit) {
-            rewrite ^/ai-toolkit/(.*)$ /$1 break;
-            proxy_pass http://localhost:8675;
-        }
+        # ai-toolkit handled by dedicated location block above - DO NOT add if block here
     
         if ($first_subpath ~* sd-fooocus) {
             rewrite ^/sd-fooocus/(.*)$ /$1 break;
