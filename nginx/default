@@ -1,3 +1,7 @@
+# Nginx config for Paperspace Ultimate Template
+# This config is automatically copied to /etc/nginx/sites-available/default by main.sh
+# AI Toolkit routing: Uses dedicated location block (line ~18) - DO NOT add regex blocks for ai-toolkit
+
 map $http_referer $first_subpath {
     ~*^https?://[^/]+/([^/]+) $1;
     default "";
@@ -15,9 +19,9 @@ server {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
 
-    # AI Toolkit (Next.js basePath /ai-toolkit) – pass full path so UI and API work
-    location /ai-toolkit/ {
-        proxy_pass http://localhost:8675/ai-toolkit/;
+    # AI Toolkit (Next.js basePath /ai-toolkit) – proxy both /ai-toolkit and /ai-toolkit/ to Next.js
+    location /ai-toolkit {
+        proxy_pass http://localhost:8675/ai-toolkit;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -26,8 +30,14 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
     }
-    location = /ai-toolkit {
-        return 301 /ai-toolkit/;
+
+    
+    location ~ ^/api/(gpu|jobs|queue|datasets|caption|files|img|settings|zip|auth) {
+        if ($http_referer ~* "/ai-toolkit") {
+            rewrite ^/api/(.*)$ /ai-toolkit/api/$1 last;
+        }
+        # Fall through to Jupyter if not from ai-toolkit
+        proxy_pass http://localhost:8890;
     }
 
     # jupyter lab
