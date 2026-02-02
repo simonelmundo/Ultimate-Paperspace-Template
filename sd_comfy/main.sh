@@ -1493,7 +1493,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         
         # Install Nunchaku wheel directly from URL
         log "🔄 Installing Nunchaku wheel from GitHub releases..."
-        if pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.0/nunchaku-1.2.0+torch2.8-cp310-cp310-linux_x86_64.whl; then
+        if pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-tech/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.8-cp310-cp310-linux_x86_64.whl; then
             log "✅ Nunchaku wheel installed successfully"
             # Quick verification
             if python -c "import nunchaku" 2>/dev/null; then
@@ -2383,99 +2383,256 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   log "✅ ComfyUI started successfully! You can now access it at http://localhost:$SD_COMFY_PORT"
   
   #######################################
-  # STEP 9.1: START OLLAMA (AFTER COMFYUI)
+  # STEP 9.1: START OLLAMA (AFTER COMFYUI) - DISABLED
   #######################################
-  echo ""
-  echo "=================================================="
-  echo "        STEP 9.1: START OLLAMA (AFTER COMFYUI)"
-  echo "=================================================="
-  echo ""
-  
-  # Function to check CUDA availability and GPU status
-  check_cuda_for_ollama() {
-    log "🔍 Checking CUDA availability for Ollama..."
+  # Ollama install/start commented out (e.g. requires zstd; enable if needed)
+  # echo ""
+  # echo "=================================================="
+  # echo "        STEP 9.1: START OLLAMA (AFTER COMFYUI)"
+  # echo "=================================================="
+  # echo ""
+  # check_cuda_for_ollama() { ... }
+  # check_cuda_for_ollama
+  # if ! command -v ollama &> /dev/null; then curl -fsSL https://ollama.com/install.sh | sh; fi
+  # ollama serve > $LOG_DIR/ollama.log 2>&1 & ...
+
+  #######################################
+  # STEP 9.4: INSTALL AI TOOLKIT (COMFY ENV)
+#######################################
+echo ""
+echo "=================================================="
+echo "        STEP 9.4: INSTALL AI TOOLKIT"
+echo "=================================================="
+echo ""
+
+# Ensure /bin/sh exists (critical for Next.js)
+if [[ ! -x "/bin/sh" ]]; then
+    log "⚠️  /bin/sh missing; linking to /bin/bash..."
+    ln -sf /bin/bash /bin/sh 2>/dev/null || true
+fi
+
+install_ai_toolkit() {
+    echo "=================================================="
+    echo "        STEP 9.4: INSTALL AI TOOLKIT (DEBUG MODE)"
+    echo "=================================================="
     
-    local cuda_available=false
-    local cuda_version="unknown"
-    local nvidia_gpu_available=false
-    local gpu_name="unknown"
-    
-    if command -v nvcc &>/dev/null; then
-        cuda_available=true
-        cuda_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
-        log "✅ CUDA detected: Version $cuda_version"
+    local ai_toolkit_dir="/tmp/ai-toolkit"
+    local comfy_venv_dir="$VENV_DIR/sd_comfy-env"
+    local ui_dir="$ai_toolkit_dir/ui"
+    local log_file="$LOG_DIR/ai_toolkit_ui.log"
+    local worker_log="$LOG_DIR/ai_toolkit_worker.log"
+
+    # 1. CLONE
+    log "1. Checking Repository..."
+    if [[ ! -d "$ai_toolkit_dir" ]]; then
+        log "   Cloning https://github.com/ostris/ai-toolkit.git..."
+        git clone https://github.com/ostris/ai-toolkit.git "$ai_toolkit_dir"
     else
-        log "⚠️  CUDA not detected (nvcc not found)"
+        log "   Updating existing repository..."
+        cd "$ai_toolkit_dir" && git pull && cd - > /dev/null
     fi
-    
-    if command -v nvidia-smi &>/dev/null; then
-        local nvidia_smi_output
-        nvidia_smi_output=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "")
-        if [[ -n "$nvidia_smi_output" ]]; then
-            nvidia_gpu_available=true
-            gpu_name="$nvidia_smi_output"
-            log "✅ NVIDIA GPU detected: $gpu_name"
-        fi
+
+    # 2. PYTHON DEPS (inside Comfy venv; pip skips already-installed packages)
+    log "2. Installing Python Dependencies (Comfy env: $comfy_venv_dir)..."
+    source "$comfy_venv_dir/bin/activate"
+    cd "$ai_toolkit_dir"
+    if [[ -f "requirements.txt" ]]; then
+        # Exclude: torch (use Comfy's), lycoris-lora (broken 1.8.3), and packages we must not downgrade (keep Comfy's versions)
+        grep -vE "torch|torchvision|torchaudio|lycoris-lora|^numpy|^scipy|^setuptools|opencv-python|^python-multipart" "requirements.txt" > "/tmp/aitk_reqs.txt"
+        log "   Installing missing AI Toolkit requirements (already satisfied will be skipped)..."
+        pip install --no-cache-dir -q -r "/tmp/aitk_reqs.txt"
+        # Install lycoris-lora separately (no version pin) so pip can use a wheel; LoKr training needs it
+        log "   Installing lycoris-lora (optional, for LoKr)..."
+        pip install --no-cache-dir -q lycoris-lora 2>/dev/null || log "   ⚠️ lycoris-lora skipped (optional; LoKr training may be limited)"
     fi
-    
-    if [[ "$cuda_available" == "true" && "$nvidia_gpu_available" == "true" ]]; then
-        log "✅ CUDA and GPU detected - Ollama will use GPU acceleration"
-        return 0
-    elif [[ "$cuda_available" == "true" ]]; then
-        log "⚠️  CUDA detected but no GPU found - Ollama will use CPU"
-        return 1
+    # Editable install only if repo has setup.py/pyproject.toml (ai-toolkit may use PYTHONPATH only)
+    if [[ -f "setup.py" ]] || [[ -f "pyproject.toml" ]]; then
+        pip install -e . --no-deps
     else
-        log "⚠️  No CUDA detected - Ollama will run in CPU mode"
-        return 2
+        log "   No setup.py/pyproject.toml in repo; using PYTHONPATH for ai-toolkit (already set for worker)."
     fi
-  }
-  
-  # Check CUDA status
-  check_cuda_for_ollama
-  cuda_status=$?
-  
-  # Install Ollama if not already installed
-  if ! command -v ollama &> /dev/null; then
-    log "📦 Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh || {
-      log_error "⚠️  Ollama installation failed, continuing..."
-    }
-  else
-    ollama_version=$(ollama --version 2>/dev/null || echo "unknown")
-    log "✅ Ollama already installed: $ollama_version"
-  fi
-  
-  # Kill any existing Ollama processes
-  if [[ -f "/tmp/ollama.pid" ]]; then
-    pid=$(cat /tmp/ollama.pid 2>/dev/null)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      log "🛑 Stopping existing Ollama process (PID: $pid)..."
-      kill -TERM "$pid" 2>/dev/null || true
+    cd - > /dev/null
+
+    # 3. NODE.JS
+    log "3. Checking Node.js (AI Toolkit UI requires >= 18.18)..."
+    node_major=""
+    if command -v node &> /dev/null; then
+        node_major=$(node -v 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p')
+    fi
+    if [[ -z "$node_major" ]] || [[ "$node_major" -lt 18 ]]; then
+        log "   Node.js missing or too old (found: $(node -v 2>/dev/null || echo 'none')), installing v20..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        apt-get install -y nodejs
+        log "   Node.js $(node -v) installed."
+    else
+        log "   Node.js $(node -v) is present (>= 18)."
+    fi
+
+    # 4. BUILD UI
+    log "4. Building UI..."
+    cd "$ui_dir"
+    
+    # Inject basePath and assetPrefix for subpath routing
+    local config="next.config.js"
+    [[ -f "next.config.ts" ]] && config="next.config.ts"
+    if [[ -f "$config" ]] && ! grep -q "basePath.*ai-toolkit" "$config"; then
+        log "   Injecting basePath into $config..."
+        # Remove any old basePath attempts first
+        sed -i '/basePath:/d' "$config"
+        sed -i '/assetPrefix:/d' "$config"
+        # Inject both basePath and assetPrefix (handle TypeScript type annotations)
+        sed -i "s/const nextConfig\(: [^=]*\)\? = {/const nextConfig\1 = {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
+        sed -i "s/module.exports = {/module.exports = {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
+        sed -i "s/export default {/export default {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
+    fi
+
+    log "   Running npm install..."
+    npm install
+    
+    log "   Running Prisma..."
+    npx prisma generate
+    npx prisma db push
+    
+    log "   Running npm build..."
+    export NEXT_PUBLIC_BASE_PATH="/ai-toolkit"
+    npm run build
+    cd - > /dev/null
+
+    # 5. UPDATE NGINX CONFIG (ensure ai-toolkit routing is correct)
+    log "5. Updating Nginx config for AI Toolkit..."
+    if [[ -f "/notebooks/nginx/default" ]]; then
+        sudo cp /notebooks/nginx/default /etc/nginx/sites-available/default
+        sudo nginx -t && sudo nginx -s reload || log "⚠️ Nginx reload failed, but continuing"
+        log "   ✅ Nginx config updated"
+    else
+        log "   ⚠️ /notebooks/nginx/default not found, skipping nginx update"
+    fi
+
+    # 6. START UI
+    start_ai_toolkit_ui_logic
+}
+
+start_ai_toolkit_ui_logic() {
+    local ai_toolkit_dir="/tmp/ai-toolkit"
+    local comfy_venv_dir="${VENV_DIR:-/storage/.venvs}/sd_comfy-env"
+    local ui_dir="$ai_toolkit_dir/ui"
+    local log_file="$LOG_DIR/ai_toolkit_ui.log"
+    local worker_log="$LOG_DIR/ai_toolkit_worker.log"
+
+    log "Starting UI..."
+    
+    # Stop existing AI Toolkit UI/worker so port 8675 is free
+    if [[ -f /tmp/ai_toolkit_ui.pid ]]; then
+      read -r worker_pid_old ui_pid_old < /tmp/ai_toolkit_ui.pid 2>/dev/null
+      for p in $worker_pid_old $ui_pid_old; do
+        [[ -n "$p" ]] && kill -9 "$p" 2>/dev/null || true
+      done
+      rm -f /tmp/ai_toolkit_ui.pid
+    fi
+    log "   Clearing port 8675..."
+    fuser -k 8675/tcp 2>/dev/null || true
+    # Fallback: kill PIDs listening on 8675 (if fuser not installed or didn't run)
+    while read -r pid; do
+      [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null || true
+    done < <(ss -tlnp 2>/dev/null | grep 8675 | sed -n 's/.*pid=\([0-9]*\).*/\1/p')
+    sleep 3
+    # Wait until port is free (max 10s)
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q 8675 || break
       sleep 1
-      kill -9 "$pid" 2>/dev/null || true
+    done
+
+    cd "$ui_dir"
+    
+    # Verify basePath is in next.config before starting (rebuild if missing)
+    local config="next.config.js"
+    [[ -f "next.config.ts" ]] && config="next.config.ts"
+    if [[ -f "$config" ]] && ! grep -q "basePath.*ai-toolkit" "$config"; then
+        log "   ⚠️ basePath missing in $config, rebuilding..."
+        # Force inject basePath (remove old attempts first, handle TypeScript syntax)
+        sed -i '/basePath:/d' "$config"
+        sed -i '/assetPrefix:/d' "$config"
+        sed -i "s/const nextConfig\(: [^=]*\)\? = {/const nextConfig\1 = {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
+        sed -i "s/module.exports = {/module.exports = {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
+        sed -i "s/export default {/export default {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
+        export NEXT_PUBLIC_BASE_PATH="/ai-toolkit"
+        npm run build
     fi
-    rm -f /tmp/ollama.pid
-  fi
-  pkill -f "ollama serve" 2>/dev/null || true
-  
-  # Ensure CUDA environment is available for Ollama
-  setup_cuda_env
-  
-  # Start Ollama server on port 7009
-  log "🚀 Starting Ollama API server on port 7009..."
-  export OLLAMA_HOST=0.0.0.0:7009
-  
-  ollama serve > $LOG_DIR/ollama.log 2>&1 &
-  echo $! > /tmp/ollama.pid
-  sleep 3
-  
-  if kill -0 $(cat /tmp/ollama.pid) 2>/dev/null; then
-    log "✅ Ollama API server started (PID: $(cat /tmp/ollama.pid))"
-    log "📡 API endpoint: http://localhost:7009/api/generate"
-  else
-    log_error "❌ Failed to start Ollama server"
-  fi
-  
+    
+    export PORT=8675
+    export NEXT_PUBLIC_BASE_PATH="/ai-toolkit"
+    
+    log "   Launching Next.js..."
+    nohup npx next start > "$log_file" 2>&1 &
+    local ui_pid=$!
+    
+    log "   Launching Worker..."
+    export PYTHONPATH="/tmp/ai-toolkit"
+    nohup node dist/cron/worker.js > "$worker_log" 2>&1 &
+    local worker_pid=$!
+    
+    echo "$worker_pid $ui_pid" > /tmp/ai_toolkit_ui.pid
+    
+    log "   Waiting 5s for startup..."
+    sleep 5
+    
+    # 6. VERIFY & DEBUG
+    if kill -0 $ui_pid 2>/dev/null; then
+        log "✅ AI Toolkit UI started (PID: $ui_pid)"
+        log "✅ AI Toolkit Worker started (PID: $worker_pid)"
+        touch /tmp/ai_toolkit.prepared
+        # Success summary
+        echo ""
+        echo "=================================================="
+        echo "   AI TOOLKIT INSTALL SUMMARY"
+        echo "=================================================="
+        echo "   Python env:  Comfy venv ($comfy_venv_dir)"
+        echo "   Repo:        $ai_toolkit_dir"
+        echo "   UI:          http://localhost:8675 (PID $ui_pid)"
+        echo "   Worker:      PID $worker_pid"
+        echo "   Requirements: torch/torchvision/torchaudio skipped; rest installed/skipped if already satisfied"
+        echo "=================================================="
+        echo ""
+    else
+        log_error "❌ AI Toolkit UI FAILED to start!"
+        
+        echo ""
+        echo "################################################################"
+        echo "#                 AI TOOLKIT DEBUG REPORT                      #"
+        echo "################################################################"
+        echo ""
+        echo "--- PROCESS STATUS ---"
+        ps aux | grep -E "node|next|python" | grep -v grep
+        echo ""
+        echo "--- PORT 8675 STATUS ---"
+        (netstat -tulpn 2>/dev/null || ss -tulpn) | grep 8675 || echo "Port 8675 is free (Process died?)"
+        echo ""
+        echo "--- UI LOG (Last 100 lines) ---"
+        tail -n 100 "$log_file"
+        echo ""
+        echo "--- WORKER LOG (Last 50 lines) ---"
+        tail -n 50 "$worker_log"
+        echo ""
+        echo "################################################################"
+        
+        # Don't exit script, just mark as failed
+        return 1
+    fi
+}
+
+# Execute
+if [[ ! -f "/tmp/ai_toolkit.prepared" ]] || [[ -n "$REINSTALL_AI_TOOLKIT" ]]; then
+    install_ai_toolkit
+else
+    log "✅ AI Toolkit already prepared. Restarting..."
+    # Update nginx config even on restart (in case template was updated)
+    if [[ -f "/notebooks/nginx/default" ]]; then
+        sudo cp /notebooks/nginx/default /etc/nginx/sites-available/default
+        sudo nginx -t && sudo nginx -s reload 2>/dev/null || true
+    fi
+    start_ai_toolkit_ui_logic
+fi
+
   #######################################
   # STEP 9.2: INSTALL TENSORFLOW (BACKGROUND)
   #######################################
