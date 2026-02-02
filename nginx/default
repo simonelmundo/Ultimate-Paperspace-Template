@@ -31,13 +31,24 @@ server {
         proxy_set_header Connection "upgrade";
     }
 
-    
-    location ~ ^/api/(gpu|jobs|queue|datasets|caption|files|img|settings|zip|auth) {
+
+    location ~ ^/api/(gpu|jobs|queue|datasets|caption|files|img|settings|zip|auth)(/.*)?$ {
+        set $proxy_target "http://localhost:8890";
+        set $proxy_path "$request_uri";
+        
         if ($http_referer ~* "/ai-toolkit") {
-            rewrite ^/api/(.*)$ /ai-toolkit/api/$1 last;
+            set $proxy_target "http://localhost:8675";
+            set $proxy_path "/ai-toolkit$request_uri";
         }
-        # Fall through to Jupyter if not from ai-toolkit
-        proxy_pass http://localhost:8890;
+        
+        proxy_pass $proxy_target$proxy_path;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 
     # jupyter lab
@@ -235,15 +246,7 @@ server {
     }
     
 
-    # ai_toolkit
-    location ~* ^/ai-toolkit/(.*)$ {
-        
-        rewrite ^/ai-toolkit/(.*) /$1 break;
-        proxy_pass http://localhost:8675;
-        
-    }
     
-
     # sd_fooocus
     location ~* ^/sd-fooocus/(.*)$ {
         
