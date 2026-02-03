@@ -2445,6 +2445,11 @@ install_ai_toolkit() {
         log "   Installing lycoris-lora (optional, for LoKr)..."
         pip install --no-cache-dir -q lycoris-lora 2>/dev/null || log "   ⚠️ lycoris-lora skipped (optional; LoKr training may be limited)"
     fi
+    # Install AI Toolkit extra deps (not in filtered reqs or often missing): torchao, pytorch_fid, pytorch-wavelets, torchcodec, exact diffusers commit
+    log "   Installing AI Toolkit extra deps (torchao, pytorch_fid, pytorch-wavelets, torchcodec)..."
+    pip install --no-cache-dir -q torchao==0.10.0 pytorch_fid pytorch-wavelets==1.3.0 torchcodec 2>/dev/null || log "   ⚠️ Some extra deps skipped (torchao/pytorch_fid/pytorch-wavelets/torchcodec)"
+    log "   Installing diffusers at exact commit (AI Toolkit requirement)..."
+    pip install --no-cache-dir -q "git+https://github.com/huggingface/diffusers@8600b4c10d67b0ce200f664204358747bd53c775" 2>/dev/null || log "   ⚠️ diffusers@commit skipped (using existing diffusers)"
     # Editable install only if repo has setup.py/pyproject.toml (ai-toolkit may use PYTHONPATH only)
     if [[ -f "setup.py" ]] || [[ -f "pyproject.toml" ]]; then
         pip install -e . --no-deps
