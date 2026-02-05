@@ -2430,6 +2430,10 @@ install_lora_training() {
     log "2. Installing Python Dependencies (Comfy env: $comfy_venv_dir)..."
     source "$comfy_venv_dir/bin/activate"
     
+    # Upgrade pip/setuptools/wheel to avoid "egg_info" / metadata-generation-failed (setuptools 58+ removed egg_info)
+    log "   Upgrading pip, setuptools, wheel..."
+    pip install --no-cache-dir -q --upgrade pip setuptools wheel 2>/dev/null || true
+    
     # Install sd-scripts dependencies (backend/sd_scripts submodule)
     if [[ -d "$lora_training_dir/backend/sd_scripts" ]]; then
         cd "$lora_training_dir/backend/sd_scripts"
@@ -2438,28 +2442,22 @@ install_lora_training() {
             # Keep Comfy's versions of: torch, torchvision, torchaudio, xformers, numpy, scipy, opencv, pillow
             grep -vE "^torch[^a-z]|^torchvision|^torchaudio|^xformers|^numpy|^scipy|^opencv-python|^Pillow|^setuptools|^python-multipart" "requirements.txt" > "/tmp/lora_backend_reqs.txt"
             log "   Installing sd-scripts requirements (filtered)..."
-            pip install --no-cache-dir -q -r "/tmp/lora_backend_reqs.txt" 2>&1 | grep -v "already satisfied" || true
+            if ! pip install --no-cache-dir -q -r "/tmp/lora_backend_reqs.txt" 2>/dev/null; then
+                log "   Retrying with legacy resolver..."
+                pip install --no-cache-dir -q -r "/tmp/lora_backend_reqs.txt" --use-deprecated=legacy-resolver 2>&1 | grep -v "already satisfied" || true
+            fi
         fi
         cd - > /dev/null
     else
         log "   ⚠️ backend/sd_scripts directory not found, skipping sd-scripts requirements"
     fi
     
-    # Install LyCORIS (main repo includes it, no separate install needed for sd-scripts)
-    # Note: sd-scripts supports network_module="lycoris.kohya" without needing lycoris-lora package
+    # LyCORIS: use sd-scripts built-in LoRA (network_module='networks.lora')
     log "   LyCORIS support: using sd-scripts built-in (network_module='networks.lora')"
     
-    # Install bitsandbytes for 8bit/4bit optimizers (Prodigy, AdamW8bit)
-    log "   Installing bitsandbytes (for Prodigy optimizer)..."
-    pip install --no-cache-dir -q bitsandbytes 2>&1 | grep -v "already satisfied" || log "   ⚠️ bitsandbytes install failed (optional)"
-    
-    # Install Lion optimizer (optional)
-    log "   Installing lion-pytorch (optional optimizer)..."
-    pip install --no-cache-dir -q lion-pytorch 2>&1 | grep -v "already satisfied" || true
-    
-    # Install Prodigy optimizer
-    log "   Installing prodigyopt (for Prodigy optimizer)..."
-    pip install --no-cache-dir -q prodigyopt 2>&1 | grep -v "already satisfied" || log "   ⚠️ prodigyopt install failed"
+    # Optional optimizers (same env as ComfyUI: cu128). bitsandbytes needs BNB_CUDA_VERSION=122 at install and in train-lora (wheels only up to 12.2).
+    log "   Installing optional optimizers (bitsandbytes, lion-pytorch, prodigyopt)..."
+    BNB_CUDA_VERSION=122 pip install --no-cache-dir -q bitsandbytes lion-pytorch prodigyopt 2>>"$log_file" || true
 
     # 3. CREATE DIRECTORIES
     log "3. Creating directories..."
@@ -2508,8 +2506,9 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
     exit 1
 fi
 
-# Activate environment
+# Activate environment (same as ComfyUI: sd_comfy-env, cu128)
 source /storage/.venvs/sd_comfy-env/bin/activate
+export BNB_CUDA_VERSION=122
 
 # Run training (sd_scripts is in backend/sd_scripts subdirectory)
 cd /tmp/lora-training/backend/sd_scripts
@@ -2550,399 +2549,13 @@ EOF
     echo "   accelerate launch train_network.py --config_file=/path/to/config.toml"
     echo "=================================================="
     echo ""
-
-    # 6. CREATE SIMPLE WEB UI FOR CONFIG MANAGEMENT (OPTIONAL - CONTINUES EVEN IF FAILS)
-    log "6. Creating Web UI for LoRA Training (optional)..."
-    mkdir -p "$lora_training_dir/web_ui"
-    
-    # Create Flask app for web UI
-    cat > "$lora_training_dir/web_ui/app.py" << 'WEBUI_EOF'
-#!/usr/bin/env python3
-"""Simple web UI for LoRA Easy Training Scripts"""
-from flask import Flask, render_template_string, request, jsonify, send_file
-import os
-import subprocess
-import glob
-import json
-from datetime import datetime
-import toml
-
-app = Flask(__name__)
-
-CONFIG_DIR = "/storage/lora_training/config"
-OUTPUT_DIR = "/tmp/stable-diffusion-models/lora"
-TRAINING_LOG = "/storage/logs/lora_training.log"
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>LoRA Easy Training Scripts</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a1a; color: #e0e0e0; padding: 20px; }
-        .container { max-width: 1400px; margin: 0 auto; }
-        h1 { color: #4CAF50; margin-bottom: 30px; }
-        .section { background: #2a2a2a; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
-        .section h2 { color: #64B5F6; margin-bottom: 15px; }
-        .config-list { display: grid; gap: 10px; }
-        .config-item { background: #333; padding: 15px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
-        .config-name { font-weight: 500; color: #FFF; }
-        .config-meta { font-size: 0.85em; color: #999; }
-        button { background: #4CAF50; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px; }
-        button:hover { background: #45a049; }
-        button.danger { background: #f44336; }
-        button.danger:hover { background: #da190b; }
-        button:disabled { background: #555; cursor: not-allowed; }
-        .log-viewer { background: #1a1a1a; border: 1px solid #444; border-radius: 5px; padding: 15px; max-height: 400px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 12px; }
-        .lora-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 15px; }
-        .lora-item { background: #333; padding: 15px; border-radius: 5px; }
-        .lora-name { font-weight: 500; color: #FFF; margin-bottom: 5px; word-break: break-all; }
-        .lora-size { font-size: 0.85em; color: #999; }
-        .status { padding: 5px 10px; border-radius: 3px; font-size: 0.85em; display: inline-block; margin-top: 10px; }
-        .status.running { background: #FF9800; }
-        .status.idle { background: #4CAF50; }
-        .status.error { background: #f44336; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🎨 LoRA Easy Training Scripts</h1>
-        
-        <div class="section">
-            <h2>Training Status</h2>
-            <div id="status" class="status idle">Idle</div>
-            <div style="margin-top: 15px;">
-                <button onclick="stopTraining()" id="stopBtn" disabled>Stop Training</button>
-                <button onclick="refreshStatus()" style="margin-left: 10px;">Refresh</button>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>Available Configs</h2>
-            <div class="config-list" id="configList">
-                <p style="color: #999;">Loading configs...</p>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>Training Log</h2>
-            <div class="log-viewer" id="logViewer">No logs yet...</div>
-            <button onclick="refreshLog()" style="margin-top: 10px;">Refresh Log</button>
-        </div>
-        
-        <div class="section">
-            <h2>Trained LoRAs</h2>
-            <div class="lora-grid" id="loraGrid">
-                <p style="color: #999;">Loading LoRAs...</p>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        let currentTrainingPid = null;
-        
-        async function loadConfigs() {
-            const response = await fetch('/api/configs');
-            const configs = await response.json();
-            const list = document.getElementById('configList');
-            
-            if (configs.length === 0) {
-                list.innerHTML = '<p style="color: #999;">No configs found. Upload TOML configs from your app.</p>';
-                return;
-            }
-            
-            list.innerHTML = configs.map(config => `
-                <div class="config-item">
-                    <div>
-                        <div class="config-name">${config.name}</div>
-                        <div class="config-meta">Modified: ${config.modified}</div>
-                    </div>
-                    <button onclick="startTraining('${config.path}')">Train</button>
-                </div>
-            `).join('');
-        }
-        
-        async function startTraining(configPath) {
-            if (!confirm('Start training with this config?')) return;
-            
-            const response = await fetch('/api/train', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({config: configPath})
-            });
-            const result = await response.json();
-            
-            if (result.success) {
-                alert('Training started! Check the log below for progress.');
-                currentTrainingPid = result.pid;
-                document.getElementById('stopBtn').disabled = false;
-                refreshStatus();
-            } else {
-                alert('Failed to start training: ' + result.message);
-            }
-        }
-        
-        async function stopTraining() {
-            if (!confirm('Stop current training?')) return;
-            
-            const response = await fetch('/api/stop', {method: 'POST'});
-            const result = await response.json();
-            alert(result.message);
-            document.getElementById('stopBtn').disabled = true;
-            refreshStatus();
-        }
-        
-        async function refreshStatus() {
-            const response = await fetch('/api/status');
-            const status = await response.json();
-            const statusEl = document.getElementById('status');
-            
-            statusEl.className = 'status ' + status.status;
-            statusEl.textContent = status.message;
-            document.getElementById('stopBtn').disabled = status.status !== 'running';
-            currentTrainingPid = status.pid;
-        }
-        
-        async function refreshLog() {
-            const response = await fetch('/api/log');
-            const data = await response.json();
-            document.getElementById('logViewer').textContent = data.log || 'No logs yet...';
-        }
-        
-        async function loadLoras() {
-            const response = await fetch('/api/loras');
-            const loras = await response.json();
-            const grid = document.getElementById('loraGrid');
-            
-            if (loras.length === 0) {
-                grid.innerHTML = '<p style="color: #999;">No trained LoRAs yet.</p>';
-                return;
-            }
-            
-            grid.innerHTML = loras.map(lora => `
-                <div class="lora-item">
-                    <div class="lora-name">${lora.name}</div>
-                    <div class="lora-size">${lora.size}</div>
-                    <button onclick="window.location.href='/api/download/${encodeURIComponent(lora.name)}'">Download</button>
-                </div>
-            `).join('');
-        }
-        
-        // Auto-refresh every 5 seconds
-        setInterval(() => {
-            refreshStatus();
-            if (currentTrainingPid) refreshLog();
-        }, 5000);
-        
-        // Initial load
-        loadConfigs();
-        loadLoras();
-        refreshStatus();
-    </script>
-</body>
-</html>
-"""
-
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/api/configs')
-def get_configs():
-    configs = []
-    for config_path in glob.glob(f"{CONFIG_DIR}/*.toml"):
-        stat = os.stat(config_path)
-        configs.append({
-            'name': os.path.basename(config_path),
-            'path': config_path,
-            'modified': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-        })
-    return jsonify(configs)
-
-@app.route('/api/train', methods=['POST'])
-def start_training():
-    data = request.json
-    config_path = data.get('config')
-    
-    if not config_path or not os.path.exists(config_path):
-        return jsonify({'success': False, 'message': 'Config not found'})
-    
-    try:
-        # Start training in background
-        # Use stdbuf to unbuffer output for real-time logging
-        cmd = [
-            '/usr/local/bin/train-lora',
-            config_path
-        ]
-        
-        process = subprocess.Popen(
-            cmd,
-            stdout=open(TRAINING_LOG, 'w'),
-            stderr=subprocess.STDOUT
-        )
-        
-        # Save PID
-        with open('/tmp/lora_training.pid', 'w') as f:
-            f.write(str(process.pid))
-        
-        return jsonify({'success': True, 'pid': process.pid})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)})
-
-@app.route('/api/stop', methods=['POST'])
-def stop_training():
-    try:
-        if os.path.exists('/tmp/lora_training.pid'):
-            with open('/tmp/lora_training.pid', 'r') as f:
-                pid = int(f.read().strip())
-            
-            # Kill the wrapper script
-            os.kill(pid, 15)  # SIGTERM
-            
-            # Also try to kill accelerate/python processes started by it
-            subprocess.run(['pkill', '-f', 'train_network.py'])
-            
-            os.remove('/tmp/lora_training.pid')
-            return jsonify({'success': True, 'message': 'Training stopped'})
-        return jsonify({'success': False, 'message': 'No training running'})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)})
-
-@app.route('/api/status')
-def get_status():
-    if os.path.exists('/tmp/lora_training.pid'):
-        with open('/tmp/lora_training.pid', 'r') as f:
-            try:
-                pid = int(f.read().strip())
-                # Check if process is still running
-                os.kill(pid, 0)
-                return jsonify({'status': 'running', 'message': f'Training (PID: {pid})', 'pid': pid})
-            except (OSError, ValueError):
-                # Process dead or file corrupted
-                if os.path.exists('/tmp/lora_training.pid'):
-                    os.remove('/tmp/lora_training.pid')
-    
-    return jsonify({'status': 'idle', 'message': 'No training running', 'pid': None})
-
-@app.route('/api/log')
-def get_log():
-    if os.path.exists(TRAINING_LOG):
-        with open(TRAINING_LOG, 'r') as f:
-            # Get last 1000 lines
-            lines = f.readlines()
-            log = ''.join(lines[-1000:])
-            return jsonify({'log': log})
-    return jsonify({'log': ''})
-
-@app.route('/api/loras')
-def get_loras():
-    loras = []
-    if os.path.exists(OUTPUT_DIR):
-        for lora_path in glob.glob(f"{OUTPUT_DIR}/*.safetensors"):
-            stat = os.stat(lora_path)
-            size_mb = stat.st_size / (1024 * 1024)
-            loras.append({
-                'name': os.path.basename(lora_path),
-                'size': f'{size_mb:.2f} MB',
-                'path': lora_path
-            })
-    return jsonify(loras)
-
-@app.route('/api/download/<path:filename>')
-def download_lora(filename):
-    file_path = os.path.join(OUTPUT_DIR, filename)
-    if os.path.exists(file_path):
-        return send_file(file_path, as_attachment=True)
-    return jsonify({'error': 'File not found'}), 404
-
-if __name__ == '__main__':
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(os.path.dirname(TRAINING_LOG), exist_ok=True)
-    app.run(host='0.0.0.0', port=8675, debug=False)
-WEBUI_EOF
-
-    chmod +x "$lora_training_dir/web_ui/app.py"
-    
-    # Install Flask (optional - don't fail if it doesn't work)
-    log "   Installing Flask..."
-    pip install --no-cache-dir -q flask toml 2>&1 | grep -v "already satisfied" || log "   ⚠️ Flask/toml install failed (UI will not work)"
-    
-    # 7. START WEB UI (OPTIONAL - CONTINUES EVEN IF FAILS)
-    log "7. Starting Web UI (optional)..."
-    start_lora_training_ui || log "   ⚠️ Web UI failed to start (backend still works via train-lora command)"
-}
-
-start_lora_training_ui() {
-    local lora_training_dir="/tmp/lora-training"
-    local log_file="$LOG_DIR/lora_training_ui.log"
-    
-    # Check if Flask is installed
-    if ! python3 -c "import flask" 2>/dev/null; then
-        log "   ⚠️ Flask not installed, skipping UI startup"
-        return 1
-    fi
-    
-    # Stop existing UI
-    if [[ -f /tmp/lora_training_ui.pid ]]; then
-        read -r ui_pid < /tmp/lora_training_ui.pid 2>/dev/null
-        [[ -n "$ui_pid" ]] && kill -9 "$ui_pid" 2>/dev/null || true
-        rm -f /tmp/lora_training_ui.pid
-    fi
-    
-    # Clear port 8675
-    fuser -k 8675/tcp 2>/dev/null || true
-    sleep 2
-    
-    # Check if web_ui directory exists
-    if [[ ! -f "$lora_training_dir/web_ui/app.py" ]]; then
-        log "   ⚠️ Web UI files not found, skipping"
-        return 1
-    fi
-    
-    # Activate venv and start UI
-    source "$VENV_DIR/sd_comfy-env/bin/activate"
-    cd "$lora_training_dir/web_ui"
-    
-    nohup python3 app.py > "$log_file" 2>&1 &
-    local ui_pid=$!
-    echo "$ui_pid" > /tmp/lora_training_ui.pid
-    
-    sleep 3
-    
-    if kill -0 $ui_pid 2>/dev/null; then
-        log "✅ LoRA Training UI started (PID: $ui_pid)"
-        
-        echo ""
-        echo "=================================================="
-        echo "   LORA TRAINING WEB UI"
-        echo "=================================================="
-        echo "   URL:             http://localhost:8675"
-        echo "   PID:             $ui_pid"
-        echo "   Log:             $log_file"
-        echo "=================================================="
-        echo ""
-        echo "   Access via browser to:"
-        echo "   - View and launch training configs"
-        echo "   - Monitor training progress"
-        echo "   - Download trained LoRAs"
-        echo "=================================================="
-        echo ""
-        return 0
-    else
-        log "⚠️ LoRA Training UI failed to start (check $log_file)"
-        log "   Backend still works via: train-lora <config.toml>"
-        return 1
-    fi
 }
 
 # Execute
 if [[ ! -f "/tmp/lora_training.prepared" ]] || [[ -n "$REINSTALL_LORA_TRAINING" ]]; then
     install_lora_training
 else
-    log "✅ LoRA Easy Training Scripts already installed. Restarting UI..."
-    start_lora_training_ui
+    log "✅ LoRA Easy Training Scripts already installed (backend only; use train-lora <config.toml>)"
 fi
 
   #######################################
