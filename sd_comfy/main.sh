@@ -2397,245 +2397,552 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # ollama serve > $LOG_DIR/ollama.log 2>&1 & ...
 
   #######################################
-  # STEP 9.4: INSTALL AI TOOLKIT (COMFY ENV)
+  # STEP 9.4: INSTALL LORA EASY TRAINING SCRIPTS
 #######################################
 echo ""
 echo "=================================================="
-echo "        STEP 9.4: INSTALL AI TOOLKIT"
+echo "        STEP 9.4: INSTALL LORA TRAINING"
 echo "=================================================="
 echo ""
 
-# Ensure /bin/sh exists (critical for Next.js)
-if [[ ! -x "/bin/sh" ]]; then
-    log "⚠️  /bin/sh missing; linking to /bin/bash..."
-    ln -sf /bin/bash /bin/sh 2>/dev/null || true
-fi
-
-install_ai_toolkit() {
+install_lora_training() {
     echo "=================================================="
-    echo "        STEP 9.4: INSTALL AI TOOLKIT (DEBUG MODE)"
+    echo "   STEP 9.4: INSTALL LORA EASY TRAINING SCRIPTS"
     echo "=================================================="
     
-    local ai_toolkit_dir="/tmp/ai-toolkit"
+    local lora_training_dir="/tmp/lora-training"
     local comfy_venv_dir="$VENV_DIR/sd_comfy-env"
-    local ui_dir="$ai_toolkit_dir/ui"
-    local log_file="$LOG_DIR/ai_toolkit_ui.log"
-    local worker_log="$LOG_DIR/ai_toolkit_worker.log"
+    local log_file="$LOG_DIR/lora_training.log"
+    local config_dir="/storage/lora_training/config"
+    local datasets_dir="/storage/lora_training/datasets"
 
-    # 1. CLONE
+    # 1. CLONE REPOSITORY
     log "1. Checking Repository..."
-    if [[ ! -d "$ai_toolkit_dir" ]]; then
-        log "   Cloning https://github.com/ostris/ai-toolkit.git..."
-        git clone https://github.com/ostris/ai-toolkit.git "$ai_toolkit_dir"
+    if [[ ! -d "$lora_training_dir" ]]; then
+        log "   Cloning https://github.com/derrian-distro/LoRA_Easy_Training_Scripts.git..."
+        git clone --recurse-submodules https://github.com/derrian-distro/LoRA_Easy_Training_Scripts.git "$lora_training_dir"
     else
         log "   Updating existing repository..."
-        cd "$ai_toolkit_dir" && git pull && cd - > /dev/null
+        cd "$lora_training_dir" && git pull && git submodule update --init --recursive && cd - > /dev/null
     fi
 
-    # 2. PYTHON DEPS (inside Comfy venv; pip skips already-installed packages)
+    # 2. INSTALL PYTHON DEPENDENCIES
     log "2. Installing Python Dependencies (Comfy env: $comfy_venv_dir)..."
     source "$comfy_venv_dir/bin/activate"
-    cd "$ai_toolkit_dir"
-    if [[ -f "requirements.txt" ]]; then
-        # Exclude: torch (use Comfy's), lycoris-lora (broken 1.8.3), and packages we must not downgrade (keep Comfy's versions)
-        grep -vE "torch|torchvision|torchaudio|lycoris-lora|^numpy|^scipy|^setuptools|opencv-python|^python-multipart" "requirements.txt" > "/tmp/aitk_reqs.txt"
-        log "   Installing missing AI Toolkit requirements (already satisfied will be skipped)..."
-        pip install --no-cache-dir -q -r "/tmp/aitk_reqs.txt"
-        # Install lycoris-lora separately (no version pin) so pip can use a wheel; LoKr training needs it
-        log "   Installing lycoris-lora (optional, for LoKr)..."
-        pip install --no-cache-dir -q lycoris-lora 2>/dev/null || log "   ⚠️ lycoris-lora skipped (optional; LoKr training may be limited)"
-    fi
-    # Install AI Toolkit extra deps (not in filtered reqs or often missing): torchao, pytorch_fid, pytorch-wavelets, torchcodec, exact diffusers commit
-    log "   Installing AI Toolkit extra deps (torchao, pytorch_fid, pytorch-wavelets, torchcodec)..."
-    pip install --no-cache-dir -q torchao==0.10.0 pytorch_fid pytorch-wavelets==1.3.0 torchcodec 2>/dev/null || log "   ⚠️ Some extra deps skipped (torchao/pytorch_fid/pytorch-wavelets/torchcodec)"
-    log "   Installing diffusers at exact commit (AI Toolkit requirement)..."
-    pip install --no-cache-dir -q "git+https://github.com/huggingface/diffusers@8600b4c10d67b0ce200f664204358747bd53c775" 2>/dev/null || log "   ⚠️ diffusers@commit skipped (using existing diffusers)"
-    # Editable install only if repo has setup.py/pyproject.toml (ai-toolkit may use PYTHONPATH only)
-    if [[ -f "setup.py" ]] || [[ -f "pyproject.toml" ]]; then
-        pip install -e . --no-deps
-    else
-        log "   No setup.py/pyproject.toml in repo; using PYTHONPATH for ai-toolkit (already set for worker)."
-    fi
-    cd - > /dev/null
-
-    # 3. NODE.JS
-    log "3. Checking Node.js (AI Toolkit UI requires >= 18.18)..."
-    node_major=""
-    if command -v node &> /dev/null; then
-        node_major=$(node -v 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p')
-    fi
-    if [[ -z "$node_major" ]] || [[ "$node_major" -lt 18 ]]; then
-        log "   Node.js missing or too old (found: $(node -v 2>/dev/null || echo 'none')), installing v20..."
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-        apt-get install -y nodejs
-        log "   Node.js $(node -v) installed."
-    else
-        log "   Node.js $(node -v) is present (>= 18)."
-    fi
-
-    # 4. BUILD UI
-    log "4. Building UI..."
-    cd "$ui_dir"
     
-    # Inject basePath and assetPrefix for subpath routing
-    local config="next.config.js"
-    [[ -f "next.config.ts" ]] && config="next.config.ts"
-    if [[ -f "$config" ]] && ! grep -q "basePath.*ai-toolkit" "$config"; then
-        log "   Injecting basePath into $config..."
-        # Remove any old basePath attempts first
-        sed -i '/basePath:/d' "$config"
-        sed -i '/assetPrefix:/d' "$config"
-        # Inject both basePath and assetPrefix (handle TypeScript type annotations)
-        sed -i "s/const nextConfig\(: [^=]*\)\? = {/const nextConfig\1 = {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
-        sed -i "s/module.exports = {/module.exports = {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
-        sed -i "s/export default {/export default {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
-    fi
-
-    log "   Running npm install..."
-    npm install
-    
-    log "   Running Prisma..."
-    npx prisma generate
-    npx prisma db push
-    
-    log "   Running npm build..."
-    export NEXT_PUBLIC_BASE_PATH="/ai-toolkit"
-    npm run build
-    cd - > /dev/null
-
-    # 5. UPDATE NGINX CONFIG (ensure ai-toolkit routing is correct)
-    log "5. Updating Nginx config for AI Toolkit..."
-    if [[ -f "/notebooks/nginx/default" ]]; then
-        sudo cp /notebooks/nginx/default /etc/nginx/sites-available/default
-        sudo nginx -t && sudo nginx -s reload || log "⚠️ Nginx reload failed, but continuing"
-        log "   ✅ Nginx config updated"
+    # Install sd-scripts dependencies (backend/sd_scripts submodule)
+    if [[ -d "$lora_training_dir/backend/sd_scripts" ]]; then
+        cd "$lora_training_dir/backend/sd_scripts"
+        if [[ -f "requirements.txt" ]]; then
+            # Filter to avoid breaking ComfyUI (same strategy as AI Toolkit)
+            # Keep Comfy's versions of: torch, torchvision, torchaudio, xformers, numpy, scipy, opencv, pillow
+            grep -vE "^torch[^a-z]|^torchvision|^torchaudio|^xformers|^numpy|^scipy|^opencv-python|^Pillow|^setuptools|^python-multipart" "requirements.txt" > "/tmp/lora_backend_reqs.txt"
+            log "   Installing sd-scripts requirements (filtered)..."
+            pip install --no-cache-dir -q -r "/tmp/lora_backend_reqs.txt" 2>&1 | grep -v "already satisfied" || true
+        fi
+        cd - > /dev/null
     else
-        log "   ⚠️ /notebooks/nginx/default not found, skipping nginx update"
+        log "   ⚠️ backend/sd_scripts directory not found, skipping sd-scripts requirements"
     fi
+    
+    # Install LyCORIS (main repo includes it, no separate install needed for sd-scripts)
+    # Note: sd-scripts supports network_module="lycoris.kohya" without needing lycoris-lora package
+    log "   LyCORIS support: using sd-scripts built-in (network_module='networks.lora')"
+    
+    # Install bitsandbytes for 8bit/4bit optimizers (Prodigy, AdamW8bit)
+    log "   Installing bitsandbytes (for Prodigy optimizer)..."
+    pip install --no-cache-dir -q bitsandbytes 2>&1 | grep -v "already satisfied" || log "   ⚠️ bitsandbytes install failed (optional)"
+    
+    # Install Lion optimizer (optional)
+    log "   Installing lion-pytorch (optional optimizer)..."
+    pip install --no-cache-dir -q lion-pytorch 2>&1 | grep -v "already satisfied" || true
+    
+    # Install Prodigy optimizer
+    log "   Installing prodigyopt (for Prodigy optimizer)..."
+    pip install --no-cache-dir -q prodigyopt 2>&1 | grep -v "already satisfied" || log "   ⚠️ prodigyopt install failed"
 
-    # 6. START UI
-    start_ai_toolkit_ui_logic
+    # 3. CREATE DIRECTORIES
+    log "3. Creating directories..."
+    mkdir -p "$config_dir" "$datasets_dir"
+    mkdir -p "/tmp/stable-diffusion-models/lora"  # Output directory for trained LoRAs
+    
+    # 4. CONFIGURE ACCELERATE
+    log "4. Configuring Accelerate..."
+    mkdir -p ~/.cache/huggingface/accelerate
+    cat > ~/.cache/huggingface/accelerate/default_config.yaml << EOF
+compute_environment: LOCAL_MACHINE
+deepspeed_config: {}
+distributed_type: 'NO'
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 1
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+EOF
+    
+    log "   ✅ Accelerate configured"
+
+    # 5. CREATE TRAINING SCRIPT WRAPPER
+    log "5. Creating training script wrapper..."
+    cat > "$lora_training_dir/train_from_config.sh" << 'EOF'
+#!/bin/bash
+# LoRA Training Script Wrapper
+# Usage: ./train_from_config.sh <config.toml>
+
+if [[ -z "$1" ]]; then
+    echo "Usage: $0 <config.toml>"
+    exit 1
+fi
+
+CONFIG_PATH="$1"
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo "Error: Config file not found: $CONFIG_PATH"
+    exit 1
+fi
+
+# Activate environment
+source /storage/.venvs/sd_comfy-env/bin/activate
+
+# Run training (sd_scripts is in backend/sd_scripts subdirectory)
+cd /tmp/lora-training/backend/sd_scripts
+accelerate launch --config_file ~/.cache/huggingface/accelerate/default_config.yaml \
+    train_network.py \
+    --config_file="$CONFIG_PATH" \
+    --lowram
+EOF
+    chmod +x "$lora_training_dir/train_from_config.sh"
+    
+    # Create symlink for easy access
+    ln -sf "$lora_training_dir/train_from_config.sh" /usr/local/bin/train-lora 2>/dev/null || true
+
+    log "✅ LoRA Easy Training Scripts backend installed successfully"
+    touch /tmp/lora_training.prepared
+    
+    # Success summary
+    echo ""
+    echo "=================================================="
+    echo "   LORA TRAINING BACKEND INSTALL SUMMARY"
+    echo "=================================================="
+    echo "   Python env:      Comfy venv ($comfy_venv_dir)"
+    echo "   Repo:            $lora_training_dir"
+    echo "   Config dir:      $config_dir"
+    echo "   Datasets dir:    $datasets_dir"
+    echo "   Output dir:      /tmp/stable-diffusion-models/lora"
+    echo "   Training script: train-lora <config.toml>"
+    echo "=================================================="
+    echo ""
+    echo "   Manual Training Commands:"
+    echo "   # Create test config at: $config_dir/test.toml"
+    echo "   # Then run:"
+    echo "   train-lora $config_dir/test.toml"
+    echo ""
+    echo "   # Or full command:"
+    echo "   source /storage/.venvs/sd_comfy-env/bin/activate"
+    echo "   cd $lora_training_dir/backend/sd_scripts"
+    echo "   accelerate launch train_network.py --config_file=/path/to/config.toml"
+    echo "=================================================="
+    echo ""
+
+    # 6. CREATE SIMPLE WEB UI FOR CONFIG MANAGEMENT (OPTIONAL - CONTINUES EVEN IF FAILS)
+    log "6. Creating Web UI for LoRA Training (optional)..."
+    mkdir -p "$lora_training_dir/web_ui"
+    
+    # Create Flask app for web UI
+    cat > "$lora_training_dir/web_ui/app.py" << 'WEBUI_EOF'
+#!/usr/bin/env python3
+"""Simple web UI for LoRA Easy Training Scripts"""
+from flask import Flask, render_template_string, request, jsonify, send_file
+import os
+import subprocess
+import glob
+import json
+from datetime import datetime
+import toml
+
+app = Flask(__name__)
+
+CONFIG_DIR = "/storage/lora_training/config"
+OUTPUT_DIR = "/tmp/stable-diffusion-models/lora"
+TRAINING_LOG = "/storage/logs/lora_training.log"
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LoRA Easy Training Scripts</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a1a; color: #e0e0e0; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #4CAF50; margin-bottom: 30px; }
+        .section { background: #2a2a2a; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+        .section h2 { color: #64B5F6; margin-bottom: 15px; }
+        .config-list { display: grid; gap: 10px; }
+        .config-item { background: #333; padding: 15px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .config-name { font-weight: 500; color: #FFF; }
+        .config-meta { font-size: 0.85em; color: #999; }
+        button { background: #4CAF50; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px; }
+        button:hover { background: #45a049; }
+        button.danger { background: #f44336; }
+        button.danger:hover { background: #da190b; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        .log-viewer { background: #1a1a1a; border: 1px solid #444; border-radius: 5px; padding: 15px; max-height: 400px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 12px; }
+        .lora-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 15px; }
+        .lora-item { background: #333; padding: 15px; border-radius: 5px; }
+        .lora-name { font-weight: 500; color: #FFF; margin-bottom: 5px; word-break: break-all; }
+        .lora-size { font-size: 0.85em; color: #999; }
+        .status { padding: 5px 10px; border-radius: 3px; font-size: 0.85em; display: inline-block; margin-top: 10px; }
+        .status.running { background: #FF9800; }
+        .status.idle { background: #4CAF50; }
+        .status.error { background: #f44336; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎨 LoRA Easy Training Scripts</h1>
+        
+        <div class="section">
+            <h2>Training Status</h2>
+            <div id="status" class="status idle">Idle</div>
+            <div style="margin-top: 15px;">
+                <button onclick="stopTraining()" id="stopBtn" disabled>Stop Training</button>
+                <button onclick="refreshStatus()" style="margin-left: 10px;">Refresh</button>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Available Configs</h2>
+            <div class="config-list" id="configList">
+                <p style="color: #999;">Loading configs...</p>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Training Log</h2>
+            <div class="log-viewer" id="logViewer">No logs yet...</div>
+            <button onclick="refreshLog()" style="margin-top: 10px;">Refresh Log</button>
+        </div>
+        
+        <div class="section">
+            <h2>Trained LoRAs</h2>
+            <div class="lora-grid" id="loraGrid">
+                <p style="color: #999;">Loading LoRAs...</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let currentTrainingPid = null;
+        
+        async function loadConfigs() {
+            const response = await fetch('/api/configs');
+            const configs = await response.json();
+            const list = document.getElementById('configList');
+            
+            if (configs.length === 0) {
+                list.innerHTML = '<p style="color: #999;">No configs found. Upload TOML configs from your app.</p>';
+                return;
+            }
+            
+            list.innerHTML = configs.map(config => `
+                <div class="config-item">
+                    <div>
+                        <div class="config-name">${config.name}</div>
+                        <div class="config-meta">Modified: ${config.modified}</div>
+                    </div>
+                    <button onclick="startTraining('${config.path}')">Train</button>
+                </div>
+            `).join('');
+        }
+        
+        async function startTraining(configPath) {
+            if (!confirm('Start training with this config?')) return;
+            
+            const response = await fetch('/api/train', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({config: configPath})
+            });
+            const result = await response.json();
+            
+            if (result.success) {
+                alert('Training started! Check the log below for progress.');
+                currentTrainingPid = result.pid;
+                document.getElementById('stopBtn').disabled = false;
+                refreshStatus();
+            } else {
+                alert('Failed to start training: ' + result.message);
+            }
+        }
+        
+        async function stopTraining() {
+            if (!confirm('Stop current training?')) return;
+            
+            const response = await fetch('/api/stop', {method: 'POST'});
+            const result = await response.json();
+            alert(result.message);
+            document.getElementById('stopBtn').disabled = true;
+            refreshStatus();
+        }
+        
+        async function refreshStatus() {
+            const response = await fetch('/api/status');
+            const status = await response.json();
+            const statusEl = document.getElementById('status');
+            
+            statusEl.className = 'status ' + status.status;
+            statusEl.textContent = status.message;
+            document.getElementById('stopBtn').disabled = status.status !== 'running';
+            currentTrainingPid = status.pid;
+        }
+        
+        async function refreshLog() {
+            const response = await fetch('/api/log');
+            const data = await response.json();
+            document.getElementById('logViewer').textContent = data.log || 'No logs yet...';
+        }
+        
+        async function loadLoras() {
+            const response = await fetch('/api/loras');
+            const loras = await response.json();
+            const grid = document.getElementById('loraGrid');
+            
+            if (loras.length === 0) {
+                grid.innerHTML = '<p style="color: #999;">No trained LoRAs yet.</p>';
+                return;
+            }
+            
+            grid.innerHTML = loras.map(lora => `
+                <div class="lora-item">
+                    <div class="lora-name">${lora.name}</div>
+                    <div class="lora-size">${lora.size}</div>
+                    <button onclick="window.location.href='/api/download/${encodeURIComponent(lora.name)}'">Download</button>
+                </div>
+            `).join('');
+        }
+        
+        // Auto-refresh every 5 seconds
+        setInterval(() => {
+            refreshStatus();
+            if (currentTrainingPid) refreshLog();
+        }, 5000);
+        
+        // Initial load
+        loadConfigs();
+        loadLoras();
+        refreshStatus();
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/configs')
+def get_configs():
+    configs = []
+    for config_path in glob.glob(f"{CONFIG_DIR}/*.toml"):
+        stat = os.stat(config_path)
+        configs.append({
+            'name': os.path.basename(config_path),
+            'path': config_path,
+            'modified': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+        })
+    return jsonify(configs)
+
+@app.route('/api/train', methods=['POST'])
+def start_training():
+    data = request.json
+    config_path = data.get('config')
+    
+    if not config_path or not os.path.exists(config_path):
+        return jsonify({'success': False, 'message': 'Config not found'})
+    
+    try:
+        # Start training in background
+        # Use stdbuf to unbuffer output for real-time logging
+        cmd = [
+            '/usr/local/bin/train-lora',
+            config_path
+        ]
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=open(TRAINING_LOG, 'w'),
+            stderr=subprocess.STDOUT
+        )
+        
+        # Save PID
+        with open('/tmp/lora_training.pid', 'w') as f:
+            f.write(str(process.pid))
+        
+        return jsonify({'success': True, 'pid': process.pid})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/stop', methods=['POST'])
+def stop_training():
+    try:
+        if os.path.exists('/tmp/lora_training.pid'):
+            with open('/tmp/lora_training.pid', 'r') as f:
+                pid = int(f.read().strip())
+            
+            # Kill the wrapper script
+            os.kill(pid, 15)  # SIGTERM
+            
+            # Also try to kill accelerate/python processes started by it
+            subprocess.run(['pkill', '-f', 'train_network.py'])
+            
+            os.remove('/tmp/lora_training.pid')
+            return jsonify({'success': True, 'message': 'Training stopped'})
+        return jsonify({'success': False, 'message': 'No training running'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/status')
+def get_status():
+    if os.path.exists('/tmp/lora_training.pid'):
+        with open('/tmp/lora_training.pid', 'r') as f:
+            try:
+                pid = int(f.read().strip())
+                # Check if process is still running
+                os.kill(pid, 0)
+                return jsonify({'status': 'running', 'message': f'Training (PID: {pid})', 'pid': pid})
+            except (OSError, ValueError):
+                # Process dead or file corrupted
+                if os.path.exists('/tmp/lora_training.pid'):
+                    os.remove('/tmp/lora_training.pid')
+    
+    return jsonify({'status': 'idle', 'message': 'No training running', 'pid': None})
+
+@app.route('/api/log')
+def get_log():
+    if os.path.exists(TRAINING_LOG):
+        with open(TRAINING_LOG, 'r') as f:
+            # Get last 1000 lines
+            lines = f.readlines()
+            log = ''.join(lines[-1000:])
+            return jsonify({'log': log})
+    return jsonify({'log': ''})
+
+@app.route('/api/loras')
+def get_loras():
+    loras = []
+    if os.path.exists(OUTPUT_DIR):
+        for lora_path in glob.glob(f"{OUTPUT_DIR}/*.safetensors"):
+            stat = os.stat(lora_path)
+            size_mb = stat.st_size / (1024 * 1024)
+            loras.append({
+                'name': os.path.basename(lora_path),
+                'size': f'{size_mb:.2f} MB',
+                'path': lora_path
+            })
+    return jsonify(loras)
+
+@app.route('/api/download/<path:filename>')
+def download_lora(filename):
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True)
+    return jsonify({'error': 'File not found'}), 404
+
+if __name__ == '__main__':
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(TRAINING_LOG), exist_ok=True)
+    app.run(host='0.0.0.0', port=8675, debug=False)
+WEBUI_EOF
+
+    chmod +x "$lora_training_dir/web_ui/app.py"
+    
+    # Install Flask (optional - don't fail if it doesn't work)
+    log "   Installing Flask..."
+    pip install --no-cache-dir -q flask toml 2>&1 | grep -v "already satisfied" || log "   ⚠️ Flask/toml install failed (UI will not work)"
+    
+    # 7. START WEB UI (OPTIONAL - CONTINUES EVEN IF FAILS)
+    log "7. Starting Web UI (optional)..."
+    start_lora_training_ui || log "   ⚠️ Web UI failed to start (backend still works via train-lora command)"
 }
 
-start_ai_toolkit_ui_logic() {
-    local ai_toolkit_dir="/tmp/ai-toolkit"
-    local comfy_venv_dir="${VENV_DIR:-/storage/.venvs}/sd_comfy-env"
-    local ui_dir="$ai_toolkit_dir/ui"
-    local log_file="$LOG_DIR/ai_toolkit_ui.log"
-    local worker_log="$LOG_DIR/ai_toolkit_worker.log"
-
-    log "Starting UI..."
+start_lora_training_ui() {
+    local lora_training_dir="/tmp/lora-training"
+    local log_file="$LOG_DIR/lora_training_ui.log"
     
-    # Stop existing AI Toolkit UI/worker so port 8675 is free
-    if [[ -f /tmp/ai_toolkit_ui.pid ]]; then
-      read -r worker_pid_old ui_pid_old < /tmp/ai_toolkit_ui.pid 2>/dev/null
-      for p in $worker_pid_old $ui_pid_old; do
-        [[ -n "$p" ]] && kill -9 "$p" 2>/dev/null || true
-      done
-      rm -f /tmp/ai_toolkit_ui.pid
+    # Check if Flask is installed
+    if ! python3 -c "import flask" 2>/dev/null; then
+        log "   ⚠️ Flask not installed, skipping UI startup"
+        return 1
     fi
-    log "   Clearing port 8675..."
+    
+    # Stop existing UI
+    if [[ -f /tmp/lora_training_ui.pid ]]; then
+        read -r ui_pid < /tmp/lora_training_ui.pid 2>/dev/null
+        [[ -n "$ui_pid" ]] && kill -9 "$ui_pid" 2>/dev/null || true
+        rm -f /tmp/lora_training_ui.pid
+    fi
+    
+    # Clear port 8675
     fuser -k 8675/tcp 2>/dev/null || true
-    # Fallback: kill PIDs listening on 8675 (if fuser not installed or didn't run)
-    while read -r pid; do
-      [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null || true
-    done < <(ss -tlnp 2>/dev/null | grep 8675 | sed -n 's/.*pid=\([0-9]*\).*/\1/p')
-    sleep 3
-    # Wait until port is free (max 10s)
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q 8675 || break
-      sleep 1
-    done
-
-    cd "$ui_dir"
+    sleep 2
     
-    # Verify basePath is in next.config before starting (rebuild if missing)
-    local config="next.config.js"
-    [[ -f "next.config.ts" ]] && config="next.config.ts"
-    if [[ -f "$config" ]] && ! grep -q "basePath.*ai-toolkit" "$config"; then
-        log "   ⚠️ basePath missing in $config, rebuilding..."
-        # Force inject basePath (remove old attempts first, handle TypeScript syntax)
-        sed -i '/basePath:/d' "$config"
-        sed -i '/assetPrefix:/d' "$config"
-        sed -i "s/const nextConfig\(: [^=]*\)\? = {/const nextConfig\1 = {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
-        sed -i "s/module.exports = {/module.exports = {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
-        sed -i "s/export default {/export default {\n  basePath: '\/ai-toolkit',\n  assetPrefix: '\/ai-toolkit',/" "$config"
-        export NEXT_PUBLIC_BASE_PATH="/ai-toolkit"
-        npm run build
+    # Check if web_ui directory exists
+    if [[ ! -f "$lora_training_dir/web_ui/app.py" ]]; then
+        log "   ⚠️ Web UI files not found, skipping"
+        return 1
     fi
     
-    export PORT=8675
-    export NEXT_PUBLIC_BASE_PATH="/ai-toolkit"
+    # Activate venv and start UI
+    source "$VENV_DIR/sd_comfy-env/bin/activate"
+    cd "$lora_training_dir/web_ui"
     
-    log "   Launching Next.js..."
-    nohup npx next start > "$log_file" 2>&1 &
+    nohup python3 app.py > "$log_file" 2>&1 &
     local ui_pid=$!
+    echo "$ui_pid" > /tmp/lora_training_ui.pid
     
-    log "   Launching Worker..."
-    export PYTHONPATH="/tmp/ai-toolkit"
-    nohup node dist/cron/worker.js > "$worker_log" 2>&1 &
-    local worker_pid=$!
+    sleep 3
     
-    echo "$worker_pid $ui_pid" > /tmp/ai_toolkit_ui.pid
-    
-    log "   Waiting 5s for startup..."
-    sleep 5
-    
-    # 6. VERIFY & DEBUG
     if kill -0 $ui_pid 2>/dev/null; then
-        log "✅ AI Toolkit UI started (PID: $ui_pid)"
-        log "✅ AI Toolkit Worker started (PID: $worker_pid)"
-        touch /tmp/ai_toolkit.prepared
-        # Success summary
+        log "✅ LoRA Training UI started (PID: $ui_pid)"
+        
         echo ""
         echo "=================================================="
-        echo "   AI TOOLKIT INSTALL SUMMARY"
+        echo "   LORA TRAINING WEB UI"
         echo "=================================================="
-        echo "   Python env:  Comfy venv ($comfy_venv_dir)"
-        echo "   Repo:        $ai_toolkit_dir"
-        echo "   UI:          http://localhost:8675 (PID $ui_pid)"
-        echo "   Worker:      PID $worker_pid"
-        echo "   Requirements: torch/torchvision/torchaudio skipped; rest installed/skipped if already satisfied"
+        echo "   URL:             http://localhost:8675"
+        echo "   PID:             $ui_pid"
+        echo "   Log:             $log_file"
         echo "=================================================="
         echo ""
+        echo "   Access via browser to:"
+        echo "   - View and launch training configs"
+        echo "   - Monitor training progress"
+        echo "   - Download trained LoRAs"
+        echo "=================================================="
+        echo ""
+        return 0
     else
-        log_error "❌ AI Toolkit UI FAILED to start!"
-        
-        echo ""
-        echo "################################################################"
-        echo "#                 AI TOOLKIT DEBUG REPORT                      #"
-        echo "################################################################"
-        echo ""
-        echo "--- PROCESS STATUS ---"
-        ps aux | grep -E "node|next|python" | grep -v grep
-        echo ""
-        echo "--- PORT 8675 STATUS ---"
-        (netstat -tulpn 2>/dev/null || ss -tulpn) | grep 8675 || echo "Port 8675 is free (Process died?)"
-        echo ""
-        echo "--- UI LOG (Last 100 lines) ---"
-        tail -n 100 "$log_file"
-        echo ""
-        echo "--- WORKER LOG (Last 50 lines) ---"
-        tail -n 50 "$worker_log"
-        echo ""
-        echo "################################################################"
-        
-        # Don't exit script, just mark as failed
+        log "⚠️ LoRA Training UI failed to start (check $log_file)"
+        log "   Backend still works via: train-lora <config.toml>"
         return 1
     fi
 }
 
 # Execute
-if [[ ! -f "/tmp/ai_toolkit.prepared" ]] || [[ -n "$REINSTALL_AI_TOOLKIT" ]]; then
-    install_ai_toolkit
+if [[ ! -f "/tmp/lora_training.prepared" ]] || [[ -n "$REINSTALL_LORA_TRAINING" ]]; then
+    install_lora_training
 else
-    log "✅ AI Toolkit already prepared. Restarting..."
-    # Update nginx config even on restart (in case template was updated)
-    if [[ -f "/notebooks/nginx/default" ]]; then
-        sudo cp /notebooks/nginx/default /etc/nginx/sites-available/default
-        sudo nginx -t && sudo nginx -s reload 2>/dev/null || true
-    fi
-    start_ai_toolkit_ui_logic
+    log "✅ LoRA Easy Training Scripts already installed. Restarting UI..."
+    start_lora_training_ui
 fi
 
   #######################################
