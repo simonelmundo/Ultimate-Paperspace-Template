@@ -1053,16 +1053,28 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         echo "   Commit: $current_commit"
         echo "   Date: $current_date"
         
-        # Check if there are updates available
+        # Under set -e, failing git fetch/rev-parse must not run as a top-level command (ERR trap logs but shell still exits).
         echo ""
         echo "🔄 Checking for updates..."
-        git fetch origin 2>/dev/null
+        # Fetch only the checked-out branch when possible — avoids unrelated ref errors on the
+        # remote (e.g. both branch "dev" and "dev/..." which break a full git fetch).
+        fetch_ok=0
+        if [ -n "$current_branch" ] && [ "$current_branch" != "Unknown" ]; then
+            git fetch origin "$current_branch" 2>&1 && fetch_ok=1
+        else
+            git fetch origin 2>&1 && fetch_ok=1
+        fi
+        if [ "$fetch_ok" -ne 1 ]; then
+            echo "⚠️  git fetch failed (network, auth, rate limit, conflicting remote refs, or repo issue). Remote comparison may be incomplete."
+        fi
         
         # Compare local vs remote
-        local_commit=$(git rev-parse HEAD 2>/dev/null)
-        remote_commit=$(git rev-parse origin/$current_branch 2>/dev/null)
+        local_commit=$(git rev-parse HEAD 2>/dev/null) || local_commit=""
+        remote_commit=$(git rev-parse "origin/${current_branch}" 2>/dev/null) || remote_commit=""
         
-        if [ "$local_commit" = "$remote_commit" ]; then
+        if [ -z "$local_commit" ] || [ -z "$remote_commit" ]; then
+            echo "⚠️  Could not compare local vs remote (missing refs after fetch or unknown branch)."
+        elif [ "$local_commit" = "$remote_commit" ]; then
             echo "✅ ComfyUI is up to date with the latest version!"
         else
             echo "⚠️  ComfyUI has updates available!"
@@ -2180,16 +2192,26 @@ else
             echo "   Commit: $current_commit"
             echo "   Date: $current_date"
             
-            # Check if there are updates available
+            # Check if there are updates available (see install path: avoid bare git under set -e)
             echo ""
             echo "🔄 Checking for updates..."
-            git fetch origin 2>/dev/null
+            fetch_ok=0
+            if [ -n "$current_branch" ] && [ "$current_branch" != "Unknown" ]; then
+                git fetch origin "$current_branch" 2>&1 && fetch_ok=1
+            else
+                git fetch origin 2>&1 && fetch_ok=1
+            fi
+            if [ "$fetch_ok" -ne 1 ]; then
+                echo "⚠️  git fetch failed (network, auth, rate limit, conflicting remote refs, or repo issue). Remote comparison may be incomplete."
+            fi
             
             # Compare local vs remote
-            local_commit=$(git rev-parse HEAD 2>/dev/null)
-            remote_commit=$(git rev-parse origin/$current_branch 2>/dev/null)
+            local_commit=$(git rev-parse HEAD 2>/dev/null) || local_commit=""
+            remote_commit=$(git rev-parse "origin/${current_branch}" 2>/dev/null) || remote_commit=""
             
-            if [ "$local_commit" = "$remote_commit" ]; then
+            if [ -z "$local_commit" ] || [ -z "$remote_commit" ]; then
+                echo "⚠️  Could not compare local vs remote (missing refs after fetch or unknown branch)."
+            elif [ "$local_commit" = "$remote_commit" ]; then
                 echo "✅ ComfyUI is up to date with the latest version!"
             else
                 echo "⚠️  ComfyUI has updates available!"
