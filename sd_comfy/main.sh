@@ -436,15 +436,16 @@ readonly TORCHVISION_VERSION="0.23.0+cu128"
 readonly TORCHAUDIO_VERSION="2.8.0+cu128"
 readonly XFORMERS_VERSION="0.0.32.post2"
 readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
-# Pin diffusers so See-through (models.unets), Wan (FlowMatch), nunchaku (Flux), CacheDiT, RMBG agree.
-# ComfyUI-See-through documents diffusers>=0.37 for group_offload; cap avoids untested major jumps.
-readonly DIFFUSERS_CUSTOM_NODE_PIN=">=0.37.0,<0.46.0"
-# diffusers>=0.37 may pull huggingface-hub 1.x; Comfy/transformers 4.4x require hub <1.0 — re-pin after diffusers.
+# Exact diffusers: newer releases remove is_k_diffusion_available and break See-through / fluxtrainer imports.
+# ComfyUI-Manager often runs pip after boot — keep this pin and re-run repair if imports break again.
+readonly DIFFUSERS_PIN="==0.37.1"
+# transformers 4.56+ breaks WAS Node Suite (Blip / apply_chunking_to_forward); nunchaku wants >=4.54 — stay on 4.54.x.
+readonly TRANSFORMERS_PIN=">=4.54.0,<4.55.0"
+# diffusers>=0.37 may pull huggingface-hub 1.x; Comfy/transformers require hub <1.0 — re-pin after diffusers.
 readonly HF_HUB_TRANSFORMERS_PIN=">=0.34.0,<1.0"
 # OpenCV 4.13+ requires numpy>=2 (breaks accelerate/scipy/mediapipe in this venv); stay on 4.11 for cv2.ximgproc + numpy 1.x.
 readonly OPENCV_CONTRIB_PIN="==4.11.0.86"
 readonly NUMPY_COMFY_PIN=">=1.26.4,<2.0.0"
-readonly TRANSFORMERS_NUNCHAKU_PIN=">=4.54.0,<4.57"
 readonly ACCELERATE_NUNCHAKU_PIN=">=1.9.0"
 # PyTorch 2.8 ships Triton 3.4 without triton.ops; older bitsandbytes breaks diffusers quantizer imports.
 readonly BITSANDBYTES_TRITON3_PIN=">=0.45.1"
@@ -456,8 +457,8 @@ install_critical_packages() {
     local critical_packages=(
         "blend_modes" "deepdiff" "rembg" "webcolors" "ultralytics" "inflect" "soxr" "groundingdino-py" 
         "insightface" "opencv-contrib-python${OPENCV_CONTRIB_PIN}" "facexlib" "onnxruntime" "timm" 
-        "segment-anything" "scikit-image" "piexif" "transformers${TRANSFORMERS_NUNCHAKU_PIN}" "scikit-learn"
-        "scipy>=1.11.4" "numpy${NUMPY_COMFY_PIN}" "dill" "matplotlib" "oss2" "gguf" "diffusers${DIFFUSERS_CUSTOM_NODE_PIN}" 
+        "segment-anything" "scikit-image" "piexif" "transformers${TRANSFORMERS_PIN}" "scikit-learn"
+        "scipy>=1.11.4" "numpy${NUMPY_COMFY_PIN}" "dill" "matplotlib" "oss2" "gguf" "diffusers${DIFFUSERS_PIN}" 
         "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate${ACCELERATE_NUNCHAKU_PIN}" "pyOpenSSL"
         "setuptools>=69" "comfy-env" "bitsandbytes${BITSANDBYTES_TRITON3_PIN}"
     )
@@ -580,23 +581,24 @@ CHECKEOF
 # Re-sync huggingface-hub / numpy / transformers / accelerate after diffusers (its deps can break Comfy core).
 ensure_comfy_custom_node_pip_stack() {
     log "🔧 Pinning diffusers + setuptools + opencv-contrib (See-through / Wan / nunchaku / SUPIR / LayerStyle)..."
+    log "💡 If ComfyUI-Manager installs pip deps later, re-run this script or: source venv && ensure path runs repair."
     disable_err_trap
     pip install --no-cache-dir --disable-pip-version-check -q -U "setuptools>=69" "wheel" || true
-    if pip install --no-cache-dir --disable-pip-version-check -U "diffusers${DIFFUSERS_CUSTOM_NODE_PIN}"; then
-        log "✅ diffusers ${DIFFUSERS_CUSTOM_NODE_PIN} installed"
-    else
-        log_error "⚠️ diffusers pin install failed"
-    fi
-    log "🔧 Re-pinning huggingface-hub, numpy, transformers, accelerate (Comfy core + nunchaku / cache-dit)..."
+    log "🔧 Installing transformers/accelerate first, then exact diffusers (avoids Manager pulling diffusers 0.4x+)..."
     if pip install --no-cache-dir --disable-pip-version-check \
         "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" \
         "numpy${NUMPY_COMFY_PIN}" \
-        "transformers${TRANSFORMERS_NUNCHAKU_PIN}" \
+        "transformers${TRANSFORMERS_PIN}" \
         "accelerate${ACCELERATE_NUNCHAKU_PIN}" \
-        "tokenizers>=0.20"; then
-        log "✅ HF stack aligned (hub<1.0, transformers 4.54–4.56, accelerate>=1.9, numpy<2)"
+        "tokenizers>=0.20,<0.23"; then
+        log "✅ transformers ${TRANSFORMERS_PIN} + accelerate (WAS Blip + nunchaku compatible band)"
     else
         log_error "⚠️ HF stack re-pin had issues"
+    fi
+    if pip install --no-cache-dir --disable-pip-version-check --force-reinstall "diffusers${DIFFUSERS_PIN}"; then
+        log "✅ diffusers ${DIFFUSERS_PIN} installed (is_k_diffusion_available + See-through LayerDiffuse)"
+    else
+        log_error "⚠️ diffusers exact pin install failed"
     fi
     if pip install --no-cache-dir --disable-pip-version-check -U "python-multipart>=0.0.18"; then
         log "✅ python-multipart (gradio 6.x)"
@@ -626,6 +628,11 @@ ensure_comfy_custom_node_pip_stack() {
     else
         log "✅ setuptools / pkg_resources OK for Lightning / SUPIR"
     fi
+    # ComfyUI-Manager may upgrade diffusers/transformers after this script — force exact pair last.
+    pip install --no-cache-dir --disable-pip-version-check --force-reinstall \
+        "diffusers${DIFFUSERS_PIN}" \
+        "transformers${TRANSFORMERS_PIN}" \
+        "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" 2>/dev/null || log_error "⚠️ Final diffusers/transformers pin failed"
     enable_err_trap
 }
 
@@ -643,10 +650,14 @@ try:
     parts = [int(x) for x in diffusers.__version__.split(".")[:2] if x.isdigit()]
     while len(parts) < 2:
         parts.append(0)
-    if tuple(parts) < (0, 37):
+    if tuple(parts) != (0, 37):
         sys.exit(12)
 except Exception:
     sys.exit(12)
+try:
+    from diffusers.utils.import_utils import is_k_diffusion_available  # noqa: F401
+except Exception:
+    sys.exit(22)
 try:
     import diffusers.models.unets  # noqa: F401
 except Exception:
@@ -680,7 +691,7 @@ try:
     _tp = transformers.__version__.split(".")
     _tmaj = int(_tp[0])
     _tmin = int(_tp[1]) if len(_tp) > 1 else 0
-    if not (_tmaj == 4 and 54 <= _tmin < 57):
+    if not (_tmaj == 4 and 54 <= _tmin < 55):
         sys.exit(19)
 except Exception:
     sys.exit(19)
@@ -697,11 +708,11 @@ sys.exit(0)
 PYCHK
     then
         enable_err_trap
-        log "✅ Custom-node pip stack OK (diffusers, unets, Flux, OpenCV ximgproc, comfy_env)"
+        log "✅ Custom-node pip stack OK (diffusers 0.37.x, transformers 4.54.x, unets, Flux, OpenCV ximgproc, comfy_env)"
         return 0
     fi
     enable_err_trap
-    log "🔧 Custom-node pip stack incomplete — running repair (11–20: deps, hub, transformers, bitsandbytes, …)..."
+    log "🔧 Custom-node pip stack incomplete — running repair (11–22: deps, hub, transformers 4.54.x, diffusers 0.37.x, k-diffusion symbol, bitsandbytes, …)..."
     ensure_comfy_custom_node_pip_stack
 }
 
