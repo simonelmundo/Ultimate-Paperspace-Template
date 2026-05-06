@@ -2611,6 +2611,20 @@ install_lora_training() {
         cd "$lora_training_dir" && git pull && git submodule update --init --recursive && cd - > /dev/null
     fi
 
+    # 1b. kohya sd-scripts on main (minimal): needed for Anima LoRA (anima_train_network.py, networks/lora_anima.py)
+    local sd_scripts_dir="$lora_training_dir/backend/sd_scripts"
+    if [[ -d "$sd_scripts_dir" ]]; then
+        log "   Syncing sd-scripts to origin/main..."
+        ( cd "$sd_scripts_dir" && git fetch origin && git checkout main && git pull ) >>"$log_file" 2>&1 || log "   ⚠️ sd-scripts sync warning — see $log_file"
+        for f in anima_train_network.py networks/lora_anima.py docs/anima_train_network.md; do
+            if [[ -e "$sd_scripts_dir/$f" ]]; then
+                log "   ✅ sd-scripts $f"
+            else
+                log "   ⚠️ sd-scripts missing $f — Anima training TOML needs newer kohya-ss/sd-scripts (checkout main + pull in submodule)"
+            fi
+        done
+    fi
+
     # 2. INSTALL PYTHON DEPENDENCIES
     log "2. Installing Python Dependencies (Comfy env: $comfy_venv_dir)..."
     source "$comfy_venv_dir/bin/activate"
