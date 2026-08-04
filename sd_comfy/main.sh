@@ -568,12 +568,20 @@ ensure_comfy_custom_node_pip_stack() {
     disable_err_trap
 
     # opencv-contrib-python conflicts with opencv-python and opencv-python-headless (all expose cv2).
-    # Remove the others first so pip doesn't have to fight with them.
-    pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
+    # Uninstall all variants, then wipe leftover cv2 namespace stubs (pip uninstall often leaves an empty
+    # cv2/ tree that shadows the real binary and breaks INTER_CUBIC / guidedFilter / Impact / WAS).
+    pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python 2>/dev/null || true
+    local site_packages
+    site_packages="$(python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)"
+    if [[ -n "$site_packages" ]]; then
+        rm -rf "${site_packages}/cv2" \
+               "${site_packages}"/opencv_*.dist-info \
+               "${site_packages}"/opencv_*.libs \
+               "${site_packages}"/cv2*.so 2>/dev/null || true
+    fi
 
     # Single pip call: all pins resolved together so there are no redundant network fetches or
-    # duplicate installs. No --force-reinstall needed — pip will upgrade/downgrade to satisfy the
-    # pins on its own. Cached wheels are allowed (drop --no-cache-dir) to speed up repeat runs.
+    # duplicate installs. Cached wheels are allowed (drop --no-cache-dir) to speed up repeat runs.
     if pip install --disable-pip-version-check \
         "setuptools${SETUPTOOLS_PIN}" \
         "wheel" \
@@ -592,6 +600,23 @@ ensure_comfy_custom_node_pip_stack() {
         log "✅ Custom-node pip stack pinned (diffusers ${DIFFUSERS_PIN}, transformers ${TRANSFORMERS_PIN}, opencv-contrib ${OPENCV_CONTRIB_PIN}, numpy ${NUMPY_COMFY_PIN})"
     else
         log_error "⚠️ Pip stack pin had issues — some custom nodes may misbehave"
+    fi
+
+    # If opencv still looks like a namespace stub, force a clean contrib reinstall.
+    if ! python -c "import cv2; from cv2.ximgproc import guidedFilter; assert hasattr(cv2, 'INTER_CUBIC') and hasattr(cv2, 'CV_8U')" 2>/dev/null; then
+        log_error "⚠️ OpenCV broken after pin — wiping cv2 stubs and force-reinstalling opencv-contrib${OPENCV_CONTRIB_PIN}"
+        if [[ -n "$site_packages" ]]; then
+            rm -rf "${site_packages}/cv2" \
+                   "${site_packages}"/opencv_*.dist-info \
+                   "${site_packages}"/opencv_*.libs \
+                   "${site_packages}"/cv2*.so 2>/dev/null || true
+        fi
+        pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python 2>/dev/null || true
+        pip install --disable-pip-version-check --force-reinstall \
+            "numpy${NUMPY_COMFY_PIN}" \
+            "opencv-contrib-python${OPENCV_CONTRIB_PIN}" || log_error "⚠️ OpenCV force-reinstall failed"
+    else
+        log "✅ OpenCV contrib OK (ximgproc.guidedFilter + INTER_CUBIC)"
     fi
 
     # Verify setuptools / pkg_resources (SUPIR / pytorch_lightning need this at import time).
