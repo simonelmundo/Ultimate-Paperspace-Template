@@ -454,6 +454,8 @@ readonly NUMPY_COMFY_PIN=">=1.26.4,<2.0.0"
 readonly ACCELERATE_PIN=">=1.9.0"
 # PyTorch 2.8 ships Triton 3.4 without triton.ops; older bitsandbytes breaks diffusers quantizer imports.
 readonly BITSANDBYTES_TRITON3_PIN=">=0.45.1"
+# setuptools 82+ removed pkg_resources; SUPIR / pytorch_lightning still import it.
+readonly SETUPTOOLS_PIN=">=69,<82"
 
 # Function to install critical packages that are commonly needed by custom nodes
 install_critical_packages() {
@@ -465,7 +467,7 @@ install_critical_packages() {
         "segment-anything" "scikit-image" "piexif" "transformers${TRANSFORMERS_PIN}" "scikit-learn"
         "scipy>=1.11.4" "numpy${NUMPY_COMFY_PIN}" "dill" "matplotlib" "oss2" "gguf" "diffusers${DIFFUSERS_PIN}" 
         "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate${ACCELERATE_PIN}" "pyOpenSSL"
-        "setuptools>=69" "comfy-env" "bitsandbytes${BITSANDBYTES_TRITON3_PIN}"
+        "setuptools${SETUPTOOLS_PIN}" "comfy-env" "bitsandbytes${BITSANDBYTES_TRITON3_PIN}"
     )
     
     # Create Python script to check all packages at once (much faster)
@@ -573,7 +575,7 @@ ensure_comfy_custom_node_pip_stack() {
     # duplicate installs. No --force-reinstall needed — pip will upgrade/downgrade to satisfy the
     # pins on its own. Cached wheels are allowed (drop --no-cache-dir) to speed up repeat runs.
     if pip install --disable-pip-version-check \
-        "setuptools>=69" \
+        "setuptools${SETUPTOOLS_PIN}" \
         "wheel" \
         "diffusers${DIFFUSERS_PIN}" \
         "transformers${TRANSFORMERS_PIN}" \
@@ -586,7 +588,7 @@ ensure_comfy_custom_node_pip_stack() {
         "python-multipart>=0.0.18" \
         "comfy-env" \
         "submitit" \
-        "scikit-learn" 2>&1 | grep -v "^Requirement already satisfied"; then
+        "scikit-learn"; then
         log "✅ Custom-node pip stack pinned (diffusers ${DIFFUSERS_PIN}, transformers ${TRANSFORMERS_PIN}, opencv-contrib ${OPENCV_CONTRIB_PIN}, numpy ${NUMPY_COMFY_PIN})"
     else
         log_error "⚠️ Pip stack pin had issues — some custom nodes may misbehave"
@@ -594,8 +596,8 @@ ensure_comfy_custom_node_pip_stack() {
 
     # Verify setuptools / pkg_resources (SUPIR / pytorch_lightning need this at import time).
     if ! python -c "import pkg_resources; assert hasattr(pkg_resources, 'declare_namespace')" 2>/dev/null; then
-        log_error "⚠️ pkg_resources missing — forcing setuptools reinstall for SUPIR/Lightning"
-        pip install --disable-pip-version-check --force-reinstall "setuptools>=69" || true
+        log_error "⚠️ pkg_resources missing — forcing setuptools${SETUPTOOLS_PIN} for SUPIR/Lightning"
+        pip install --disable-pip-version-check --force-reinstall "setuptools${SETUPTOOLS_PIN}" || true
     else
         log "✅ setuptools / pkg_resources OK for Lightning / SUPIR"
     fi
@@ -1320,7 +1322,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
 
     # Python environment setup
     pip install pip==24.0
-    pip install --upgrade wheel "setuptools>=69"
+    pip install --upgrade wheel "setuptools${SETUPTOOLS_PIN}"
     pip install "numpy${NUMPY_COMFY_PIN}"
 
 
@@ -2538,8 +2540,9 @@ install_lora_training() {
     source "$comfy_venv_dir/bin/activate"
     
     # Upgrade pip/setuptools/wheel to avoid "egg_info" / metadata-generation-failed (setuptools 58+ removed egg_info)
+    # Keep setuptools <82 so pkg_resources remains available for SUPIR / Lightning.
     log "   Upgrading pip, setuptools, wheel..."
-    pip install --no-cache-dir -q --upgrade pip setuptools wheel 2>/dev/null || true
+    pip install --no-cache-dir -q --upgrade pip "setuptools${SETUPTOOLS_PIN}" wheel 2>/dev/null || true
     
     # Install sd-scripts dependencies (backend/sd_scripts submodule)
     if [[ -d "$lora_training_dir/backend/sd_scripts" ]]; then
