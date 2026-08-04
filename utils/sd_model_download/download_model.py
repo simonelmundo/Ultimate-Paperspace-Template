@@ -5,6 +5,8 @@ import gdown
 import json
 from bs4 import BeautifulSoup
 import os
+import shutil
+from urllib.parse import urlparse, unquote
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,17 +19,112 @@ user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 civitai_token = 'bf5a73346bccc8ab11cd99e1386a0e1b'
 civitai_token = 'be4ab0abfc4f8ff45247122f0ccd0196'
 
+# Hugging Face CDN signed URLs + multi-range aria2c often hit 403s; keep HF conservative.
+HF_ARIA2_CONNECTIONS = 4
+DEFAULT_ARIA2_CONNECTIONS = 16
+
 def is_url(url_str):
     return re.search(r'https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|www\.[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9]+\.[^\s]{2,}|www\.[a-zA-Z0-9]+\.[^\s]{2,}', url_str)
 
-def dl_web_file(web_dl_file, filename=None,  token=None):
+def parse_hf_url(url):
+    """Parse huggingface.co resolve/blob URL into (repo_id, revision, file_path)."""
+    url = url.replace('/blob/', '/resolve/')
+    match = re.match(
+        r'https?://huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/(.+?)(?:\?|#|$)',
+        url,
+    )
+    if not match:
+        return None
+    repo_id, revision, file_path = match.groups()
+    return repo_id, revision, unquote(file_path)
+
+def dl_web_file(web_dl_file, filename=None, token=None, connections=DEFAULT_ARIA2_CONNECTIONS):
     web_dl_file = is_url(web_dl_file)[0] # clean the URL string
     filename_cmd = f'--out="{filename}"' if filename else ''
     token_cmd = f'--header="Authorization: Bearer {token}"' if token else ''
-    # We're going to use aria2 to split the download into threads which will allow us to download
-    # the file very fast even if the site serves the file slow.
-    command = f'''aria2c --check-certificate=false {token_cmd} --file-allocation=none -c -x 16 -s 16 --summary-interval=0 --console-log-level=warn --continue --enable-http-keep-alive=false --user-agent "{user_agent}" {filename_cmd} "{web_dl_file}" '''
+    # Split across connections for speed. Use fewer connections for HF (see dl_huggingface).
+    command = (
+        f'aria2c --check-certificate=false {token_cmd} --file-allocation=none -c '
+        f'-x {connections} -s {connections} --max-connection-per-server={connections} '
+        f'--retry-wait=2 --max-tries=10 '
+        f'--summary-interval=0 --console-log-level=warn --continue '
+        f'--enable-http-keep-alive=false --user-agent "{user_agent}" '
+        f'{filename_cmd} "{web_dl_file}" '
+    )
     os.system(command)
+
+def _ensure_hf_transfer():
+    """Enable Rust hf_transfer when installed (installed by main.sh / sd_comfy)."""
+    try:
+        import hf_transfer  # noqa: F401
+        os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
+        return True
+    except ImportError:
+        os.environ.pop('HF_HUB_ENABLE_HF_TRANSFER', None)
+        return False
+
+def _flatten_hf_download(downloaded_path, dest_filename):
+    """Move HF download to cwd/basename (matches existing flat model layout)."""
+    dest = os.path.join(os.getcwd(), dest_filename)
+    downloaded_path = os.path.abspath(downloaded_path)
+    dest = os.path.abspath(dest)
+    if downloaded_path == dest:
+        return dest
+    os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
+    if os.path.exists(dest):
+        os.remove(dest)
+    shutil.move(downloaded_path, dest)
+    # Remove empty nested dirs left under cwd (e.g. split_files/diffusion_models/)
+    parent = os.path.dirname(downloaded_path)
+    cwd = os.path.abspath(os.getcwd())
+    while parent and parent.startswith(cwd) and parent != cwd:
+        try:
+            os.rmdir(parent)
+        except OSError:
+            break
+        parent = os.path.dirname(parent)
+    return dest
+
+def dl_via_hf_hub(repo_id, file_path, revision, dest_filename, token=None):
+    """Download via huggingface_hub (+ hf_transfer when available). Returns True on success."""
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        print('huggingface_hub not installed; falling back to tuned aria2c for Hugging Face.')
+        return False
+
+    transfer_ok = _ensure_hf_transfer()
+    print(
+        f'Downloading from Hugging Face via huggingface_hub'
+        f'{" + hf_transfer" if transfer_ok else ""}: {repo_id}/{file_path}'
+    )
+    try:
+        downloaded = hf_hub_download(
+            repo_id=repo_id,
+            filename=file_path,
+            revision=revision,
+            token=token or None,
+            local_dir=os.getcwd(),
+        )
+        _flatten_hf_download(downloaded, dest_filename)
+        return True
+    except Exception as exc:
+        print(f'huggingface_hub download failed ({exc}); falling back to tuned aria2c.')
+        return False
+
+def dl_huggingface(model_uri, token=None):
+    """Hybrid HF download: huggingface_hub/hf_transfer first, tuned aria2c fallback."""
+    resolve_uri = model_uri.replace('/blob/', '/resolve/')
+    filename = os.path.basename(urlparse(resolve_uri).path)
+    parsed = parse_hf_url(resolve_uri)
+
+    if parsed:
+        repo_id, revision, file_path = parsed
+        if dl_via_hf_hub(repo_id, file_path, revision, filename, token=token):
+            return
+
+    print(f'Using tuned aria2c for Hugging Face (-x {HF_ARIA2_CONNECTIONS}): {filename}')
+    dl_web_file(resolve_uri, filename, token=token, connections=HF_ARIA2_CONNECTIONS)
 
 def downlaod_model(model_uri):
     model_uri = model_uri.strip()
@@ -42,15 +139,13 @@ def downlaod_model(model_uri):
         os.system(command)
         # clean exit here
     elif 'https://huggingface.co/' in model_uri:
-        from urllib.parse import urlparse
-        filename = os.path.basename(urlparse(model_uri.replace('/blob/', '/resolve/')).path)
         if hf_token:
             headers['Authorization'] = f'Bearer {hf_token}'
         response = requests.head(model_uri, allow_redirects=True, headers=headers)
         if response.status_code == 401:
             print('Huggingface token is invalid or not provided, please check your HF_TOKEN environment variable.')
         else:
-            dl_web_file(model_uri.replace('/blob/', '/resolve/'), filename, token=hf_token)
+            dl_huggingface(model_uri, token=hf_token)
             # clean exit here
     elif 'https://drive.google.com' in model_uri:
         gdrive_file_id, _ = gdown.parse_url.parse_url(model_uri)

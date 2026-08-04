@@ -203,7 +203,8 @@ if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
   fi
   
   # Install Python modules for model download script (pip - quick)
-  MODULES=("requests" "gdown" "bs4" "python-dotenv")
+  # huggingface_hub + hf_transfer: fast/stable HF downloads (aria2c -x16 causes 403s on HF CDN)
+  MODULES=("requests" "gdown" "bs4" "python-dotenv" "huggingface_hub" "hf_transfer")
   for module in "${MODULES[@]}"; do
     if ! pip show $module >/dev/null 2>&1; then
       pip install --quiet --no-cache-dir $module 2>/dev/null || log_error "Failed to install $module"
@@ -214,8 +215,9 @@ if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
   log "Starting Model Download for Stable Diffusion Comfy in background..."
   log "💡 Models will download in background while the rest of the setup continues!"
   log "💡 You can start using ComfyUI as soon as it starts, even if models are still downloading!"
+  log "💡 Hugging Face: huggingface_hub/hf_transfer (aria2c -x4 fallback); other hosts: aria2c -x16"
   
-  # Start model download in background (now it's 99% just aria2 downloads)
+  # Start model download in background (HF via hub; other hosts via aria2)
   bash $current_dir/../utils/sd_model_download/main.sh > /tmp/model_download.log 2>&1 &
   download_pid=$!
   echo "$download_pid" > /tmp/model_download.pid

@@ -16,7 +16,7 @@ if ! dpkg -s aria2 >/dev/null 2>&1; then
     apt-get install -qq aria2 -y > /dev/null 2>&1 || echo "Failed to install aria2"
 fi
 
-MODULES=("requests" "gdown" "bs4" "python-dotenv")
+MODULES=("requests" "gdown" "bs4" "python-dotenv" "huggingface_hub" "hf_transfer")
 for module in "${MODULES[@]}"; do
     if ! pip show $module >/dev/null 2>&1; then
         echo "⚠️  $module not found - installing (this should be done by caller script)"
