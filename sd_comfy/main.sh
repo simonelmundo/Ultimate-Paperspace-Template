@@ -531,52 +531,28 @@ CHECKEOF
         [[ -n "$pkg" ]] && missing_array+=("$pkg")
     done <<< "$missing_packages"
     
-    # Setup wheel cache for faster future installs
-    local WHEEL_CACHE="/storage/.critical_packages_wheels"
-    mkdir -p "$WHEEL_CACHE"
-    
-    # Install all missing packages in ONE batch command (much faster!)
-    log "📦 Installing all missing packages in batch (faster than one-by-one)..."
+    # PIP_CACHE_DIR is set to /storage/.pip_cache (persistent across notebook restarts).
+    # No --no-cache-dir here so pip reuses downloaded wheels on every cold run.
+    log "📦 Installing $missing_count missing packages in batch..."
     local start_time=$(date +%s)
-    
-    # Batch install with pip (parallel downloads, single dependency resolution)
-    # Try to use cached wheels first, then download if needed
-    if pip install --quiet --find-links="$WHEEL_CACHE" --no-cache-dir "${missing_array[@]}" 2>/dev/null; then
+
+    if pip install --quiet --disable-pip-version-check "${missing_array[@]}" 2>/dev/null; then
         local end_time=$(date +%s)
-        local duration=$((end_time - start_time))
-        log "✅ Successfully installed $missing_count packages in ${duration} seconds"
-        if [[ $missing_count -gt 0 ]]; then
-            local avg=$((duration / missing_count))
-            log "📊 Average: ${avg} seconds per package (batch mode)"
-        fi
-        
-        # Cache wheels for future instant installs
-        log "💾 Caching wheels to storage for future instant installs..."
-        pip download --no-deps --dest "$WHEEL_CACHE" "${missing_array[@]}" 2>/dev/null || true
-        
+        log "✅ Installed $missing_count packages in $((end_time - start_time))s (wheels cached in $PIP_CACHE_DIR)"
         rm -f /tmp/check_packages.py
         return 0
     else
-        log_error "❌ Batch installation failed, falling back to individual installation..."
-        
-        # Fallback: Install individually (slower but more reliable)
-        local installed_count=0
-        local failed_count=0
-        
+        log_error "❌ Batch install failed, falling back to individual installs..."
+        local installed_count=0 failed_count=0
         for pkg in "${missing_array[@]}"; do
-            log "📦 Installing: $pkg"
-            if pip install --quiet --no-cache-dir "$pkg" 2>/dev/null; then
-                log "✅ Successfully installed: $pkg"
-                # Cache this wheel too
-                pip download --no-deps --dest "$WHEEL_CACHE" "$pkg" 2>/dev/null || true
+            if pip install --quiet --disable-pip-version-check "$pkg" 2>/dev/null; then
                 ((installed_count++))
             else
-                log_error "❌ Failed to install: $pkg"
+                log_error "❌ Failed: $pkg"
                 ((failed_count++))
             fi
         done
-        
-        log "📊 Individual install: $installed_count installed, $failed_count failed"
+        log "📊 Individual install: $installed_count ok, $failed_count failed"
         rm -f /tmp/check_packages.py
         return $failed_count
     fi
