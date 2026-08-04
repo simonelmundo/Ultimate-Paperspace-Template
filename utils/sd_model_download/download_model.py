@@ -63,18 +63,26 @@ def _ensure_hf_transfer():
         os.environ.pop('HF_HUB_ENABLE_HF_TRANSFER', None)
         return False
 
-def _flatten_hf_download(downloaded_path, dest_filename):
-    """Move HF download to cwd/basename (matches existing flat model layout)."""
-    dest = os.path.join(os.getcwd(), dest_filename)
+def _place_hf_file(downloaded_path, dest_filename, from_cache=False):
+    """Place downloaded HF file at cwd/basename (flat model layout)."""
+    dest = os.path.abspath(os.path.join(os.getcwd(), dest_filename))
     downloaded_path = os.path.abspath(downloaded_path)
-    dest = os.path.abspath(dest)
     if downloaded_path == dest:
         return dest
     os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
-    if os.path.exists(dest):
+    if os.path.exists(dest) or os.path.islink(dest):
         os.remove(dest)
+    if from_cache:
+        # Keep HF cache intact; prefer hardlink/symlink to avoid doubling large files.
+        try:
+            os.link(downloaded_path, dest)
+        except OSError:
+            try:
+                os.symlink(downloaded_path, dest)
+            except OSError:
+                shutil.copy2(downloaded_path, dest)
+        return dest
     shutil.move(downloaded_path, dest)
-    # Remove empty nested dirs left under cwd (e.g. split_files/diffusion_models/)
     parent = os.path.dirname(downloaded_path)
     cwd = os.path.abspath(os.getcwd())
     while parent and parent.startswith(cwd) and parent != cwd:
@@ -88,6 +96,7 @@ def _flatten_hf_download(downloaded_path, dest_filename):
 def dl_via_hf_hub(repo_id, file_path, revision, dest_filename, token=None):
     """Download via huggingface_hub (+ hf_transfer when available). Returns True on success."""
     try:
+        import inspect
         from huggingface_hub import hf_hub_download
     except ImportError:
         print('huggingface_hub not installed; falling back to tuned aria2c for Hugging Face.')
@@ -99,14 +108,26 @@ def dl_via_hf_hub(repo_id, file_path, revision, dest_filename, token=None):
         f'{" + hf_transfer" if transfer_ok else ""}: {repo_id}/{file_path}'
     )
     try:
-        downloaded = hf_hub_download(
-            repo_id=repo_id,
-            filename=file_path,
-            revision=revision,
-            token=token or None,
-            local_dir=os.getcwd(),
-        )
-        _flatten_hf_download(downloaded, dest_filename)
+        params = inspect.signature(hf_hub_download).parameters
+        kwargs = {
+            'repo_id': repo_id,
+            'filename': file_path,
+            'revision': revision,
+        }
+        if token:
+            if 'token' in params:
+                kwargs['token'] = token
+            elif 'use_auth_token' in params:
+                kwargs['use_auth_token'] = token
+
+        # Older hub builds (common on Paperspace base images) lack local_dir.
+        if 'local_dir' in params:
+            kwargs['local_dir'] = os.getcwd()
+            downloaded = hf_hub_download(**kwargs)
+            _place_hf_file(downloaded, dest_filename, from_cache=False)
+        else:
+            downloaded = hf_hub_download(**kwargs)
+            _place_hf_file(downloaded, dest_filename, from_cache=True)
         return True
     except Exception as exc:
         print(f'huggingface_hub download failed ({exc}); falling back to tuned aria2c.')

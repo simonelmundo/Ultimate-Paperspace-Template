@@ -204,12 +204,15 @@ if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
   
   # Install Python modules for model download script (pip - quick)
   # huggingface_hub + hf_transfer: fast/stable HF downloads (aria2c -x16 causes 403s on HF CDN)
-  MODULES=("requests" "gdown" "bs4" "python-dotenv" "huggingface_hub" "hf_transfer")
+  MODULES=("requests" "gdown" "bs4" "python-dotenv")
   for module in "${MODULES[@]}"; do
     if ! pip show $module >/dev/null 2>&1; then
       pip install --quiet --no-cache-dir $module 2>/dev/null || log_error "Failed to install $module"
     fi
   done
+  # Force hub>=0.23 even if an older hub is already installed (local_dir / hf_transfer)
+  pip install --quiet --no-cache-dir "huggingface_hub>=0.23.0,<1.0" "hf_transfer" 2>/dev/null \
+    || log_error "Failed to install huggingface_hub/hf_transfer"
   
   log "✅ Model download dependencies ready"
   log "Starting Model Download for Stable Diffusion Comfy in background..."
