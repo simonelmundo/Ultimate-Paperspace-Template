@@ -444,14 +444,14 @@ readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 # Exact diffusers: newer releases remove is_k_diffusion_available and break See-through / fluxtrainer imports.
 # ComfyUI-Manager often runs pip after boot — keep this pin and re-run repair if imports break again.
 readonly DIFFUSERS_PIN="==0.37.1"
-# transformers 4.56+ breaks WAS Node Suite (Blip / apply_chunking_to_forward); nunchaku wants >=4.54 — stay on 4.54.x.
+# transformers 4.56+ breaks WAS Node Suite (Blip / apply_chunking_to_forward); stay on 4.54.x.
 readonly TRANSFORMERS_PIN=">=4.54.0,<4.55.0"
 # diffusers>=0.37 may pull huggingface-hub 1.x; Comfy/transformers require hub <1.0 — re-pin after diffusers.
 readonly HF_HUB_TRANSFORMERS_PIN=">=0.34.0,<1.0"
 # OpenCV 4.13+ requires numpy>=2 (breaks accelerate/scipy/mediapipe in this venv); stay on 4.11 for cv2.ximgproc + numpy 1.x.
 readonly OPENCV_CONTRIB_PIN="==4.11.0.86"
 readonly NUMPY_COMFY_PIN=">=1.26.4,<2.0.0"
-readonly ACCELERATE_NUNCHAKU_PIN=">=1.9.0"
+readonly ACCELERATE_PIN=">=1.9.0"
 # PyTorch 2.8 ships Triton 3.4 without triton.ops; older bitsandbytes breaks diffusers quantizer imports.
 readonly BITSANDBYTES_TRITON3_PIN=">=0.45.1"
 
@@ -464,7 +464,7 @@ install_critical_packages() {
         "insightface" "opencv-contrib-python${OPENCV_CONTRIB_PIN}" "facexlib" "onnxruntime" "timm" 
         "segment-anything" "scikit-image" "piexif" "transformers${TRANSFORMERS_PIN}" "scikit-learn"
         "scipy>=1.11.4" "numpy${NUMPY_COMFY_PIN}" "dill" "matplotlib" "oss2" "gguf" "diffusers${DIFFUSERS_PIN}" 
-        "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate${ACCELERATE_NUNCHAKU_PIN}" "pyOpenSSL"
+        "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate${ACCELERATE_PIN}" "pyOpenSSL"
         "setuptools>=69" "comfy-env" "bitsandbytes${BITSANDBYTES_TRITON3_PIN}"
     )
     
@@ -585,7 +585,7 @@ CHECKEOF
 # Force diffusers pin + setuptools + single OpenCV (contrib) after batch installs / Comfy requirements.
 # Re-sync huggingface-hub / numpy / transformers / accelerate after diffusers (its deps can break Comfy core).
 ensure_comfy_custom_node_pip_stack() {
-    log "🔧 Pinning diffusers + setuptools + opencv-contrib (See-through / Wan / nunchaku / SUPIR / LayerStyle)..."
+    log "🔧 Pinning diffusers + setuptools + opencv-contrib (See-through / Wan / SUPIR / LayerStyle)..."
     log "💡 If ComfyUI-Manager installs pip deps later, re-run this script or: source venv && ensure path runs repair."
     disable_err_trap
     pip install --no-cache-dir --disable-pip-version-check -q -U "setuptools>=69" "wheel" || true
@@ -594,9 +594,9 @@ ensure_comfy_custom_node_pip_stack() {
         "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" \
         "numpy${NUMPY_COMFY_PIN}" \
         "transformers${TRANSFORMERS_PIN}" \
-        "accelerate${ACCELERATE_NUNCHAKU_PIN}" \
+        "accelerate${ACCELERATE_PIN}" \
         "tokenizers>=0.20,<0.23"; then
-        log "✅ transformers ${TRANSFORMERS_PIN} + accelerate (WAS Blip + nunchaku compatible band)"
+        log "✅ transformers ${TRANSFORMERS_PIN} + accelerate (WAS Blip compatible band)"
     else
         log_error "⚠️ HF stack re-pin had issues"
     fi
@@ -1651,41 +1651,6 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
                  fi
      }
 
-    # Nunchaku Installation Process (Simple Wheel Install)
-    install_nunchaku() {
-        log "🔧 Installing Nunchaku quantization library..."
-        
-        # Check if already installed and working (single Python call to check and get version)
-        local nunchaku_check=$(python -c "import nunchaku; print(nunchaku.__version__)" 2>/dev/null)
-        if [[ -n "$nunchaku_check" ]]; then
-            log "✅ Nunchaku $nunchaku_check already installed and working"
-            return 0
-        fi
-        
-        # Check PyTorch compatibility (only if not already installed)
-        if ! python -c "import torch; v=torch.__version__.split('+')[0]; major,minor=map(int,v.split('.')[:2]); exit(0 if major>2 or (major==2 and minor>=5) else 1)" 2>/dev/null; then
-            log_error "❌ Nunchaku requires PyTorch >=2.5"
-            return 1
-        fi
-        
-        # Install Nunchaku wheel directly from URL
-        log "🔄 Installing Nunchaku wheel from GitHub releases..."
-        if pip install --no-cache-dir --no-deps --force-reinstall https://github.com/nunchaku-tech/nunchaku/releases/download/v1.0.2/nunchaku-1.0.2+torch2.8-cp310-cp310-linux_x86_64.whl; then
-            log "✅ Nunchaku wheel installed successfully"
-            # Quick verification
-            if python -c "import nunchaku" 2>/dev/null; then
-                log "✅ Nunchaku installation verified"
-                return 0
-            else
-                log_error "❌ Nunchaku import failed after wheel installation"
-                return 1
-            fi
-        else
-            log_error "❌ Failed to install Nunchaku wheel"
-            return 1
-        fi
-    }
-
     # ========================================
     # EXECUTE INSTALLATION STEPS
     # ========================================
@@ -1804,35 +1769,10 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         log_error "Some custom nodes may not be up-to-date"
     fi
 
-    # --- STEP 7: INSTALL NUNCHAKU QUANTIZATION ---
+    # --- STEP 7: INSTALL SAGEATTENTION OPTIMIZATION ---
     echo ""
     echo "=================================================="
-    echo "       STEP 7: INSTALL NUNCHAKU QUANTIZATION"
-    echo "=================================================="
-    echo ""
-    
-    # Temporarily disable set -e and ERR trap to allow Nunchaku failure without script exit
-    set +e
-    disable_err_trap
-    
-    install_nunchaku
-    nunchaku_status=$?
-    
-    # Re-enable set -e and ERR trap
-    set -e
-    enable_err_trap
-    
-    if [[ $nunchaku_status -eq 0 ]]; then
-        echo "✅ Nunchaku installation completed successfully."
-    else
-        log_error "⚠️ Nunchaku installation had issues (Status: $nunchaku_status)"
-        log_error "ComfyUI will continue without Nunchaku quantization support"
-    fi
-
-    # --- STEP 8: INSTALL SAGEATTENTION OPTIMIZATION ---
-    echo ""
-    echo "=================================================="
-    echo "      STEP 8: INSTALL SAGEATTENTION OPTIMIZATION"
+    echo "      STEP 7: INSTALL SAGEATTENTION OPTIMIZATION"
     echo "=================================================="
     echo ""
     
@@ -2313,7 +2253,7 @@ EOF
     # Execute installation
     
     # Note: Requirements processing already completed in STEP 5 above
-    # Note: SageAttention and Nunchaku are now installed earlier in the process
+    # Note: SageAttention is installed earlier in the process
 
     # Final checks and marker file
     touch /tmp/sd_comfy.prepared
