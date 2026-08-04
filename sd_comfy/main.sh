@@ -585,59 +585,45 @@ CHECKEOF
 # Force diffusers pin + setuptools + single OpenCV (contrib) after batch installs / Comfy requirements.
 # Re-sync huggingface-hub / numpy / transformers / accelerate after diffusers (its deps can break Comfy core).
 ensure_comfy_custom_node_pip_stack() {
-    log "🔧 Pinning diffusers + setuptools + opencv-contrib (See-through / Wan / SUPIR / LayerStyle)..."
-    log "💡 If ComfyUI-Manager installs pip deps later, re-run this script or: source venv && ensure path runs repair."
+    log "🔧 Pinning custom-node pip stack (diffusers / transformers / numpy / opencv / bitsandbytes)..."
+    log "💡 If ComfyUI-Manager upgrades these later, re-run the script to restore pins."
     disable_err_trap
-    pip install --no-cache-dir --disable-pip-version-check -q -U "setuptools>=69" "wheel" || true
-    log "🔧 Installing transformers/accelerate first, then exact diffusers (avoids Manager pulling diffusers 0.4x+)..."
-    if pip install --no-cache-dir --disable-pip-version-check \
+
+    # opencv-contrib-python conflicts with opencv-python and opencv-python-headless (all expose cv2).
+    # Remove the others first so pip doesn't have to fight with them.
+    pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
+
+    # Single pip call: all pins resolved together so there are no redundant network fetches or
+    # duplicate installs. No --force-reinstall needed — pip will upgrade/downgrade to satisfy the
+    # pins on its own. Cached wheels are allowed (drop --no-cache-dir) to speed up repeat runs.
+    if pip install --disable-pip-version-check \
+        "setuptools>=69" \
+        "wheel" \
+        "diffusers${DIFFUSERS_PIN}" \
+        "transformers${TRANSFORMERS_PIN}" \
         "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" \
         "numpy${NUMPY_COMFY_PIN}" \
-        "transformers${TRANSFORMERS_PIN}" \
         "accelerate${ACCELERATE_PIN}" \
-        "tokenizers>=0.20,<0.23"; then
-        log "✅ transformers ${TRANSFORMERS_PIN} + accelerate (WAS Blip compatible band)"
+        "tokenizers>=0.20,<0.23" \
+        "opencv-contrib-python${OPENCV_CONTRIB_PIN}" \
+        "bitsandbytes${BITSANDBYTES_TRITON3_PIN}" \
+        "python-multipart>=0.0.18" \
+        "comfy-env" \
+        "submitit" \
+        "scikit-learn" 2>&1 | grep -v "^Requirement already satisfied"; then
+        log "✅ Custom-node pip stack pinned (diffusers ${DIFFUSERS_PIN}, transformers ${TRANSFORMERS_PIN}, opencv-contrib ${OPENCV_CONTRIB_PIN}, numpy ${NUMPY_COMFY_PIN})"
     else
-        log_error "⚠️ HF stack re-pin had issues"
+        log_error "⚠️ Pip stack pin had issues — some custom nodes may misbehave"
     fi
-    if pip install --no-cache-dir --disable-pip-version-check --force-reinstall "diffusers${DIFFUSERS_PIN}"; then
-        log "✅ diffusers ${DIFFUSERS_PIN} installed (is_k_diffusion_available + See-through LayerDiffuse)"
-    else
-        log_error "⚠️ diffusers exact pin install failed"
-    fi
-    if pip install --no-cache-dir --disable-pip-version-check -U "python-multipart>=0.0.18"; then
-        log "✅ python-multipart (gradio 6.x)"
-    else
-        log_error "⚠️ python-multipart upgrade failed (gradio may warn)"
-    fi
-    pip install --no-cache-dir --disable-pip-version-check -q -U "comfy-env" 2>/dev/null || log_error "⚠️ comfy-env install failed (UniRig / sam3 style nodes)"
-    pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
-    # Install numpy + opencv in ONE pip resolve so opencv's "numpy>=1.21" does not jump to numpy 2.x.
-    if pip install --no-cache-dir --disable-pip-version-check --force-reinstall \
-        "numpy${NUMPY_COMFY_PIN}" \
-        "opencv-contrib-python${OPENCV_CONTRIB_PIN}"; then
-        log "✅ numpy${NUMPY_COMFY_PIN} + opencv-contrib-python${OPENCV_CONTRIB_PIN} (ximgproc, no numpy-2 pull-in)"
-    else
-        log_error "⚠️ numpy + opencv-contrib combined install failed"
-    fi
-    if pip install --no-cache-dir --disable-pip-version-check -U "bitsandbytes${BITSANDBYTES_TRITON3_PIN}"; then
-        log "✅ bitsandbytes ${BITSANDBYTES_TRITON3_PIN} (Triton 3.x / diffusers quantizers)"
-    else
-        log_error "⚠️ bitsandbytes upgrade failed (See-through / diffusers may fail on triton.ops)"
-    fi
-    pip install --no-cache-dir --disable-pip-version-check -q "submitit" "scikit-learn" 2>/dev/null || true
-    # bitsandbytes / other wheels can disturb setuptools; SUPIR needs top-level pkg_resources.
-    pip install --no-cache-dir --disable-pip-version-check --force-reinstall "setuptools>=69" || true
+
+    # Verify setuptools / pkg_resources (SUPIR / pytorch_lightning need this at import time).
     if ! python -c "import pkg_resources; assert hasattr(pkg_resources, 'declare_namespace')" 2>/dev/null; then
-        log_error "⚠️ pkg_resources missing after setuptools reinstall — SUPIR/Lightning may fail until you: pip install --force-reinstall 'setuptools>=69'"
+        log_error "⚠️ pkg_resources missing — forcing setuptools reinstall for SUPIR/Lightning"
+        pip install --disable-pip-version-check --force-reinstall "setuptools>=69" || true
     else
         log "✅ setuptools / pkg_resources OK for Lightning / SUPIR"
     fi
-    # ComfyUI-Manager may upgrade diffusers/transformers after this script — force exact pair last.
-    pip install --no-cache-dir --disable-pip-version-check --force-reinstall \
-        "diffusers${DIFFUSERS_PIN}" \
-        "transformers${TRANSFORMERS_PIN}" \
-        "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" 2>/dev/null || log_error "⚠️ Final diffusers/transformers pin failed"
+
     enable_err_trap
 }
 
@@ -2067,7 +2053,8 @@ EOF
         log_error "Some custom nodes may not work properly"
     fi
 
-    ensure_comfy_custom_node_pip_stack || log_error "⚠️ Custom-node pip stack repair had issues (continuing)"
+    # Skip expensive force-reinstalls when pins already satisfy custom-node checks.
+    ensure_comfy_custom_node_pip_stack_if_needed || log_error "⚠️ Custom-node pip stack check/repair had issues (continuing)"
 
     # --- STEP 8: VERIFY INSTALLATIONS ---
     echo ""
