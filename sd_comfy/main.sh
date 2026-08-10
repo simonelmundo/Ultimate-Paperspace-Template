@@ -33,11 +33,8 @@ elif [[ -f "/notebooks/utils/helper.sh" ]]; then
     source "/notebooks/utils/helper.sh"
 fi
 
-# Default to persistent locations when not provided in .env
-VENV_DIR=${VENV_DIR:-/storage/.venvs}
-if [[ "$VENV_DIR" != "/storage"* ]]; then
-    VENV_DIR="/storage/.venvs"
-fi
+# Venv lives in /tmp (recreated each start). Pip wheel cache can stay on /storage.
+VENV_DIR=${VENV_DIR:-/tmp}
 export VENV_DIR
 export PIP_CACHE_DIR=${PIP_CACHE_DIR:-/storage/.pip_cache}
 mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR"
@@ -1313,19 +1310,11 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     fi 
     
 
-    # Virtual environment setup using storage Python 3.10
-    # Ensure VENV_DIR is set to persistent location
-    if [[ "$VENV_DIR" != "/storage"* ]]; then
-        VENV_DIR="/storage/.venvs"
-        export VENV_DIR
-    fi
-    
+    # Virtual environment setup using storage Python 3.10 (ephemeral under /tmp)
     mkdir -p "$VENV_DIR"
-    
-    if [ ! -d "$VENV_DIR/sd_comfy-env" ]; then
-        echo "Creating virtual environment at $VENV_DIR/sd_comfy-env"
-        "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env" || { log_error "Failed to create virtual environment"; exit 1; }
-    fi
+    echo "Creating fresh virtual environment at $VENV_DIR/sd_comfy-env"
+    rm -rf "$VENV_DIR/sd_comfy-env"
+    "$PYTHON_EXECUTABLE" -m venv "$VENV_DIR/sd_comfy-env" || { log_error "Failed to create virtual environment"; exit 1; }
     
     # Activate the virtual environment
     source "$VENV_DIR/sd_comfy-env/bin/activate" || { log_error "Failed to activate virtual environment"; exit 1; }
@@ -2259,11 +2248,6 @@ else
     echo ""
     
     # Activate venv even if skipping setup
-    if [[ "$VENV_DIR" != "/storage"* ]]; then
-        VENV_DIR="/storage/.venvs"
-        export VENV_DIR
-    fi
-    
     if [ -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
         source "$VENV_DIR/sd_comfy-env/bin/activate"
     else
@@ -2642,7 +2626,7 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
 fi
 
 # Activate environment (same as ComfyUI: sd_comfy-env, cu128)
-source /storage/.venvs/sd_comfy-env/bin/activate
+source "${VENV_DIR:-/tmp}/sd_comfy-env/bin/activate"
 export BNB_CUDA_VERSION=122
 
 # Run training (sd_scripts is in backend/sd_scripts subdirectory)
@@ -2679,7 +2663,7 @@ EOF
     echo "   train-lora $config_dir/test.toml"
     echo ""
     echo "   # Or full command:"
-    echo "   source /storage/.venvs/sd_comfy-env/bin/activate"
+    echo "   source ${VENV_DIR:-/tmp}/sd_comfy-env/bin/activate"
     echo "   cd $lora_training_dir/backend/sd_scripts"
     echo "   accelerate launch train_network.py --config_file=/path/to/config.toml"
     echo "=================================================="
