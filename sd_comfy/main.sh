@@ -465,6 +465,7 @@ install_critical_packages() {
         "scipy>=1.11.4" "numpy${NUMPY_COMFY_PIN}" "dill" "matplotlib" "oss2" "gguf" "diffusers${DIFFUSERS_PIN}" 
         "huggingface_hub${HF_HUB_TRANSFORMERS_PIN}" "pytorch_lightning" "sounddevice" "av>=12.0.0,<14.0.0" "accelerate${ACCELERATE_PIN}" "pyOpenSSL"
         "setuptools${SETUPTOOLS_PIN}" "comfy-env" "bitsandbytes${BITSANDBYTES_TRITON3_PIN}"
+        "decord" "pandas"
     )
     
     # Create Python script to check all packages at once (much faster)
@@ -715,7 +716,9 @@ install_sam2_optimized() {
     setup_cuda_env
     
     # First, just try to import it. If it works, we're done.
-    if python -c "import sam2" &>/dev/null; then
+    # Must not run from the SAM2 source tree — that directory contains a sam2/ package
+    # and would false-positive even when the venv does not have the wheel installed.
+    if (cd /tmp && python -c "from sam2.build_sam import build_sam2") &>/dev/null; then
         log "✅ SAM2 is already installed and importable."
         return 0
     fi
@@ -725,14 +728,14 @@ install_sam2_optimized() {
     # Proceed with full installation from source
     install_sam2_dependencies
     if clone_or_update_sam2_repo; then
-         build_and_install_sam2
+         build_and_install_sam2 || return 1
     else
          log_error "Failed to clone or update SAM2 repository. Skipping build."
          return 1
     fi
 
-    # Final check after building from source
-    if python -c "import sam2" &>/dev/null; then
+    # Final check after building from source (from a directory that is not the repo)
+    if (cd /tmp && python -c "from sam2.build_sam import build_sam2") &>/dev/null; then
         log "✅ SAM2 successfully built and installed."
         return 0
     else
@@ -742,11 +745,10 @@ install_sam2_optimized() {
 }
 
 install_sam2_dependencies() {
-    log "Installing SAM2 dependencies..."
+    log "Installing SAM2 dependencies (do not touch torch/torchvision; those stay pinned to cu128)..."
     pip install --no-cache-dir --disable-pip-version-check \
-        "torch>=1.9.0" "torchvision>=0.10.0" "opencv-python" \
+        "hydra-core>=1.3.2" "iopath>=0.1.10" "omegaconf" \
         "pillow" "numpy" "scipy" "matplotlib" "scikit-image" \
-        "timm" "transformers" "huggingface_hub" \
         "ninja>=1.11.0" "packaging"
 }
 
@@ -823,12 +825,14 @@ build_and_install_sam2() {
     fi
 
     local built_wheel
-    built_wheel=$(find "$sam2_build_dir/dist" -name "sam2*.whl" -print -quit)
+    # Wheel is named SAM_2 / sam_2 (underscore), not sam2 — match any built wheel.
+    built_wheel=$(find "$sam2_build_dir/dist" -name "*.whl" -print -quit)
 
     if [[ -n "$built_wheel" ]]; then
         log "Found built wheel: $built_wheel"
         log "Installing newly built wheel: $built_wheel"
-        if pip install --force-reinstall --no-cache-dir --disable-pip-version-check "$built_wheel"; then
+        # --no-deps: SAM2 metadata can pull a generic torch wheel and overwrite cu128.
+        if pip install --force-reinstall --no-deps --no-cache-dir --disable-pip-version-check "$built_wheel"; then
             log "✅ SAM2 wheel installed successfully"
             return 0
         else
@@ -870,6 +874,14 @@ try:
     import pkg_resources
 except ImportError:
     missing.append('setuptools')
+try:
+    import decord
+except ImportError:
+    missing.append('decord')
+try:
+    import pandas
+except ImportError:
+    missing.append('pandas')
 print(' '.join(missing))
 " 2>/dev/null || echo "")
     
@@ -2331,6 +2343,13 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   echo "             STEP 9: START COMFYUI"
   echo "=================================================="
   echo ""
+
+  # Last-chance deps (decord for comfyui-rmbg SAM3, etc.) after all pip stack repair above
+  if [ -f "$VENV_DIR/sd_comfy-env/bin/activate" ]; then
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/sd_comfy-env/bin/activate"
+    fix_custom_node_import_errors || log_error "Some custom node import fixes failed (continuing)"
+  fi
   
   # Kill any existing ComfyUI processes before starting
   echo "🛑 Stopping any existing ComfyUI processes..."
