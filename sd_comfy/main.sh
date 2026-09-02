@@ -2350,6 +2350,25 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     source "$VENV_DIR/sd_comfy-env/bin/activate"
     fix_custom_node_import_errors || log_error "Some custom node import fixes failed (continuing)"
   fi
+
+  # Impact Pack probes sam2 at import time — must be installed BEFORE ComfyUI starts
+  # (background install after start leaves SAM2 permanently unavailable until restart).
+  echo ""
+  echo "=================================================="
+  echo "        STEP 8.5: INSTALL SAM2 (BEFORE COMFYUI)"
+  echo "=================================================="
+  echo ""
+  set +e
+  disable_err_trap
+  install_sam2_optimized
+  sam2_prestart_status=$?
+  set -e
+  enable_err_trap
+  if [[ $sam2_prestart_status -eq 0 ]]; then
+    log "✅ SAM2 ready for Impact Pack before ComfyUI start"
+  else
+    log_error "⚠️ SAM2 install failed before ComfyUI start (FaceDetailer SAM2 will be unavailable)"
+  fi
   
   # Kill any existing ComfyUI processes before starting
   echo "🛑 Stopping any existing ComfyUI processes..."
@@ -2751,30 +2770,29 @@ TENSORFLOW_SCRIPT
   log "💡 TensorFlow will be available in /tmp/tensorflow-env (activate with: source /tmp/activate_tensorflow.sh)"
   
   #######################################
-  # STEP 9.3: INSTALL SAM2 (BACKGROUND)
+  # STEP 9.3: SAM2 (already done before ComfyUI start)
   #######################################
   echo ""
   echo "=================================================="
-  echo "        STEP 9.3: INSTALL SAM2 (BACKGROUND)"
+  echo "        STEP 9.3: SAM2 STATUS"
   echo "=================================================="
   echo ""
-  echo "📦 Installing SAM2 in background..."
-  log "Starting SAM2 installation in background..."
-  
-  # Run SAM2 installation in background (functions are already defined)
-  (
-    set +e
-    install_sam2_optimized > /tmp/sam2_install.log 2>&1
-    if [ $? -eq 0 ]; then
-      echo "✅ SAM2 installed successfully" >> /tmp/sam2_install.log
-    else
-      echo "⚠️ SAM2 installation failed (optional dependency)" >> /tmp/sam2_install.log
-    fi
-  ) &
-  echo $! > /tmp/sam2_install.pid
-  
-  log "📋 SAM2 installation started in background (PID: $(cat /tmp/sam2_install.pid))"
-  log "📋 Check installation progress: tail -f /tmp/sam2_install.log"
+  if (cd /tmp && python -c "from sam2.build_sam import build_sam2") &>/dev/null; then
+    log "✅ SAM2 already installed (installed before ComfyUI start)"
+  else
+    log "📦 SAM2 missing — installing in background (restart ComfyUI after it finishes for Impact Pack)"
+    (
+      set +e
+      install_sam2_optimized > /tmp/sam2_install.log 2>&1
+      if [ $? -eq 0 ]; then
+        echo "✅ SAM2 installed successfully — restart ComfyUI to enable Impact Pack SAM2" >> /tmp/sam2_install.log
+      else
+        echo "⚠️ SAM2 installation failed (optional dependency)" >> /tmp/sam2_install.log
+      fi
+    ) &
+    echo $! > /tmp/sam2_install.pid
+    log "📋 SAM2 installation started in background (PID: $(cat /tmp/sam2_install.pid))"
+  fi
 fi
 
 #######################################
