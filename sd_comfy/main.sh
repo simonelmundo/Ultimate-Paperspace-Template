@@ -2505,6 +2505,19 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     echo "⚠️  Overriding to LEGACY frontend"
   fi
   
+  # MiniMax Music 3: comfy_kitchen.flash_attention_decode needs a newer NVIDIA
+  # driver than Paperspace Free (550 / CUDA 12.4) provides for torch cu128.
+  # Forces Comfy's existing plain-KV fallback (Comfy-Org/ComfyUI#15605/#15607).
+  # Set COMFY_DISABLE_KITCHEN_FLASH_DECODE=0 to re-enable on machines with driver >= ~570.
+  export COMFY_DISABLE_KITCHEN_FLASH_DECODE="${COMFY_DISABLE_KITCHEN_FLASH_DECODE:-1}"
+  if [[ "${COMFY_DISABLE_KITCHEN_FLASH_DECODE}" != "0" ]]; then
+    echo "⚠️  Kitchen flash_attention_decode DISABLED (MiniMax Music3 / old driver workaround)"
+    # Re-apply after ComfyUI git pull overwrites llama.py
+    if [[ -f /notebooks/logs/patch_minimax_flash_decode.py ]]; then
+      python3 /notebooks/logs/patch_minimax_flash_decode.py >/dev/null 2>&1 || true
+    fi
+  fi
+
   COMFYUI_CMD="python main.py \
     --port $SD_COMFY_PORT \
     --dont-print-server \
@@ -2515,6 +2528,7 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     --cuda-malloc \
     --preview-method latent2rgb \
     --disable-api-nodes \
+    --disable-cuda-graphs \
     $CUSTOM_NODES_FLAG \
     $FRONTEND_FLAG"
   PYTHONUNBUFFERED=1 service_loop "$COMFYUI_CMD" > $LOG_DIR/sd_comfy.log 2>&1 &
