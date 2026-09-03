@@ -2495,10 +2495,13 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   fi
   
   
-  # Frontend version - hardcoded to 1.25.10 for reverse proxy compatibility
-  # Override with USE_LEGACY_FRONTEND=1 if needed
-  FRONTEND_FLAG="--front-end-version Comfy-Org/ComfyUI_frontend@1.25.10"
-  echo "📦 Using frontend version: 1.25.10"
+  # Frontend: 1.45.7 is the oldest that fully supports SaveAudioAdvanced
+  # (DynamicCombo format/quality widgets + in-node audio player).
+  # Floor for DynamicCombo alone is 1.33.4; 1.25.10 cannot render it (format becomes a bare input).
+  # Override with COMFY_FRONTEND_VERSION=... or USE_LEGACY_FRONTEND=1 if needed.
+  COMFY_FRONTEND_VERSION="${COMFY_FRONTEND_VERSION:-1.45.7}"
+  FRONTEND_FLAG="--front-end-version Comfy-Org/ComfyUI_frontend@${COMFY_FRONTEND_VERSION}"
+  echo "📦 Using frontend version: ${COMFY_FRONTEND_VERSION}"
   
   if [[ -n "${USE_LEGACY_FRONTEND}" ]]; then
     FRONTEND_FLAG="--front-end-version Comfy-Org/ComfyUI_legacy_frontend@latest"
