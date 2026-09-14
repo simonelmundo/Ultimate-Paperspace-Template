@@ -114,6 +114,270 @@ enforce_boot_cache_budget() {
     # Soft: do not delete torch_eco_*.tar.gz even if still over target
 }
 
+# PyTorch wheels in the snapshot omit small runtime deps (typing_extensions, sympy, …).
+# This helper lists companion site-packages paths (save) or pip-installs missing deps (restore).
+torch_eco_companion_action() {
+    local mode="$1"
+    local list_file="${2:-}"
+    python - "$mode" "$list_file" <<'TORCH_ECO_COMPANION_PY'
+import importlib.util
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+MODE = sys.argv[1]
+LIST_FILE = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else ""
+
+import site as site_mod
+
+SITE = Path(site_mod.getsitepackages()[0])
+SEEDS = ("torch", "torchvision", "torchaudio", "xformers")
+# torio ships inside the torchaudio wheel (not a separate PyPI package).
+ALWAYS_COMPANIONS = ()
+
+
+def norm_name(name: str) -> str:
+    return name.lower().replace("-", "_").split("[")[0]
+
+
+def is_heavy_pkg(name: str) -> bool:
+    n = norm_name(name)
+    return n in {
+        "torch", "torchvision", "torchaudio", "xformers", "triton", "torchgen", "functorch"
+    } or n.startswith("nvidia")
+
+
+def iter_dist_infos():
+    for p in SITE.iterdir():
+        if p.is_dir() and p.name.endswith(".dist-info"):
+            yield p
+
+
+def pkg_name(dist_dir: Path) -> str:
+    meta = dist_dir / "METADATA"
+    if meta.exists():
+        for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("Name:"):
+                return line.split(":", 1)[1].strip()
+    return dist_dir.name.split("-")[0]
+
+
+def requires_dist(dist_dir: Path, *, include_extras: bool = False):
+    meta = dist_dir / "METADATA"
+    if not meta.exists():
+        return []
+    out = []
+    for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("Requires-Dist:"):
+            continue
+        req = line.split(":", 1)[1].strip()
+        # Skip optional extras: 'foo ; extra == "dev"'
+        if "extra ==" in req or "extra==" in req:
+            if not include_extras:
+                continue
+        # Evaluate environment markers when packaging is available; otherwise keep the dep
+        if ";" in req:
+            try:
+                from packaging.markers import Marker
+                marker_expr = req.split(";", 1)[1].strip()
+                if marker_expr and not Marker(marker_expr).evaluate():
+                    continue
+            except Exception:
+                pass
+        name = re.split(r"[ ;<>=!~\[]", req, 1)[0].strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def find_dist(req_name: str):
+    target = norm_name(req_name)
+    for d in iter_dist_infos():
+        if norm_name(pkg_name(d)) == target:
+            return d
+    return None
+
+
+def seed_dist_infos():
+    found = []
+    for seed in SEEDS:
+        d = find_dist(seed)
+        if d:
+            found.append(d)
+    return found
+
+
+# Only packages we ever want as companions (never recurse into setuptools/pip extras).
+SKIP_COMPANION = {
+    "setuptools", "pip", "wheel", "pkg_resources",
+}
+
+
+def companion_dists():
+    """Direct non-heavy deps of seed packages that are already present on disk."""
+    seen = set()
+    out = []
+    for d in seed_dist_infos():
+        for req in requires_dist(d):
+            if is_heavy_pkg(req) or norm_name(req) in SKIP_COMPANION:
+                continue
+            nd = find_dist(req)
+            if not nd or nd.name in seen:
+                continue
+            seen.add(nd.name)
+            out.append(nd)
+    return out
+
+
+def paths_for_dist(dist_dir: Path):
+    paths = {dist_dir.name}
+    tl = dist_dir / "top_level.txt"
+    if tl.exists():
+        for raw in tl.read_text(encoding="utf-8", errors="replace").splitlines():
+            name = raw.strip()
+            if name and (SITE / name).exists():
+                paths.add(name)
+    else:
+        record = dist_dir / "RECORD"
+        if record.exists():
+            for raw in record.read_text(encoding="utf-8", errors="replace").splitlines():
+                part = raw.split(",", 1)[0]
+                if part.endswith(".py") or part.endswith(".so"):
+                    top = part.split("/", 1)[0]
+                    if top and (SITE / top).exists():
+                        paths.add(top)
+    return sorted(paths)
+
+
+def importable(pypi_name: str) -> bool:
+    mod = norm_name(pypi_name)
+    try:
+        if importlib.util.find_spec(mod) is not None:
+            return True
+    except ModuleNotFoundError:
+        return False
+    if mod == "pillow":
+        try:
+            return importlib.util.find_spec("PIL") is not None
+        except ModuleNotFoundError:
+            return False
+    return False
+
+
+def pip_spec_for_dist(dist_dir: Path) -> str:
+    name = pkg_name(dist_dir)
+    meta = dist_dir / "METADATA"
+    version = None
+    if meta.exists():
+        for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("Version:"):
+                version = line.split(":", 1)[1].strip()
+                break
+    if version:
+        return f"{name}=={version}"
+    return name
+
+
+if MODE == "list_paths":
+    lines = []
+    for d in companion_dists():
+        lines.extend(paths_for_dist(d))
+    unique = sorted(set(lines))
+    if LIST_FILE:
+        Path(LIST_FILE).write_text("\n".join(unique) + ("\n" if unique else ""), encoding="utf-8")
+    else:
+        print("\n".join(unique))
+    sys.exit(0)
+
+if MODE == "pip_install_missing":
+    # Direct deps of torch/vision/audio/xformers only (no setuptools/pip recursion).
+    specs = []
+    for seed in SEEDS:
+        d = find_dist(seed)
+        if not d:
+            continue
+        for req in requires_dist(d):
+            if is_heavy_pkg(req) or norm_name(req) in SKIP_COMPANION:
+                continue
+            if importable(req):
+                continue
+            nd = find_dist(req)
+            spec = pip_spec_for_dist(nd) if nd else req
+            if spec not in specs:
+                specs.append(spec)
+    for extra in ALWAYS_COMPANIONS:
+        if importable(extra):
+            continue
+        nd = find_dist(extra)
+        spec = pip_spec_for_dist(nd) if nd else extra
+        if spec not in specs:
+            specs.append(spec)
+    if not specs:
+        sys.exit(0)
+    print(" ".join(specs))
+    sys.exit(0)
+
+sys.stderr.write(f"unknown mode: {MODE}\n")
+sys.exit(2)
+TORCH_ECO_COMPANION_PY
+}
+
+install_torch_ecosystem_companion_deps() {
+    local specs
+    specs=$(torch_eco_companion_action pip_install_missing 2>/dev/null) || return 0
+    if [[ -n "$specs" ]]; then
+        log "📦 Installing torch snapshot companion deps (small pip packages)..."
+        mkdir -p "$BOOT_CACHE_EXTRA_DIR/pip"
+        # shellcheck disable=SC2086
+        if env PIP_CACHE_DIR="$BOOT_CACHE_EXTRA_DIR/pip" pip install --prefer-binary $specs; then
+            log "✅ Companion deps installed"
+        else
+            log_error "Companion dep install failed (will retry full torch pip if import still fails)"
+            return 1
+        fi
+    fi
+    ensure_torio_from_torchaudio_wheel || true
+    return 0
+}
+
+# torio is bundled in the torchaudio wheel but may be missing from older snapshots.
+ensure_torio_from_torchaudio_wheel() {
+    if python -c "import torio" 2>/dev/null; then
+        return 0
+    fi
+    local site whl_dir whl
+    site=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 1
+    whl_dir="$BOOT_CACHE_EXTRA_DIR/wheels"
+    mkdir -p "$whl_dir"
+    whl=$(find "$whl_dir" -maxdepth 1 -type f -name "torchaudio-${TORCHAUDIO_VERSION}-*.whl" 2>/dev/null | head -1)
+    if [[ -z "$whl" || ! -f "$whl" ]]; then
+        log "📦 Fetching torchaudio wheel to recover missing torio..."
+        if ! env PIP_CACHE_DIR="$BOOT_CACHE_EXTRA_DIR/pip" pip download --no-deps \
+            "torchaudio==${TORCHAUDIO_VERSION}" \
+            --extra-index-url "${TORCH_INDEX_URL}" \
+            -d "$whl_dir" >/dev/null 2>&1; then
+            log_error "Could not download torchaudio wheel for torio"
+            return 1
+        fi
+        whl=$(find "$whl_dir" -maxdepth 1 -type f -name "torchaudio-*.whl" 2>/dev/null | head -1)
+    fi
+    if [[ -z "$whl" || ! -f "$whl" ]]; then
+        return 1
+    fi
+    log "📦 Extracting torio from $(basename "$whl")..."
+    python - "$whl" "$site" <<'PY'
+import sys, zipfile
+from pathlib import Path
+whl, site = Path(sys.argv[1]), Path(sys.argv[2])
+with zipfile.ZipFile(whl) as z:
+    members = [n for n in z.namelist() if n.startswith("torio/")]
+    z.extractall(site, members)
+print(f"extracted {len(members)} torio files")
+PY
+    python -c "import torio" 2>/dev/null
+}
+
 # Restore torch/vision/audio/xformers (+triton/nvidia) from EXTRA snapshot into active venv.
 # Returns 0 if ecosystem imports OK after restore.
 restore_torch_ecosystem_snapshot() {
@@ -127,15 +391,17 @@ restore_torch_ecosystem_snapshot() {
     site=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 1
     log "⚡ Restoring torch ecosystem snapshot ($(du -h "$snap" | awk '{print $1}')) → $site"
     # Remove partial/broken trees first so extract is clean
-    (cd "$site" && rm -rf torch torchvision torchaudio xformers triton torchgen nvidia functorch 2>/dev/null || true)
+    (cd "$site" && rm -rf torch torchvision torchaudio xformers triton torchgen torio nvidia functorch 2>/dev/null || true)
     (cd "$site" && find . -maxdepth 1 -type d \( \
         -name 'torch-*.dist-info' -o -name 'torchvision-*.dist-info' -o \
         -name 'torchaudio-*.dist-info' -o -name 'xformers-*.dist-info' -o \
-        -name 'triton-*.dist-info' -o -name 'torchgen-*.dist-info' \) -exec rm -rf {} + 2>/dev/null || true)
+        -name 'triton-*.dist-info' -o -name 'torchgen-*.dist-info' -o \
+        -name 'torio-*.dist-info' \) -exec rm -rf {} + 2>/dev/null || true)
     if ! tar -xzf "$snap" -C "$site"; then
         log_error "Failed to extract torch ecosystem snapshot"
         return 1
     fi
+    install_torch_ecosystem_companion_deps || true
     if python -c "import torch, torchvision, torchaudio; print(torch.__version__, torch.cuda.is_available())" 2>/dev/null; then
         log "✅ Torch ecosystem restored from snapshot"
         # xformers optional
@@ -154,10 +420,14 @@ save_torch_ecosystem_snapshot() {
     site=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 1
     mkdir -p "$BOOT_CACHE_EXTRA_DIR"
 
-    if [[ -f "$snap" ]]; then
+    if [[ -f "$snap" && "${REBUILD_TORCH_SNAPSHOT:-}" != "1" ]]; then
         log "✅ Torch ecosystem snapshot already present ($(du -h "$snap" | awk '{print $1}'))"
         enforce_boot_cache_budget || true
         return 0
+    fi
+    if [[ -f "$snap" && "${REBUILD_TORCH_SNAPSHOT:-}" == "1" ]]; then
+        log "♻️ REBUILD_TORCH_SNAPSHOT=1 — recreating torch ecosystem snapshot"
+        rm -f "$snap" "$meta" 2>/dev/null || true
     fi
 
     if ! python -c "import torch, torchvision, torchaudio" 2>/dev/null; then
@@ -175,8 +445,17 @@ save_torch_ecosystem_snapshot() {
         xformers xformers-*.dist-info \
         triton triton-*.dist-info \
         torchgen torchgen-*.dist-info \
+        torio torio-*.dist-info \
         nvidia \
         2>/dev/null || true) >"$tmp_list"
+
+    # Small import-time deps (typing_extensions, sympy, …) — omitted from heavy list above
+    torch_eco_companion_action list_paths "$tmp_list.companions" 2>/dev/null || true
+    if [[ -s "$tmp_list.companions" ]]; then
+        cat "$tmp_list.companions" >>"$tmp_list"
+        sort -u -o "$tmp_list" "$tmp_list"
+        rm -f "$tmp_list.companions"
+    fi
 
     if [[ ! -s "$tmp_list" ]]; then
         rm -f "$tmp_list"
