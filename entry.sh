@@ -65,9 +65,26 @@ if [[ ! -d $WORKING_DIR/image_outputs ]]; then
   ln -s $IMAGE_OUTPUTS_DIR $WORKING_DIR/image_outputs
 fi
 
+# Scripts whose setup can run in parallel with later RUN_SCRIPT steps (comma-separated).
+# Default: image_browser (~1 min FFmpeg/pip) no longer blocks rclone/sd_comfy.
+export BACKGROUND_SCRIPTS="${BACKGROUND_SCRIPTS:-image_browser}"
+
+is_background_script() {
+  local name="$1"
+  local bg
+  IFS=',' read -ra _bg_list <<< "$BACKGROUND_SCRIPTS"
+  for bg in "${_bg_list[@]}"; do
+    [[ -n "$bg" && "$bg" == "$name" ]] && return 0
+  done
+  return 1
+}
+
 # Loop through each script and execute the corresponding case
 echo "Starting script(s)"
 echo "RUN_SCRIPT contains: $RUN_SCRIPT"
+if [[ -n "$BACKGROUND_SCRIPTS" ]]; then
+  echo "BACKGROUND_SCRIPTS (non-blocking): $BACKGROUND_SCRIPTS"
+fi
 for script in "${scripts[@]}"
 do
   echo "Processing script: $script"
@@ -82,9 +99,17 @@ do
     echo "⚠️ One or more required environment variables are missing for $script, skipping..."
     continue
   fi
+  if is_background_script "$script"; then
+    echo "✅ Starting $script in background (continuing to next script)..."
+    mkdir -p "$LOG_DIR"
+    local_log="$LOG_DIR/${script}_entry.log"
+    nohup bash control.sh reload >> "$local_log" 2>&1 &
+    echo $! > "/tmp/${script}_entry.pid"
+    echo "📋 $script setup log: tail -f $local_log"
+    echo "✅ Queued $script (background)"
+    continue
+  fi
   echo "✅ Starting $script..."
-  # Run control.sh and capture all output (both stdout and stderr)
-  # This ensures we wait for the script to complete before moving to the next one
   bash control.sh reload 2>&1
   echo "✅ Finished $script"
 done
