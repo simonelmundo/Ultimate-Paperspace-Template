@@ -38,7 +38,6 @@ fi
 # LEFT ALONE — never trimmed/evicted, and they do NOT count toward the budget.
 #
 # BOOT_CACHE_EXTRA_DIR: small EXTRA area for SAM2 wheels + optional pip crumbs.
-# Torch ecosystem snapshot caching was removed (restore was unreliable on cold boot).
 # Grandfathered caches (.pip_cache, .wheel_cache, .sageattention_cache, .sam2_cache, …)
 # are never trimmed by this script.
 VENV_DIR=${VENV_DIR:-/tmp}
