@@ -37,10 +37,10 @@ fi
 # Existing caches (.pip_cache, .sageattention_cache, .sam2_cache, .wheel_cache, …) are
 # LEFT ALONE — never trimmed/evicted, and they do NOT count toward the budget.
 #
-# BOOT_CACHE_EXTRA_DIR (~3GB soft target): spend it on the highest time ROI —
-#   torch + torchvision + torchaudio + xformers (+ triton/nvidia libs)
-# That step was ~2+ min of cold-start. SAM2/SageAttention wheels already live in
-# grandfathered caches (tiny) and are reused without using this budget.
+# BOOT_CACHE_EXTRA_DIR: small EXTRA area for SAM2 wheels + optional pip crumbs.
+# Torch ecosystem snapshot caching was removed (restore was unreliable on cold boot).
+# Grandfathered caches (.pip_cache, .wheel_cache, .sageattention_cache, .sam2_cache, …)
+# are never trimmed by this script.
 VENV_DIR=${VENV_DIR:-/tmp}
 export VENV_DIR
 export PIP_CACHE_DIR=${PIP_CACHE_DIR:-/storage/.pip_cache}
@@ -57,17 +57,6 @@ mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR" "$WHEEL_CACHE_DIR" "$BOOT_CACHE_EXTRA_DIR"
 #######################################
 # Grandfathered (never counted, never deleted by this script):
 #   /storage/.pip_cache .wheel_cache .sageattention_cache .sam2_cache .torch_extensions
-
-torch_ecosystem_snapshot_id() {
-    echo "torch${TORCH_VERSION}_tv${TORCHVISION_VERSION}_ta${TORCHAUDIO_VERSION}_xf${XFORMERS_VERSION}" | tr '+.' '__'
-}
-
-torch_ecosystem_snapshot_paths() {
-    local id
-    id=$(torch_ecosystem_snapshot_id)
-    echo "$BOOT_CACHE_EXTRA_DIR/torch_eco_${id}.tar.gz"
-    echo "$BOOT_CACHE_EXTRA_DIR/torch_eco_${id}.meta"
-}
 
 boot_cache_extra_bytes() {
     if [[ ! -d "$BOOT_CACHE_EXTRA_DIR" ]]; then
@@ -90,8 +79,7 @@ boot_extension_wheels_ready() {
     [[ -n "$sage_wheel" && -f "$sage_wheel" && -n "$sam_wheel" && -f "$sam_wheel" ]]
 }
 
-# Soft budget: report size; never delete grandfathered caches; prefer keeping torch snapshot.
-# Only drop EXTRA/pip crumbs if we're clearly over and a torch snapshot already exists.
+# Soft budget for EXTRA (SAM2 wheels / pip crumbs). Never touches grandfathered caches.
 enforce_boot_cache_budget() {
     local max now mb
     max=$(boot_cache_max_bytes)
@@ -104,391 +92,13 @@ enforce_boot_cache_budget() {
         return 0
     fi
 
-    local warn="⚠️ Extra cache ${mb}MB > soft ${BOOT_CACHE_MAX_GB}GB — clearing EXTRA/pip only (keeping torch snapshot)"
+    local warn="⚠️ Extra cache ${mb}MB > soft ${BOOT_CACHE_MAX_GB}GB — clearing EXTRA/pip only"
     if declare -F log >/dev/null 2>&1; then log "$warn"; else echo "$warn"; fi
     rm -rf "$BOOT_CACHE_EXTRA_DIR/pip" 2>/dev/null || true
     now=$(boot_cache_extra_bytes)
     mb=$(( now / 1024 / 1024 ))
     msg="   after pip-extra cleanup: ${mb}MB"
     if declare -F log >/dev/null 2>&1; then log "$msg"; else echo "$msg"; fi
-    # Soft: do not delete torch_eco_*.tar.gz even if still over target
-}
-
-# PyTorch wheels in the snapshot omit small runtime deps (typing_extensions, sympy, …).
-# This helper lists companion site-packages paths (save) or pip-installs missing deps (restore).
-torch_eco_companion_action() {
-    local mode="$1"
-    local list_file="${2:-}"
-    python - "$mode" "$list_file" <<'TORCH_ECO_COMPANION_PY'
-import importlib.util
-import re
-import subprocess
-import sys
-from pathlib import Path
-
-MODE = sys.argv[1]
-LIST_FILE = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else ""
-
-import site as site_mod
-
-SITE = Path(site_mod.getsitepackages()[0])
-SEEDS = ("torch", "torchvision", "torchaudio", "xformers")
-# torio ships inside the torchaudio wheel (not a separate PyPI package).
-ALWAYS_COMPANIONS = ()
-
-
-def norm_name(name: str) -> str:
-    return name.lower().replace("-", "_").split("[")[0]
-
-
-def is_heavy_pkg(name: str) -> bool:
-    n = norm_name(name)
-    return n in {
-        "torch", "torchvision", "torchaudio", "xformers", "triton", "torchgen", "functorch"
-    } or n.startswith("nvidia")
-
-
-def iter_dist_infos():
-    for p in SITE.iterdir():
-        if p.is_dir() and p.name.endswith(".dist-info"):
-            yield p
-
-
-def pkg_name(dist_dir: Path) -> str:
-    meta = dist_dir / "METADATA"
-    if meta.exists():
-        for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("Name:"):
-                return line.split(":", 1)[1].strip()
-    return dist_dir.name.split("-")[0]
-
-
-def requires_dist(dist_dir: Path, *, include_extras: bool = False):
-    meta = dist_dir / "METADATA"
-    if not meta.exists():
-        return []
-    out = []
-    for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.startswith("Requires-Dist:"):
-            continue
-        req = line.split(":", 1)[1].strip()
-        # Skip optional extras: 'foo ; extra == "dev"'
-        if "extra ==" in req or "extra==" in req:
-            if not include_extras:
-                continue
-        # Evaluate environment markers when packaging is available; otherwise keep the dep
-        if ";" in req:
-            try:
-                from packaging.markers import Marker
-                marker_expr = req.split(";", 1)[1].strip()
-                if marker_expr and not Marker(marker_expr).evaluate():
-                    continue
-            except Exception:
-                pass
-        name = re.split(r"[ ;<>=!~\[]", req, 1)[0].strip()
-        if name:
-            out.append(name)
-    return out
-
-
-def find_dist(req_name: str):
-    target = norm_name(req_name)
-    for d in iter_dist_infos():
-        if norm_name(pkg_name(d)) == target:
-            return d
-    return None
-
-
-def seed_dist_infos():
-    found = []
-    for seed in SEEDS:
-        d = find_dist(seed)
-        if d:
-            found.append(d)
-    return found
-
-
-# Only packages we ever want as companions (never recurse into setuptools/pip extras).
-SKIP_COMPANION = {
-    "setuptools", "pip", "wheel", "pkg_resources",
-}
-
-
-def companion_dists():
-    """Direct non-heavy deps of seed packages that are already present on disk."""
-    seen = set()
-    out = []
-    for d in seed_dist_infos():
-        for req in requires_dist(d):
-            if is_heavy_pkg(req) or norm_name(req) in SKIP_COMPANION:
-                continue
-            nd = find_dist(req)
-            if not nd or nd.name in seen:
-                continue
-            seen.add(nd.name)
-            out.append(nd)
-    return out
-
-
-def paths_for_dist(dist_dir: Path):
-    paths = {dist_dir.name}
-    tl = dist_dir / "top_level.txt"
-    if tl.exists():
-        for raw in tl.read_text(encoding="utf-8", errors="replace").splitlines():
-            name = raw.strip()
-            if name and (SITE / name).exists():
-                paths.add(name)
-    else:
-        record = dist_dir / "RECORD"
-        if record.exists():
-            for raw in record.read_text(encoding="utf-8", errors="replace").splitlines():
-                part = raw.split(",", 1)[0]
-                if part.endswith(".py") or part.endswith(".so"):
-                    top = part.split("/", 1)[0]
-                    if top and (SITE / top).exists():
-                        paths.add(top)
-    return sorted(paths)
-
-
-def importable(pypi_name: str) -> bool:
-    mod = norm_name(pypi_name)
-    try:
-        if importlib.util.find_spec(mod) is not None:
-            return True
-    except ModuleNotFoundError:
-        return False
-    if mod == "pillow":
-        try:
-            return importlib.util.find_spec("PIL") is not None
-        except ModuleNotFoundError:
-            return False
-    return False
-
-
-def pip_spec_for_dist(dist_dir: Path) -> str:
-    name = pkg_name(dist_dir)
-    meta = dist_dir / "METADATA"
-    version = None
-    if meta.exists():
-        for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("Version:"):
-                version = line.split(":", 1)[1].strip()
-                break
-    if version:
-        return f"{name}=={version}"
-    return name
-
-
-if MODE == "list_paths":
-    lines = []
-    for d in companion_dists():
-        lines.extend(paths_for_dist(d))
-    unique = sorted(set(lines))
-    if LIST_FILE:
-        Path(LIST_FILE).write_text("\n".join(unique) + ("\n" if unique else ""), encoding="utf-8")
-    else:
-        print("\n".join(unique))
-    sys.exit(0)
-
-if MODE == "pip_install_missing":
-    # Direct deps of torch/vision/audio/xformers only (no setuptools/pip recursion).
-    specs = []
-    for seed in SEEDS:
-        d = find_dist(seed)
-        if not d:
-            continue
-        for req in requires_dist(d):
-            if is_heavy_pkg(req) or norm_name(req) in SKIP_COMPANION:
-                continue
-            if importable(req):
-                continue
-            nd = find_dist(req)
-            spec = pip_spec_for_dist(nd) if nd else req
-            if spec not in specs:
-                specs.append(spec)
-    for extra in ALWAYS_COMPANIONS:
-        if importable(extra):
-            continue
-        nd = find_dist(extra)
-        spec = pip_spec_for_dist(nd) if nd else extra
-        if spec not in specs:
-            specs.append(spec)
-    if not specs:
-        sys.exit(0)
-    print(" ".join(specs))
-    sys.exit(0)
-
-sys.stderr.write(f"unknown mode: {MODE}\n")
-sys.exit(2)
-TORCH_ECO_COMPANION_PY
-}
-
-install_torch_ecosystem_companion_deps() {
-    local specs
-    specs=$(torch_eco_companion_action pip_install_missing 2>/dev/null) || return 0
-    if [[ -n "$specs" ]]; then
-        log "📦 Installing torch snapshot companion deps (small pip packages)..."
-        mkdir -p "$BOOT_CACHE_EXTRA_DIR/pip"
-        # shellcheck disable=SC2086
-        if env PIP_CACHE_DIR="$BOOT_CACHE_EXTRA_DIR/pip" pip install --prefer-binary $specs; then
-            log "✅ Companion deps installed"
-        else
-            log_error "Companion dep install failed (will retry full torch pip if import still fails)"
-            return 1
-        fi
-    fi
-    ensure_torio_from_torchaudio_wheel || true
-    return 0
-}
-
-# torio is bundled in the torchaudio wheel but may be missing from older snapshots.
-ensure_torio_from_torchaudio_wheel() {
-    if python -c "import torio" 2>/dev/null; then
-        return 0
-    fi
-    local site whl_dir whl
-    site=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 1
-    whl_dir="$BOOT_CACHE_EXTRA_DIR/wheels"
-    mkdir -p "$whl_dir"
-    whl=$(find "$whl_dir" -maxdepth 1 -type f -name "torchaudio-${TORCHAUDIO_VERSION}-*.whl" 2>/dev/null | head -1)
-    if [[ -z "$whl" || ! -f "$whl" ]]; then
-        log "📦 Fetching torchaudio wheel to recover missing torio..."
-        if ! env PIP_CACHE_DIR="$BOOT_CACHE_EXTRA_DIR/pip" pip download --no-deps \
-            "torchaudio==${TORCHAUDIO_VERSION}" \
-            --extra-index-url "${TORCH_INDEX_URL}" \
-            -d "$whl_dir" >/dev/null 2>&1; then
-            log_error "Could not download torchaudio wheel for torio"
-            return 1
-        fi
-        whl=$(find "$whl_dir" -maxdepth 1 -type f -name "torchaudio-*.whl" 2>/dev/null | head -1)
-    fi
-    if [[ -z "$whl" || ! -f "$whl" ]]; then
-        return 1
-    fi
-    log "📦 Extracting torio from $(basename "$whl")..."
-    python - "$whl" "$site" <<'PY'
-import sys, zipfile
-from pathlib import Path
-whl, site = Path(sys.argv[1]), Path(sys.argv[2])
-with zipfile.ZipFile(whl) as z:
-    members = [n for n in z.namelist() if n.startswith("torio/")]
-    z.extractall(site, members)
-print(f"extracted {len(members)} torio files")
-PY
-    python -c "import torio" 2>/dev/null
-}
-
-# Restore torch/vision/audio/xformers (+triton/nvidia) from EXTRA snapshot into active venv.
-# Returns 0 if ecosystem imports OK after restore.
-restore_torch_ecosystem_snapshot() {
-    local snap meta site
-    snap=$(torch_ecosystem_snapshot_paths | head -1)
-    meta=$(torch_ecosystem_snapshot_paths | tail -1)
-    if [[ ! -f "$snap" ]]; then
-        log "🔍 No torch ecosystem snapshot at $snap"
-        return 1
-    fi
-    site=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 1
-    log "⚡ Restoring torch ecosystem snapshot ($(du -h "$snap" | awk '{print $1}')) → $site"
-    # Remove partial/broken trees first so extract is clean
-    (cd "$site" && rm -rf torch torchvision torchaudio xformers triton torchgen torio nvidia functorch 2>/dev/null || true)
-    (cd "$site" && find . -maxdepth 1 -type d \( \
-        -name 'torch-*.dist-info' -o -name 'torchvision-*.dist-info' -o \
-        -name 'torchaudio-*.dist-info' -o -name 'xformers-*.dist-info' -o \
-        -name 'triton-*.dist-info' -o -name 'torchgen-*.dist-info' -o \
-        -name 'torio-*.dist-info' \) -exec rm -rf {} + 2>/dev/null || true)
-    if ! tar -xzf "$snap" -C "$site"; then
-        log_error "Failed to extract torch ecosystem snapshot"
-        return 1
-    fi
-    install_torch_ecosystem_companion_deps || true
-    if python -c "import torch, torchvision, torchaudio; print(torch.__version__, torch.cuda.is_available())" 2>/dev/null; then
-        log "✅ Torch ecosystem restored from snapshot"
-        # xformers optional
-        python -c "import xformers" 2>/dev/null || log "⚠️ xformers missing after restore (will try pip)"
-        return 0
-    fi
-    log_error "Torch snapshot restored but import failed — will pip install"
-    return 1
-}
-
-# After a successful pip install, pack the heavy packages into EXTRA (highest ROI for ~3GB).
-save_torch_ecosystem_snapshot() {
-    local snap meta site tmp_list
-    snap=$(torch_ecosystem_snapshot_paths | head -1)
-    meta=$(torch_ecosystem_snapshot_paths | tail -1)
-    site=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 1
-    mkdir -p "$BOOT_CACHE_EXTRA_DIR"
-
-    if [[ -f "$snap" && "${REBUILD_TORCH_SNAPSHOT:-}" != "1" ]]; then
-        log "✅ Torch ecosystem snapshot already present ($(du -h "$snap" | awk '{print $1}'))"
-        enforce_boot_cache_budget || true
-        return 0
-    fi
-    if [[ -f "$snap" && "${REBUILD_TORCH_SNAPSHOT:-}" == "1" ]]; then
-        log "♻️ REBUILD_TORCH_SNAPSHOT=1 — recreating torch ecosystem snapshot"
-        rm -f "$snap" "$meta" 2>/dev/null || true
-    fi
-
-    if ! python -c "import torch, torchvision, torchaudio" 2>/dev/null; then
-        log "⏭️ Skip snapshot — torch stack not importable yet"
-        return 1
-    fi
-
-    log "💾 Saving torch ecosystem snapshot into EXTRA (soft ~${BOOT_CACHE_MAX_GB}GB target)..."
-    tmp_list=$(mktemp)
-    # Only the heavy packages — max time saved per GB
-    (cd "$site" && ls -d \
-        torch torch-*.dist-info \
-        torchvision torchvision-*.dist-info \
-        torchaudio torchaudio-*.dist-info \
-        xformers xformers-*.dist-info \
-        triton triton-*.dist-info \
-        torchgen torchgen-*.dist-info \
-        torio torio-*.dist-info \
-        nvidia \
-        2>/dev/null || true) >"$tmp_list"
-
-    # Small import-time deps (typing_extensions, sympy, …) — omitted from heavy list above
-    torch_eco_companion_action list_paths "$tmp_list.companions" 2>/dev/null || true
-    if [[ -s "$tmp_list.companions" ]]; then
-        cat "$tmp_list.companions" >>"$tmp_list"
-        sort -u -o "$tmp_list" "$tmp_list"
-        rm -f "$tmp_list.companions"
-    fi
-
-    if [[ ! -s "$tmp_list" ]]; then
-        rm -f "$tmp_list"
-        log_error "Nothing to snapshot under $site"
-        return 1
-    fi
-
-    # Drop other EXTRA noise so snapshot can use the soft budget
-    rm -rf "$BOOT_CACHE_EXTRA_DIR/pip" 2>/dev/null || true
-    # Remove older torch snapshots (version changes)
-    find "$BOOT_CACHE_EXTRA_DIR" -maxdepth 1 -type f -name 'torch_eco_*.tar.gz' ! -name "$(basename "$snap")" -delete 2>/dev/null || true
-    find "$BOOT_CACHE_EXTRA_DIR" -maxdepth 1 -type f -name 'torch_eco_*.meta' ! -name "$(basename "$meta")" -delete 2>/dev/null || true
-
-    if tar -czf "$snap.tmp" -C "$site" -T "$tmp_list"; then
-        mv -f "$snap.tmp" "$snap"
-        {
-            echo "torch=${TORCH_VERSION}"
-            echo "torchvision=${TORCHVISION_VERSION}"
-            echo "torchaudio=${TORCHAUDIO_VERSION}"
-            echo "xformers=${XFORMERS_VERSION}"
-            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "size_bytes=$(stat -c%s "$snap" 2>/dev/null || echo 0)"
-        } >"$meta"
-        log "✅ Saved torch snapshot $(du -h "$snap" | awk '{print $1}') → $snap"
-    else
-        rm -f "$snap.tmp"
-        log_error "Failed to create torch ecosystem snapshot"
-        rm -f "$tmp_list"
-        return 1
-    fi
-    rm -f "$tmp_list"
-    enforce_boot_cache_budget || true
-    return 0
 }
 
 # Configure logging system
@@ -1657,23 +1267,11 @@ fix_torch_versions() {
         0)
             log "✅ PyTorch ecosystem already working, skipping reinstallation"
             verify_installations
-            # Keep EXTRA snapshot warm for next cold boot (no-op if already saved)
-            save_torch_ecosystem_snapshot || true
             ;;
         1)
             log "🔧 PyTorch ecosystem needs installation (packages not found)..."
             clean_torch_installations
 
-            # Highest ROI for ~3GB EXTRA: restore packed torch stack (~2+ min saved)
-            if restore_torch_ecosystem_snapshot; then
-                install_xformers || log_error "xformers install after snapshot failed (continuing)"
-                verify_installations
-                touch "/tmp/pytorch_ecosystem_fresh_install"
-                save_torch_ecosystem_snapshot || true
-                log "✅ PyTorch ecosystem setup completed"
-                return 0
-            fi
-            
             # Install core first, then xformers
             if ! install_torch_core; then
                 log_error "PyTorch core installation failed. Aborting."
@@ -1687,7 +1285,6 @@ fix_torch_versions() {
             # Final verification of PyTorch ecosystem
             log "🔍 Final verification of PyTorch ecosystem..."
             verify_installations
-            save_torch_ecosystem_snapshot || true
             
             # Create a marker to indicate recent successful installation
             touch "/tmp/pytorch_ecosystem_fresh_install"
@@ -1699,21 +1296,11 @@ fix_torch_versions() {
             if install_missing_torch_packages; then
                 log "✅ Successfully installed missing packages"
                 verify_installations
-                save_torch_ecosystem_snapshot || true
             else
                 log "❌ Failed to install missing packages, falling back to full reinstallation"
                 # Fall back to case 1 logic
                 clean_torch_installations
 
-                if restore_torch_ecosystem_snapshot; then
-                    install_xformers || true
-                    verify_installations
-                    touch "/tmp/pytorch_ecosystem_fresh_install"
-                    save_torch_ecosystem_snapshot || true
-                    log "✅ PyTorch ecosystem setup completed"
-                    return 0
-                fi
-                
                 if ! install_torch_core; then
                     log_error "PyTorch core installation failed. Aborting."
                     return 1
@@ -1724,7 +1311,6 @@ fix_torch_versions() {
                 fi
                 
                 verify_installations
-                save_torch_ecosystem_snapshot || true
                 touch "/tmp/pytorch_ecosystem_fresh_install"
             fi
             ;;
@@ -2852,8 +2438,6 @@ else
         exit 1
     fi
 
-    # Always try to persist torch snapshot on prepared boots (highest ROI for EXTRA cache)
-    save_torch_ecosystem_snapshot || true
     promote_sam2_wheel || true
 
     ensure_comfy_custom_node_pip_stack_if_needed || log_error "⚠️ Custom-node pip stack check/repair had issues (continuing)"
@@ -3059,11 +2643,10 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
   
   # --- ENSURE CORRECT TORCH VERSIONS AT RUNTIME ---
-  # Skip redundant check if we just completed a fresh installation — still save snapshot.
+  # Skip redundant check if we just completed a fresh installation.
   if [[ -f "/tmp/pytorch_ecosystem_fresh_install" ]]; then
       echo "Skipping PyTorch version check - fresh installation completed successfully"
       rm -f "/tmp/pytorch_ecosystem_fresh_install"  # Clean up marker
-      save_torch_ecosystem_snapshot || true
   else
       echo "Verifying PyTorch ecosystem versions before launch..."
       fix_torch_versions # This will now just check unless versions are wrong
