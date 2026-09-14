@@ -37,7 +37,7 @@ if [[ "$REINSTALL_IMAGE_BROWSER" || ! -f "/tmp/image_browser.prepared" ]]; then
         pkg-config \
         build-essential \
         > /dev/null 2>&1 || {
-        log_error "Warning: Some FFmpeg packages failed to install"
+        log "Warning: Some FFmpeg packages failed to install (continuing)"
     }
     
     source $VENV_DIR/image_browser-env/bin/activate
