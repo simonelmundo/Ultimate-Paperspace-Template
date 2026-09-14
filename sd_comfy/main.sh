@@ -33,11 +33,184 @@ elif [[ -f "/notebooks/utils/helper.sh" ]]; then
     source "/notebooks/utils/helper.sh"
 fi
 
-# Venv lives in /tmp (recreated each start). Pip wheel cache can stay on /storage.
+# Venv lives in /tmp (recreated each start).
+# Existing caches (.pip_cache, .sageattention_cache, .sam2_cache, .wheel_cache, …) are
+# LEFT ALONE — never trimmed/evicted, and they do NOT count toward the budget.
+#
+# BOOT_CACHE_EXTRA_DIR (~3GB soft target): spend it on the highest time ROI —
+#   torch + torchvision + torchaudio + xformers (+ triton/nvidia libs)
+# That step was ~2+ min of cold-start. SAM2/SageAttention wheels already live in
+# grandfathered caches (tiny) and are reused without using this budget.
 VENV_DIR=${VENV_DIR:-/tmp}
 export VENV_DIR
 export PIP_CACHE_DIR=${PIP_CACHE_DIR:-/storage/.pip_cache}
-mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR"
+export WHEEL_CACHE_DIR="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
+export BOOT_CACHE_EXTRA_DIR="${BOOT_CACHE_EXTRA_DIR:-/storage/.comfy_boot_extra}"
+export BOOT_CACHE_MAX_GB="${BOOT_CACHE_MAX_GB:-3}"  # soft target for EXTRA only
+# Skip slow path by default; set UPDATE_CUSTOM_NODES=1 / INSTALL_LORA_ON_START=1 to opt in.
+export SKIP_CUSTOM_NODE_UPDATE="${SKIP_CUSTOM_NODE_UPDATE:-1}"
+export INSTALL_LORA_ON_START="${INSTALL_LORA_ON_START:-0}"
+mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR" "$WHEEL_CACHE_DIR" "$BOOT_CACHE_EXTRA_DIR"
+
+#######################################
+# EXTRA BOOT CACHE (soft ~BOOT_CACHE_MAX_GB target)
+#######################################
+# Grandfathered (never counted, never deleted by this script):
+#   /storage/.pip_cache .wheel_cache .sageattention_cache .sam2_cache .torch_extensions
+
+torch_ecosystem_snapshot_id() {
+    echo "torch${TORCH_VERSION}_tv${TORCHVISION_VERSION}_ta${TORCHAUDIO_VERSION}_xf${XFORMERS_VERSION}" | tr '+.' '__'
+}
+
+torch_ecosystem_snapshot_paths() {
+    local id
+    id=$(torch_ecosystem_snapshot_id)
+    echo "$BOOT_CACHE_EXTRA_DIR/torch_eco_${id}.tar.gz"
+    echo "$BOOT_CACHE_EXTRA_DIR/torch_eco_${id}.meta"
+}
+
+boot_cache_extra_bytes() {
+    if [[ ! -d "$BOOT_CACHE_EXTRA_DIR" ]]; then
+        echo 0
+        return
+    fi
+    du -sb "$BOOT_CACHE_EXTRA_DIR" 2>/dev/null | awk '{print $1}'
+}
+
+boot_cache_max_bytes() {
+    echo $(( BOOT_CACHE_MAX_GB * 1024 * 1024 * 1024 ))
+}
+
+# True if sageattention + sam2 wheels are on disk (no nvcc/toolkit needed to rebuild).
+boot_extension_wheels_ready() {
+    local arch="$(uname -m)"
+    local sage_wheel sam_wheel
+    sage_wheel=$(find "$WHEEL_CACHE_DIR" /storage/.sageattention_cache -type f -name "sageattention-*-cp310-*-linux_${arch}.whl" 2>/dev/null | head -1)
+    sam_wheel=$(find "$BOOT_CACHE_EXTRA_DIR/wheels" "$WHEEL_CACHE_DIR" /storage/.sam2_cache -type f \( -name 'sam_2-*.whl' -o -name 'SAM_2-*.whl' \) 2>/dev/null | head -1)
+    [[ -n "$sage_wheel" && -f "$sage_wheel" && -n "$sam_wheel" && -f "$sam_wheel" ]]
+}
+
+# Soft budget: report size; never delete grandfathered caches; prefer keeping torch snapshot.
+# Only drop EXTRA/pip crumbs if we're clearly over and a torch snapshot already exists.
+enforce_boot_cache_budget() {
+    local max now mb
+    max=$(boot_cache_max_bytes)
+    now=$(boot_cache_extra_bytes)
+    mb=$(( (now + 1024 * 1024 - 1) / 1024 / 1024 ))
+    local msg="📦 Extra boot cache: ${mb}MB (soft target ${BOOT_CACHE_MAX_GB}GB; existing caches excluded)"
+    if declare -F log >/dev/null 2>&1; then log "$msg"; else echo "$msg"; fi
+
+    if (( now <= max )); then
+        return 0
+    fi
+
+    local warn="⚠️ Extra cache ${mb}MB > soft ${BOOT_CACHE_MAX_GB}GB — clearing EXTRA/pip only (keeping torch snapshot)"
+    if declare -F log >/dev/null 2>&1; then log "$warn"; else echo "$warn"; fi
+    rm -rf "$BOOT_CACHE_EXTRA_DIR/pip" 2>/dev/null || true
+    now=$(boot_cache_extra_bytes)
+    mb=$(( now / 1024 / 1024 ))
+    msg="   after pip-extra cleanup: ${mb}MB"
+    if declare -F log >/dev/null 2>&1; then log "$msg"; else echo "$msg"; fi
+    # Soft: do not delete torch_eco_*.tar.gz even if still over target
+}
+
+# Restore torch/vision/audio/xformers (+triton/nvidia) from EXTRA snapshot into active venv.
+# Returns 0 if ecosystem imports OK after restore.
+restore_torch_ecosystem_snapshot() {
+    local snap meta site
+    snap=$(torch_ecosystem_snapshot_paths | head -1)
+    meta=$(torch_ecosystem_snapshot_paths | tail -1)
+    if [[ ! -f "$snap" ]]; then
+        log "🔍 No torch ecosystem snapshot at $snap"
+        return 1
+    fi
+    site=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 1
+    log "⚡ Restoring torch ecosystem snapshot ($(du -h "$snap" | awk '{print $1}')) → $site"
+    # Remove partial/broken trees first so extract is clean
+    (cd "$site" && rm -rf torch torchvision torchaudio xformers triton torchgen nvidia functorch 2>/dev/null || true)
+    (cd "$site" && find . -maxdepth 1 -type d \( \
+        -name 'torch-*.dist-info' -o -name 'torchvision-*.dist-info' -o \
+        -name 'torchaudio-*.dist-info' -o -name 'xformers-*.dist-info' -o \
+        -name 'triton-*.dist-info' -o -name 'torchgen-*.dist-info' \) -exec rm -rf {} + 2>/dev/null || true)
+    if ! tar -xzf "$snap" -C "$site"; then
+        log_error "Failed to extract torch ecosystem snapshot"
+        return 1
+    fi
+    if python -c "import torch, torchvision, torchaudio; print(torch.__version__, torch.cuda.is_available())" 2>/dev/null; then
+        log "✅ Torch ecosystem restored from snapshot"
+        # xformers optional
+        python -c "import xformers" 2>/dev/null || log "⚠️ xformers missing after restore (will try pip)"
+        return 0
+    fi
+    log_error "Torch snapshot restored but import failed — will pip install"
+    return 1
+}
+
+# After a successful pip install, pack the heavy packages into EXTRA (highest ROI for ~3GB).
+save_torch_ecosystem_snapshot() {
+    local snap meta site tmp_list
+    snap=$(torch_ecosystem_snapshot_paths | head -1)
+    meta=$(torch_ecosystem_snapshot_paths | tail -1)
+    site=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 1
+    mkdir -p "$BOOT_CACHE_EXTRA_DIR"
+
+    if [[ -f "$snap" ]]; then
+        log "✅ Torch ecosystem snapshot already present ($(du -h "$snap" | awk '{print $1}'))"
+        enforce_boot_cache_budget || true
+        return 0
+    fi
+
+    if ! python -c "import torch, torchvision, torchaudio" 2>/dev/null; then
+        log "⏭️ Skip snapshot — torch stack not importable yet"
+        return 1
+    fi
+
+    log "💾 Saving torch ecosystem snapshot into EXTRA (soft ~${BOOT_CACHE_MAX_GB}GB target)..."
+    tmp_list=$(mktemp)
+    # Only the heavy packages — max time saved per GB
+    (cd "$site" && ls -d \
+        torch torch-*.dist-info \
+        torchvision torchvision-*.dist-info \
+        torchaudio torchaudio-*.dist-info \
+        xformers xformers-*.dist-info \
+        triton triton-*.dist-info \
+        torchgen torchgen-*.dist-info \
+        nvidia \
+        2>/dev/null || true) >"$tmp_list"
+
+    if [[ ! -s "$tmp_list" ]]; then
+        rm -f "$tmp_list"
+        log_error "Nothing to snapshot under $site"
+        return 1
+    fi
+
+    # Drop other EXTRA noise so snapshot can use the soft budget
+    rm -rf "$BOOT_CACHE_EXTRA_DIR/pip" 2>/dev/null || true
+    # Remove older torch snapshots (version changes)
+    find "$BOOT_CACHE_EXTRA_DIR" -maxdepth 1 -type f -name 'torch_eco_*.tar.gz' ! -name "$(basename "$snap")" -delete 2>/dev/null || true
+    find "$BOOT_CACHE_EXTRA_DIR" -maxdepth 1 -type f -name 'torch_eco_*.meta' ! -name "$(basename "$meta")" -delete 2>/dev/null || true
+
+    if tar -czf "$snap.tmp" -C "$site" -T "$tmp_list"; then
+        mv -f "$snap.tmp" "$snap"
+        {
+            echo "torch=${TORCH_VERSION}"
+            echo "torchvision=${TORCHVISION_VERSION}"
+            echo "torchaudio=${TORCHAUDIO_VERSION}"
+            echo "xformers=${XFORMERS_VERSION}"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "size_bytes=$(stat -c%s "$snap" 2>/dev/null || echo 0)"
+        } >"$meta"
+        log "✅ Saved torch snapshot $(du -h "$snap" | awk '{print $1}') → $snap"
+    else
+        rm -f "$snap.tmp"
+        log_error "Failed to create torch ecosystem snapshot"
+        rm -f "$tmp_list"
+        return 1
+    fi
+    rm -f "$tmp_list"
+    enforce_boot_cache_budget || true
+    return 0
+}
 
 # Configure logging system
 LOG_DIR="/tmp/log"
@@ -398,6 +571,24 @@ setup_environment() {
     hash -r
     echo "Command hash cleared."
 
+    # Prefer the real 12.8 binary if it exists even when an older nvcc is earlier on PATH
+    if [[ -x /usr/local/cuda-12.8/bin/nvcc ]]; then
+        export PATH="/usr/local/cuda-12.8/bin:$PATH"
+        hash -r
+    fi
+
+    # Fast path: prebuilt sage/sam2 wheels mean we do not need the CUDA toolkit this boot.
+    # Torch runtime CUDA comes from the pip wheel. Saves ~3–4 min on Paperspace cold boots.
+    if [[ "${FORCE_CUDA_INSTALL:-0}" != "1" ]] && boot_extension_wheels_ready; then
+        log "✅ Prebuilt extension wheels present — skipping CUDA 12.8 toolkit install (set FORCE_CUDA_INSTALL=1 to override)"
+        if command -v nvcc &>/dev/null; then
+            echo "NVCC present: $(nvcc --version 2>&1 | grep release || true)"
+        else
+            echo "NVCC not on PATH (OK for inference when wheels are cached)"
+        fi
+        return 0
+    fi
+
     # Now check if nvcc is available in the configured PATH
     if command -v nvcc &>/dev/null; then
         # If nvcc is found, check its version
@@ -709,6 +900,26 @@ PYCHK
 }
 
 # SAM2 Installation Process (with wheel caching like SageAttention)
+# Wheel is ~0.5MB — always prefer cache; never rebuild if a good wheel exists (~2 min saved).
+
+promote_sam2_wheel() {
+    local wheel="${1:-}"
+    mkdir -p "$BOOT_CACHE_EXTRA_DIR/wheels" "$WHEEL_CACHE_DIR"
+    if [[ -z "$wheel" || ! -f "$wheel" ]]; then
+        wheel=$(find "$WHEEL_CACHE_DIR" /storage/.sam2_cache "$BOOT_CACHE_EXTRA_DIR/wheels" -type f \( -name 'sam_2-*.whl' -o -name 'SAM_2-*.whl' \) -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -f2- -d' ')
+    fi
+    [[ -n "$wheel" && -f "$wheel" ]] || return 1
+    # Durable copies for next cold boot (does not delete/alter source tree contents beyond copy)
+    cp -f "$wheel" "$BOOT_CACHE_EXTRA_DIR/wheels/$(basename "$wheel")" 2>/dev/null || true
+    cp -f "$wheel" "$WHEEL_CACHE_DIR/$(basename "$wheel")" 2>/dev/null || true
+    log "💾 SAM2 wheel cached: $(basename "$wheel") ($(du -h "$wheel" | awk '{print $1}'))"
+    return 0
+}
+
+find_sam2_cached_wheel() {
+    find "$BOOT_CACHE_EXTRA_DIR/wheels" "$WHEEL_CACHE_DIR" /storage/.sam2_cache -type f \( -name 'sam_2-*.whl' -o -name 'SAM_2-*.whl' \) -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -f2- -d' '
+}
+
 install_sam2_optimized() {
     log "Verifying SAM2 installation..."
     
@@ -720,7 +931,19 @@ install_sam2_optimized() {
     # and would false-positive even when the venv does not have the wheel installed.
     if (cd /tmp && python -c "from sam2.build_sam import build_sam2") &>/dev/null; then
         log "✅ SAM2 is already installed and importable."
+        promote_sam2_wheel || true
         return 0
+    fi
+
+    # Fast path: install from cached wheel (avoids ~2 min source rebuild every boot)
+    if install_sam2_from_cached_wheel; then
+        if (cd /tmp && python -c "from sam2.build_sam import build_sam2") &>/dev/null; then
+            log "✅ SAM2 installed from cached wheel."
+            promote_sam2_wheel || true
+            enforce_boot_cache_budget || true
+            return 0
+        fi
+        log_error "Cached SAM2 wheel installed but import failed — will rebuild"
     fi
 
     log "SAM2 not found. Proceeding with installation..."
@@ -737,11 +960,29 @@ install_sam2_optimized() {
     # Final check after building from source (from a directory that is not the repo)
     if (cd /tmp && python -c "from sam2.build_sam import build_sam2") &>/dev/null; then
         log "✅ SAM2 successfully built and installed."
+        promote_sam2_wheel || true
+        enforce_boot_cache_budget || true
         return 0
     else
         log_error "❌ SAM2 installation verification failed."
         return 1
     fi
+}
+
+install_sam2_from_cached_wheel() {
+    local wheel
+    wheel=$(find_sam2_cached_wheel)
+    if [[ -z "$wheel" || ! -f "$wheel" ]]; then
+        log "🔍 No cached SAM2 wheel found"
+        return 1
+    fi
+    log "⚡ Installing SAM2 from cached wheel: $wheel"
+    if pip install --force-reinstall --no-deps --disable-pip-version-check "$wheel"; then
+        promote_sam2_wheel "$wheel" || true
+        return 0
+    fi
+    log_error "Failed to install cached SAM2 wheel"
+    return 1
 }
 
 install_sam2_dependencies() {
@@ -792,6 +1033,28 @@ build_and_install_sam2() {
          return 1
     fi
 
+    local venv_python="$VENV_DIR/sd_comfy-env/bin/python"
+    if [[ ! -x "$venv_python" ]]; then
+        log_error "Virtual environment Python not found or not executable at $venv_python"
+        return 1
+    fi
+
+    # If a wheel already exists in dist/ (or elsewhere), install it — do NOT wipe and rebuild.
+    local existing_wheel
+    existing_wheel=$(find "$sam2_build_dir/dist" -maxdepth 1 -type f -name '*.whl' -print -quit 2>/dev/null)
+    if [[ -z "$existing_wheel" ]]; then
+        existing_wheel=$(find_sam2_cached_wheel)
+    fi
+    if [[ -n "$existing_wheel" && -f "$existing_wheel" ]]; then
+        log "⚡ Reusing existing SAM2 wheel (skip rebuild): $existing_wheel"
+        promote_sam2_wheel "$existing_wheel" || true
+        if pip install --force-reinstall --no-deps --disable-pip-version-check "$existing_wheel"; then
+            log "✅ SAM2 wheel installed successfully (cached)"
+            return 0
+        fi
+        log_error "Cached wheel install failed — falling back to rebuild"
+    fi
+
     log "Building SAM2 wheel in $(pwd)..."
     log "--- Verifying Environment BEFORE Build ---"
     log "CUDA_HOME=$CUDA_HOME"
@@ -800,13 +1063,19 @@ build_and_install_sam2() {
     log "NVCC Version: $(nvcc --version 2>/dev/null || echo 'NVCC not found')"
     log "Python Version: $(python --version || echo 'python not found')"
     log "-----------------------------------------"
-    
-    rm -rf build dist *.egg-info
 
-    local venv_python="$VENV_DIR/sd_comfy-env/bin/python"
-    if [[ ! -x "$venv_python" ]]; then
-        log_error "Virtual environment Python not found or not executable at $venv_python"
-        return 1
+    # Preserve any existing wheel before cleaning build dirs
+    local preserved=""
+    if [[ -n "$existing_wheel" && -f "$existing_wheel" ]]; then
+        preserved="$BOOT_CACHE_EXTRA_DIR/wheels/$(basename "$existing_wheel")"
+        mkdir -p "$BOOT_CACHE_EXTRA_DIR/wheels"
+        cp -f "$existing_wheel" "$preserved" 2>/dev/null || true
+    fi
+    
+    rm -rf build *.egg-info
+    # Keep dist/*.whl if present; only remove non-wheel junk
+    if [[ -d dist ]]; then
+        find dist -type f ! -name '*.whl' -delete 2>/dev/null || true
     fi
 
     # Install with optimizations
@@ -821,6 +1090,11 @@ build_and_install_sam2() {
         log_error "❌ SAM2 wheel build command failed"
         log_error "This may be due to missing dependencies or CUDA compilation issues"
         log_error "SAM2 can still work without CUDA extensions, but some features may be limited"
+        # Last resort: try preserved wheel
+        if [[ -n "$preserved" && -f "$preserved" ]]; then
+            log "Falling back to preserved SAM2 wheel"
+            pip install --force-reinstall --no-deps --disable-pip-version-check "$preserved" && return 0
+        fi
         return 1
     fi
 
@@ -832,8 +1106,9 @@ build_and_install_sam2() {
         log "Found built wheel: $built_wheel"
         log "Installing newly built wheel: $built_wheel"
         # --no-deps: SAM2 metadata can pull a generic torch wheel and overwrite cu128.
-        if pip install --force-reinstall --no-deps --no-cache-dir --disable-pip-version-check "$built_wheel"; then
+        if pip install --force-reinstall --no-deps --disable-pip-version-check "$built_wheel"; then
             log "✅ SAM2 wheel installed successfully"
+            promote_sam2_wheel "$built_wheel" || true
             return 0
         else
             log_error "❌ Failed to install SAM2 wheel"
@@ -998,8 +1273,8 @@ clean_torch_installations() {
         echo "Manual package directory cleanup completed."
     fi
     
-    echo "Clearing pip cache..."
-    pip cache purge || true
+    # Do NOT purge existing /storage/.pip_cache — grandfathered and outside the 3GB extra budget.
+    echo "Keeping existing pip cache at $PIP_CACHE_DIR (untouched; extra cache is $BOOT_CACHE_EXTRA_DIR)"
     
     # Clear Python cache to prevent import issues
     echo "Clearing Python bytecode cache..."
@@ -1012,8 +1287,9 @@ clean_torch_installations() {
 # Function to install PyTorch core packages
 install_torch_core() {
     echo "Installing PyTorch core packages (torch, torchvision, torchaudio)..."
-    # Use --no-cache-dir and --ignore-installed for maximum safety against conflicts.
-    local install_cmd="pip install --no-cache-dir --ignore-installed torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} --extra-index-url ${TORCH_INDEX_URL}"
+    # New torch wheels go into EXTRA pip cache only (≤3GB). Existing /storage/.pip_cache untouched.
+    mkdir -p "$BOOT_CACHE_EXTRA_DIR/pip"
+    local install_cmd="env PIP_CACHE_DIR=$BOOT_CACHE_EXTRA_DIR/pip pip install --ignore-installed torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} --extra-index-url ${TORCH_INDEX_URL}"
     
     log "Running core install command: $install_cmd"
     
@@ -1021,6 +1297,7 @@ install_torch_core() {
         log "PyTorch core packages installation command finished successfully."
         # Quick verification
         python -c "import torch; print(f'Core install OK: Torch {torch.__version__} imported successfully.')" || return 1
+        enforce_boot_cache_budget || true
         return 0
     else
         local status=$?
@@ -1033,14 +1310,16 @@ install_torch_core() {
     install_xformers() {
     log "📦 Installing xformers..."
     
-    # Use your proven installation method from main.sh
-    pip install --no-cache-dir --disable-pip-version-check --no-deps --quiet \
+    mkdir -p "$BOOT_CACHE_EXTRA_DIR/pip"
+    # xformers downloads land in EXTRA cache only
+    env PIP_CACHE_DIR="$BOOT_CACHE_EXTRA_DIR/pip" pip install --disable-pip-version-check --no-deps --quiet \
         xformers==${XFORMERS_VERSION} --extra-index-url "https://download.pytorch.org/whl/cu128" 2>/dev/null || \
-    pip install --no-cache-dir --disable-pip-version-check --force-reinstall --quiet \
+    env PIP_CACHE_DIR="$BOOT_CACHE_EXTRA_DIR/pip" pip install --disable-pip-version-check --force-reinstall --quiet \
         xformers --index-url "https://download.pytorch.org/whl/cu128" 2>/dev/null || \
-    pip install --no-cache-dir --disable-pip-version-check --force-reinstall --quiet \
+    env PIP_CACHE_DIR="$BOOT_CACHE_EXTRA_DIR/pip" pip install --disable-pip-version-check --force-reinstall --quiet \
         xformers 2>/dev/null || \
     log_error "⚠️ All xformers installation strategies failed, continuing without"
+    enforce_boot_cache_budget || true
     
     # Verify installation
     if python -c "import xformers; print(f'✅ xformers {xformers.__version__} installed successfully')" 2>/dev/null; then
@@ -1099,11 +1378,22 @@ fix_torch_versions() {
         0)
             log "✅ PyTorch ecosystem already working, skipping reinstallation"
             verify_installations
+            # Keep EXTRA snapshot warm for next cold boot (no-op if already saved)
+            save_torch_ecosystem_snapshot || true
             ;;
         1)
             log "🔧 PyTorch ecosystem needs installation (packages not found)..."
-            # Clean everything first
             clean_torch_installations
+
+            # Highest ROI for ~3GB EXTRA: restore packed torch stack (~2+ min saved)
+            if restore_torch_ecosystem_snapshot; then
+                install_xformers || log_error "xformers install after snapshot failed (continuing)"
+                verify_installations
+                touch "/tmp/pytorch_ecosystem_fresh_install"
+                save_torch_ecosystem_snapshot || true
+                log "✅ PyTorch ecosystem setup completed"
+                return 0
+            fi
             
             # Install core first, then xformers
             if ! install_torch_core; then
@@ -1118,6 +1408,7 @@ fix_torch_versions() {
             # Final verification of PyTorch ecosystem
             log "🔍 Final verification of PyTorch ecosystem..."
             verify_installations
+            save_torch_ecosystem_snapshot || true
             
             # Create a marker to indicate recent successful installation
             touch "/tmp/pytorch_ecosystem_fresh_install"
@@ -1129,10 +1420,20 @@ fix_torch_versions() {
             if install_missing_torch_packages; then
                 log "✅ Successfully installed missing packages"
                 verify_installations
+                save_torch_ecosystem_snapshot || true
             else
                 log "❌ Failed to install missing packages, falling back to full reinstallation"
                 # Fall back to case 1 logic
                 clean_torch_installations
+
+                if restore_torch_ecosystem_snapshot; then
+                    install_xformers || true
+                    verify_installations
+                    touch "/tmp/pytorch_ecosystem_fresh_install"
+                    save_torch_ecosystem_snapshot || true
+                    log "✅ PyTorch ecosystem setup completed"
+                    return 0
+                fi
                 
                 if ! install_torch_core; then
                     log_error "PyTorch core installation failed. Aborting."
@@ -1144,6 +1445,7 @@ fix_torch_versions() {
                 fi
                 
                 verify_installations
+                save_torch_ecosystem_snapshot || true
                 touch "/tmp/pytorch_ecosystem_fresh_install"
             fi
             ;;
@@ -1740,23 +2042,27 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
         return 0
     }
     
-    # Execute custom node updates
-    # Temporarily disable set -e and ERR trap to allow custom node update failures without script exit
-    set +e
-    disable_err_trap
-    
-    update_custom_nodes || log_error "Custom nodes update had issues (continuing)"
-    custom_nodes_status=$?
-    
-    # Re-enable set -e and ERR trap
-    set -e
-    enable_err_trap
-    
-    if [[ $custom_nodes_status -eq 0 ]]; then
-        echo "✅ Custom nodes update completed successfully."
+    # Execute custom node updates (skipped by default — ~1 min; set UPDATE_CUSTOM_NODES=1 or SKIP_CUSTOM_NODE_UPDATE=0)
+    if [[ "${UPDATE_CUSTOM_NODES:-0}" == "1" || "${SKIP_CUSTOM_NODE_UPDATE}" == "0" ]]; then
+        set +e
+        disable_err_trap
+        
+        update_custom_nodes || log_error "Custom nodes update had issues (continuing)"
+        custom_nodes_status=$?
+        
+        # Re-enable set -e and ERR trap
+        set -e
+        enable_err_trap
+        
+        if [[ $custom_nodes_status -eq 0 ]]; then
+            echo "✅ Custom nodes update completed successfully."
+        else
+            log_error "⚠️ Custom nodes update had issues (Status: $custom_nodes_status)"
+            log_error "Some custom nodes may not be up-to-date"
+        fi
     else
-        log_error "⚠️ Custom nodes update had issues (Status: $custom_nodes_status)"
-        log_error "Some custom nodes may not be up-to-date"
+        log "⏭️ Skipping custom-node git updates (default). Set UPDATE_CUSTOM_NODES=1 to enable."
+        custom_nodes_status=0
     fi
 
     # --- STEP 7: INSTALL SAGEATTENTION OPTIMIZATION ---
@@ -2267,6 +2573,10 @@ else
         exit 1
     fi
 
+    # Always try to persist torch snapshot on prepared boots (highest ROI for EXTRA cache)
+    save_torch_ecosystem_snapshot || true
+    promote_sam2_wheel || true
+
     ensure_comfy_custom_node_pip_stack_if_needed || log_error "⚠️ Custom-node pip stack check/repair had issues (continuing)"
         
         # Check current ComfyUI version
@@ -2327,6 +2637,8 @@ else
 fi
 
 log "Finished Preparing Environment for Stable Diffusion Comfy"
+enforce_boot_cache_budget || true
+touch /tmp/sd_comfy.prepared
 
 echo ""
 echo "=================================================="
@@ -2468,10 +2780,11 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:4096,garbage_collection_threshold:0.8"
   
   # --- ENSURE CORRECT TORCH VERSIONS AT RUNTIME ---
-  # Skip redundant check if we just completed a fresh installation
+  # Skip redundant check if we just completed a fresh installation — still save snapshot.
   if [[ -f "/tmp/pytorch_ecosystem_fresh_install" ]]; then
       echo "Skipping PyTorch version check - fresh installation completed successfully"
       rm -f "/tmp/pytorch_ecosystem_fresh_install"  # Clean up marker
+      save_torch_ecosystem_snapshot || true
   else
       echo "Verifying PyTorch ecosystem versions before launch..."
       fix_torch_versions # This will now just check unless versions are wrong
@@ -2725,11 +3038,21 @@ EOF
     echo ""
 }
 
-# Execute
-if [[ ! -f "/tmp/lora_training.prepared" ]] || [[ -n "$REINSTALL_LORA_TRAINING" ]]; then
-    install_lora_training
+# Execute LoRA training setup off the critical path by default (~30s+).
+# Set INSTALL_LORA_ON_START=1 to install synchronously before "Comfy started".
+if [[ "${INSTALL_LORA_ON_START}" == "1" ]]; then
+  if [[ ! -f "/tmp/lora_training.prepared" ]] || [[ -n "$REINSTALL_LORA_TRAINING" ]]; then
+      install_lora_training
+  else
+      log "✅ LoRA Easy Training Scripts already installed (backend only; use train-lora <config.toml>)"
+  fi
 else
-    log "✅ LoRA Easy Training Scripts already installed (backend only; use train-lora <config.toml>)"
+  log "⏭️ LoRA training install deferred to background (INSTALL_LORA_ON_START=0)"
+  (
+    if [[ ! -f "/tmp/lora_training.prepared" ]] || [[ -n "$REINSTALL_LORA_TRAINING" ]]; then
+      install_lora_training >"$LOG_DIR/lora_training_bg.log" 2>&1
+    fi
+  ) &
 fi
 
   #######################################
