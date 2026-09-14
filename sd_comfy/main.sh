@@ -2714,6 +2714,20 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Wait a moment for ComfyUI to start
   sleep 3
   log "✅ ComfyUI started successfully! You can now access it at http://localhost:$SD_COMFY_PORT"
+
+  # Start deferred entry scripts (default: image_browser) alongside ComfyUI — after setup, non-blocking.
+  if [[ "${RUN_SCRIPT:-}" == *"image_browser"* ]] && [[ "${DEFER_SCRIPTS:-image_browser}" == *"image_browser"* ]]; then
+    ib_dir="$current_dir/../image_browser"
+    if [[ -d "$ib_dir" ]]; then
+      mkdir -p "$LOG_DIR"
+      log "🖼️ Starting image_browser alongside ComfyUI (setup+launch in background)..."
+      nohup bash -c "cd \"$ib_dir\" && bash control.sh reload" >> "$LOG_DIR/image_browser_entry.log" 2>&1 &
+      echo $! > /tmp/image_browser_entry.pid
+      log "📋 image_browser log: tail -f $LOG_DIR/image_browser_entry.log"
+    else
+      log "⚠️ image_browser folder not found at $ib_dir — skipping"
+    fi
+  fi
   
   #######################################
   # STEP 9.1: START OLLAMA (AFTER COMFYUI) - DISABLED

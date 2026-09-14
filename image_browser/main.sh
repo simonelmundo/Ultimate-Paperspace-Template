@@ -20,8 +20,17 @@ if [[ "$REINSTALL_IMAGE_BROWSER" || ! -f "/tmp/image_browser.prepared" ]]; then
     prepare_repo
     rm -rf $VENV_DIR/image_browser-env
     
-    
-    python3 -m venv /tmp/image_browser-env
+    # Prefer python3.10 and ensure pip exists (Paperspace cold boots sometimes get a broken venv pip).
+    local_py="python3.10"
+    command -v "$local_py" >/dev/null 2>&1 || local_py="python3"
+    "$local_py" -m venv /tmp/image_browser-env
+    # shellcheck disable=SC1091
+    source $VENV_DIR/image_browser-env/bin/activate
+    if ! python -m pip --version >/dev/null 2>&1; then
+        log "📦 Bootstrapping pip into image_browser venv..."
+        python -m ensurepip --upgrade >/dev/null 2>&1 || true
+    fi
+    python -m pip install --upgrade pip==24.0 wheel setuptools
     
     # Install FFmpeg 7 development libraries required for av package (v14+)
     log "📦 Installing FFmpeg 7 development libraries for av package..."
@@ -40,17 +49,12 @@ if [[ "$REINSTALL_IMAGE_BROWSER" || ! -f "/tmp/image_browser.prepared" ]]; then
         log "Warning: Some FFmpeg packages failed to install (continuing)"
     }
     
-    source $VENV_DIR/image_browser-env/bin/activate
-
-    pip install pip==24.0
-    pip install --upgrade wheel setuptools
-    
     cd $REPO_DIR
     # Try to prefer binary wheels first (faster, no compilation needed)
     # If wheels aren't available, fall back to building from source (requires FFmpeg)
-    pip install --prefer-binary -r requirements.txt || {
+    python -m pip install --prefer-binary -r requirements.txt || {
         log "⚠️ Binary wheels not available, building from source (requires FFmpeg)..."
-        pip install -r requirements.txt
+        python -m pip install -r requirements.txt
     }
     
     touch /tmp/image_browser.prepared

@@ -65,16 +65,19 @@ if [[ ! -d $WORKING_DIR/image_outputs ]]; then
   ln -s $IMAGE_OUTPUTS_DIR $WORKING_DIR/image_outputs
 fi
 
-# Scripts whose setup can run in parallel with later RUN_SCRIPT steps (comma-separated).
-# Default: image_browser (~1 min FFmpeg/pip) no longer blocks rclone/sd_comfy.
-export BACKGROUND_SCRIPTS="${BACKGROUND_SCRIPTS:-image_browser}"
+# Scripts deferred until ComfyUI launch (handled in sd_comfy/main.sh), comma-separated.
+# image_browser runs after Comfy setup finishes, alongside ComfyUI start — not during early entry.
+export DEFER_SCRIPTS="${DEFER_SCRIPTS:-image_browser}"
+# Optional: other scripts that may still run non-blocking during entry (empty by default).
+export BACKGROUND_SCRIPTS="${BACKGROUND_SCRIPTS:-}"
 
-is_background_script() {
+is_listed_script() {
   local name="$1"
-  local bg
-  IFS=',' read -ra _bg_list <<< "$BACKGROUND_SCRIPTS"
-  for bg in "${_bg_list[@]}"; do
-    [[ -n "$bg" && "$bg" == "$name" ]] && return 0
+  local list="$2"
+  local item
+  IFS=',' read -ra _list <<< "$list"
+  for item in "${_list[@]}"; do
+    [[ -n "$item" && "$item" == "$name" ]] && return 0
   done
   return 1
 }
@@ -82,6 +85,9 @@ is_background_script() {
 # Loop through each script and execute the corresponding case
 echo "Starting script(s)"
 echo "RUN_SCRIPT contains: $RUN_SCRIPT"
+if [[ -n "$DEFER_SCRIPTS" ]]; then
+  echo "DEFER_SCRIPTS (start with ComfyUI): $DEFER_SCRIPTS"
+fi
 if [[ -n "$BACKGROUND_SCRIPTS" ]]; then
   echo "BACKGROUND_SCRIPTS (non-blocking): $BACKGROUND_SCRIPTS"
 fi
@@ -99,7 +105,11 @@ do
     echo "⚠️ One or more required environment variables are missing for $script, skipping..."
     continue
   fi
-  if is_background_script "$script"; then
+  if is_listed_script "$script" "$DEFER_SCRIPTS"; then
+    echo "⏭️ Deferring $script until ComfyUI launch (sd_comfy will start it)"
+    continue
+  fi
+  if is_listed_script "$script" "$BACKGROUND_SCRIPTS"; then
     echo "✅ Starting $script in background (continuing to next script)..."
     mkdir -p "$LOG_DIR"
     local_log="$LOG_DIR/${script}_entry.log"
