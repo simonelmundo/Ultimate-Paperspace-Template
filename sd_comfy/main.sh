@@ -2772,10 +2772,8 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   fi
   
   
-  # Frontend: pin to ComfyUI core/PyPI stable (currently 1.53.6).
-  # Avoid @latest / GitHub-only lines (e.g. 1.55.x) — those are daily builds.
-  # Override with COMFY_FRONTEND_VERSION=... or USE_LEGACY_FRONTEND=1 if needed.
-  COMFY_FRONTEND_VERSION="${COMFY_FRONTEND_VERSION:-1.53.6}"
+  # Stay on 1.25.10 for drag/drop; bump COMFY_FRONTEND_VERSION (e.g. 1.45.7/1.53.6) if node-widget issues arise.
+  COMFY_FRONTEND_VERSION="${COMFY_FRONTEND_VERSION:-1.25.10}"
   FRONTEND_FLAG="--front-end-version Comfy-Org/ComfyUI_frontend@${COMFY_FRONTEND_VERSION}"
   echo "📦 Using frontend version: ${COMFY_FRONTEND_VERSION}"
   
