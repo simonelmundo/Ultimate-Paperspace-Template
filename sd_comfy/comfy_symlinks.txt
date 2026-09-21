@@ -1,0 +1,51 @@
+# ComfyUI managed symlinks (relative to REPO_DIR / stable-diffusion-comfy).
+# Format: <relative_path> -> <absolute_target>
+# Applied by sd_comfy/main.sh after ComfyUI git pull (and on each setup).
+# Snapshot from live Paperspace install 2026-09-21.
+
+custom_nodes/comfyui_controlnet_aux/ckpts -> /tmp/stable-diffusion-models/controlnet
+models/HeartMuLa -> /tmp/stable-diffusion-models/controlnet
+models/LBM -> /tmp/stable-diffusion-models/controlnet
+models/LLM -> /tmp/stable-diffusion-models/llm_checkpoints
+models/LLM_checkpoints -> /tmp/stable-diffusion-models/llm_checkpoints
+models/LLavacheckpoints -> /tmp/stable-diffusion-models/llm_checkpoints
+models/RMBG -> /tmp/stable-diffusion-models/controlnet
+models/SAM -> /tmp/stable-diffusion-models/controlnet
+models/SEEDVR2 -> /tmp/stable-diffusion-models/upscaler
+models/TTS -> /tmp/stable-diffusion-models/controlnet
+models/checkpoints -> /tmp/stable-diffusion-models/sd
+models/clip_vision -> /tmp/stable-diffusion-models/upscaler
+models/controlnet -> /tmp/stable-diffusion-models/controlnet
+models/depthanything3 -> /tmp/stable-diffusion-models/controlnet
+models/diffusion_models -> /tmp/stable-diffusion-models/sd
+models/embeddings -> /tmp/stable-diffusion-models/embedding
+models/facexlib -> /tmp/stable-diffusion-models/controlnet
+models/florence2 -> /tmp/stable-diffusion-models/llm_checkpoints
+models/grounding-dino -> /tmp/stable-diffusion-models/controlnet
+models/inpaint -> /tmp/stable-diffusion-models/vae
+models/insightface -> /tmp/stable-diffusion-models/controlnet
+models/ipadapter -> /tmp/stable-diffusion-models/upscaler
+models/latent_upscale_models -> /tmp/stable-diffusion-models/upscaler
+models/loras -> /tmp/stable-diffusion-models/lora
+models/mmaudio -> /tmp/stable-diffusion-models/sd
+models/model_patches -> /tmp/stable-diffusion-models/controlnet
+models/onnx -> /tmp/stable-diffusion-models/controlnet
+models/pulid -> /tmp/stable-diffusion-models/controlnet
+models/rembg -> /tmp/stable-diffusion-models/controlnet
+models/sam -> /tmp/stable-diffusion-models/controlnet
+models/sam2 -> /tmp/stable-diffusion-models/controlnet
+models/sam3 -> /tmp/stable-diffusion-models/controlnet
+models/sams -> /tmp/stable-diffusion-models/upscaler
+models/smol -> /tmp/stable-diffusion-models/controlnet
+models/tangoflux -> /tmp/stable-diffusion-models/llm_checkpoints
+models/tensorrt -> /tmp/stable-diffusion-models/controlnet
+models/text_encoders -> /tmp/stable-diffusion-models/lora
+models/tts -> /tmp/stable-diffusion-models/controlnet
+models/upscale_models -> /tmp/stable-diffusion-models/upscaler
+models/vae -> /tmp/stable-diffusion-models/vae
+models/vdn -> /tmp/stable-diffusion-models/lora
+models/vitmatte -> /tmp/stable-diffusion-models/controlnet
+models/yolo -> /tmp/stable-diffusion-models/controlnet
+models/yolo-world -> /tmp/stable-diffusion-models/controlnet
+models/yolov8 -> /tmp/stable-diffusion-models/controlnet
+models/zonos -> /tmp/stable-diffusion-models/controlnet

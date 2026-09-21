@@ -136,6 +136,49 @@ log() {
     echo "$1"
 }
 
+# Apply managed ComfyUI symlinks from sd_comfy/comfy_symlinks.txt (relative_path -> target).
+# Safe to re-run; replaces existing path/symlink at each link location.
+apply_comfy_symlinks() {
+    local manifest="${1:-$current_dir/comfy_symlinks.txt}"
+    local repo_root="${REPO_DIR:-/storage/stable-diffusion-comfy}"
+    local line rel target dest parent applied=0 skipped=0
+
+    if [[ ! -f "$manifest" ]]; then
+        log_error "Symlink manifest not found: $manifest"
+        return 1
+    fi
+    if [[ ! -d "$repo_root" ]]; then
+        log_error "ComfyUI repo not found: $repo_root"
+        return 1
+    fi
+
+    echo "🔗 Applying ComfyUI symlinks from $(basename "$manifest")..."
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # skip blanks and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ ! "$line" =~ ^(.+)[[:space:]]-\>[[:space:]](.+)$ ]]; then
+            echo "⚠️  Skipping malformed symlink line: $line"
+            ((skipped++)) || true
+            continue
+        fi
+        rel="${BASH_REMATCH[1]}"
+        target="${BASH_REMATCH[2]}"
+        # trim whitespace
+        rel="${rel#"${rel%%[![:space:]]*}"}"
+        rel="${rel%"${rel##*[![:space:]]}"}"
+        target="${target#"${target%%[![:space:]]*}"}"
+        target="${target%"${target##*[![:space:]]}"}"
+        dest="$repo_root/$rel"
+        parent="$(dirname "$dest")"
+        mkdir -p "$parent"
+        rm -rf "$dest"
+        ln -s "$target" "$dest"
+        echo "   $rel -> $target"
+        ((applied++)) || true
+    done < "$manifest"
+    echo "✅ Applied $applied symlinks ($skipped skipped)"
+}
+
 # Initialize logging system
 setup_logging
 echo "Starting main.sh operations at $(date)"
@@ -213,17 +256,10 @@ echo "           STEP 2: CREATE MODEL SYMLINKS"
 echo "=================================================="
 echo ""
 
-# Create symlinks for model directories
-echo "Creating model directory symlinks..."
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf diffusion_models && ln -s /tmp/stable-diffusion-models/sd diffusion_models
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf text_encoders && ln -s /tmp/stable-diffusion-models/lora text_encoders
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf sams && ln -s /tmp/stable-diffusion-models/upscaler sams
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
-cd "/storage/stable-diffusion-comfy/custom_nodes/comfyui_controlnet_aux/ckpts" && rm -rf lllyasviel && ln -s /tmp/stable-diffusion-models/controlnet lllyasviel
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf ipadapter && ln -s /tmp/stable-diffusion-models/upscaler ipadapter
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf inpaint && ln -s /tmp/stable-diffusion-models/vae inpaint
-cd "/storage/stable-diffusion-comfy/models/" && rm -rf RMBG && ln -s /tmp/stable-diffusion-models/controlnet RMBG
+# Create symlinks for model directories (full list lives in comfy_symlinks.txt).
+# Re-applied again after ComfyUI git pull so updates cannot leave placeholders behind.
+echo "Creating model directory symlinks from manifest..."
+apply_comfy_symlinks "$current_dir/comfy_symlinks.txt" || log_error "⚠️ Model symlink apply had issues (continuing)"
 
 echo "✅ Model symlinks created successfully"
 
@@ -1411,8 +1447,9 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             echo ""
             echo "🔄 Updating ComfyUI to latest version..."
             
-            # Perform the update
-            if git pull origin $current_branch; then
+            # Autostash any local dirt (patches, symlink placeholder deletions, etc.)
+            # so pull is not blocked by files like comfy/text_encoders/llama.py.
+            if git pull --autostash origin "$current_branch"; then
                 echo "✅ ComfyUI successfully updated to latest version!"
                 
                 # Update custom nodes as well
@@ -1476,6 +1513,14 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             else
                 echo "❌ Failed to update ComfyUI. Please check the repository status."
             fi
+        fi
+        
+        # Always re-apply managed model/custom_node symlinks after update attempt
+        # (pull may restore placeholder dirs under models/).
+        apply_comfy_symlinks "$current_dir/comfy_symlinks.txt" || log_error "⚠️ Post-pull symlink apply had issues (continuing)"
+        if [[ -f /notebooks/logs/patch_minimax_flash_decode.py ]]; then
+            echo "🔧 Re-applying MiniMax flash decode patch (if needed)..."
+            python3 /notebooks/logs/patch_minimax_flash_decode.py >/dev/null 2>&1 || true
         fi
         
         # Show recent commits
@@ -2484,8 +2529,18 @@ else
                 echo "   Local:  $local_commit"
                 echo "   Remote: $remote_commit"
                 echo ""
-                echo "💡 ComfyUI updates are now handled at the beginning of the installation process"
-                echo "   Run the script again to get the latest updates"
+                echo "🔄 Updating ComfyUI (git pull --autostash)..."
+                if git pull --autostash origin "$current_branch"; then
+                    echo "✅ ComfyUI successfully updated to latest version!"
+                else
+                    echo "❌ Failed to update ComfyUI. Please check the repository status."
+                fi
+            fi
+
+            # Re-apply managed symlinks after any update attempt
+            apply_comfy_symlinks "$current_dir/comfy_symlinks.txt" || log_error "⚠️ Post-pull symlink apply had issues (continuing)"
+            if [[ -f /notebooks/logs/patch_minimax_flash_decode.py ]]; then
+                python3 /notebooks/logs/patch_minimax_flash_decode.py >/dev/null 2>&1 || true
             fi
             
             # Show recent commits
@@ -2669,11 +2724,10 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   fi
   
   
-  # Frontend: 1.45.7 is the oldest that fully supports SaveAudioAdvanced
-  # (DynamicCombo format/quality widgets + in-node audio player).
-  # Floor for DynamicCombo alone is 1.33.4; 1.25.10 cannot render it (format becomes a bare input).
+  # Frontend: pin to ComfyUI core/PyPI stable (currently 1.53.6).
+  # Avoid @latest / GitHub-only lines (e.g. 1.55.x) — those are daily builds.
   # Override with COMFY_FRONTEND_VERSION=... or USE_LEGACY_FRONTEND=1 if needed.
-  COMFY_FRONTEND_VERSION="${COMFY_FRONTEND_VERSION:-1.45.7}"
+  COMFY_FRONTEND_VERSION="${COMFY_FRONTEND_VERSION:-1.53.6}"
   FRONTEND_FLAG="--front-end-version Comfy-Org/ComfyUI_frontend@${COMFY_FRONTEND_VERSION}"
   echo "📦 Using frontend version: ${COMFY_FRONTEND_VERSION}"
   
