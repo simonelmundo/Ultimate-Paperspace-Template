@@ -136,7 +136,7 @@ log() {
     echo "$1"
 }
 
-# Apply managed ComfyUI symlinks from sd_comfy/comfy_symlinks.txt (relative_path -> target).
+# Apply managed ComfyUI symlinks from a manifest (relative_path -> target, or tab-separated).
 # Safe to re-run; replaces existing path/symlink at each link location.
 apply_comfy_symlinks() {
     local manifest="${1:-$current_dir/comfy_symlinks.txt}"
@@ -156,18 +156,23 @@ apply_comfy_symlinks() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         # skip blanks and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-        if [[ ! "$line" =~ ^(.+)[[:space:]]-\>[[:space:]](.+)$ ]]; then
+        if [[ "$line" == *$'\t'* ]]; then
+            rel="${line%%$'\t'*}"
+            target="${line#*$'\t'}"
+        elif [[ "$line" =~ ^(.+)[[:space:]]-\>[[:space:]](.+)$ ]]; then
+            rel="${BASH_REMATCH[1]}"
+            target="${BASH_REMATCH[2]}"
+        else
             echo "⚠️  Skipping malformed symlink line: $line"
             ((skipped++)) || true
             continue
         fi
-        rel="${BASH_REMATCH[1]}"
-        target="${BASH_REMATCH[2]}"
         # trim whitespace
         rel="${rel#"${rel%%[![:space:]]*}"}"
         rel="${rel%"${rel##*[![:space:]]}"}"
         target="${target#"${target%%[![:space:]]*}"}"
         target="${target%"${target##*[![:space:]]}"}"
+        [[ -z "$rel" || -z "$target" ]] && { ((skipped++)) || true; continue; }
         dest="$repo_root/$rel"
         parent="$(dirname "$dest")"
         mkdir -p "$parent"
@@ -177,6 +182,47 @@ apply_comfy_symlinks() {
         ((applied++)) || true
     done < "$manifest"
     echo "✅ Applied $applied symlinks ($skipped skipped)"
+}
+
+# Snapshot live symlinks under ComfyUI before git pull (GNU find -printf).
+# Writes tab-separated rel<TAB>target lines to /tmp/comfy_symlinks_backup.txt
+COMFY_SYMLINK_BACKUP="${COMFY_SYMLINK_BACKUP:-/tmp/comfy_symlinks_backup.txt}"
+COMFY_SYMLINK_SNAPSHOT_OK=0
+
+snapshot_comfy_symlinks() {
+    local repo_root="${REPO_DIR:-/storage/stable-diffusion-comfy}"
+    local count=0
+    COMFY_SYMLINK_SNAPSHOT_OK=0
+    if [[ ! -d "$repo_root" ]]; then
+        log_error "Cannot snapshot symlinks — repo missing: $repo_root"
+        return 1
+    fi
+    if ! find "$repo_root" -type l ! -path '*/.git/*' ! -path '*/.triton_cache/*' \
+        -printf '%P\t%l\n' 2>/dev/null | LC_ALL=C sort > "$COMFY_SYMLINK_BACKUP"; then
+        log_error "Symlink snapshot failed"
+        rm -f "$COMFY_SYMLINK_BACKUP"
+        return 1
+    fi
+    count=$(wc -l < "$COMFY_SYMLINK_BACKUP" | tr -d ' ')
+    if [[ "$count" -gt 0 ]]; then
+        COMFY_SYMLINK_SNAPSHOT_OK=1
+        echo "📸 Snapshotted $count live symlinks → $COMFY_SYMLINK_BACKUP"
+        return 0
+    fi
+    echo "⚠️  Symlink snapshot empty — will fall back to comfy_symlinks.txt after update"
+    return 1
+}
+
+# After git pull: restore from live snapshot if this run created one, else comfy_symlinks.txt
+restore_comfy_symlinks_after_update() {
+    local fallback="${current_dir}/comfy_symlinks.txt"
+    if [[ "${COMFY_SYMLINK_SNAPSHOT_OK}" == "1" && -s "$COMFY_SYMLINK_BACKUP" ]]; then
+        echo "🔗 Restoring symlinks from live snapshot..."
+        apply_comfy_symlinks "$COMFY_SYMLINK_BACKUP" || return 1
+    else
+        echo "🔗 Restoring symlinks from fallback manifest ($(basename "$fallback"))..."
+        apply_comfy_symlinks "$fallback" || return 1
+    fi
 }
 
 # Initialize logging system
@@ -1447,6 +1493,8 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             echo ""
             echo "🔄 Updating ComfyUI to latest version..."
             
+            # Snapshot live model/custom_node symlinks before pull may restore placeholders.
+            snapshot_comfy_symlinks || true
             # Autostash any local dirt (patches, symlink placeholder deletions, etc.)
             # so pull is not blocked by files like comfy/text_encoders/llama.py.
             if git pull --autostash origin "$current_branch"; then
@@ -1515,9 +1563,8 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             fi
         fi
         
-        # Always re-apply managed model/custom_node symlinks after update attempt
-        # (pull may restore placeholder dirs under models/).
-        apply_comfy_symlinks "$current_dir/comfy_symlinks.txt" || log_error "⚠️ Post-pull symlink apply had issues (continuing)"
+        # Restore symlinks: live snapshot from this run if available, else comfy_symlinks.txt
+        restore_comfy_symlinks_after_update || log_error "⚠️ Post-pull symlink restore had issues (continuing)"
         if [[ -f /notebooks/logs/patch_minimax_flash_decode.py ]]; then
             echo "🔧 Re-applying MiniMax flash decode patch (if needed)..."
             python3 /notebooks/logs/patch_minimax_flash_decode.py >/dev/null 2>&1 || true
@@ -2530,6 +2577,7 @@ else
                 echo "   Remote: $remote_commit"
                 echo ""
                 echo "🔄 Updating ComfyUI (git pull --autostash)..."
+                snapshot_comfy_symlinks || true
                 if git pull --autostash origin "$current_branch"; then
                     echo "✅ ComfyUI successfully updated to latest version!"
                 else
@@ -2537,8 +2585,8 @@ else
                 fi
             fi
 
-            # Re-apply managed symlinks after any update attempt
-            apply_comfy_symlinks "$current_dir/comfy_symlinks.txt" || log_error "⚠️ Post-pull symlink apply had issues (continuing)"
+            # Restore symlinks: live snapshot from this run if available, else comfy_symlinks.txt
+            restore_comfy_symlinks_after_update || log_error "⚠️ Post-pull symlink restore had issues (continuing)"
             if [[ -f /notebooks/logs/patch_minimax_flash_decode.py ]]; then
                 python3 /notebooks/logs/patch_minimax_flash_decode.py >/dev/null 2>&1 || true
             fi
