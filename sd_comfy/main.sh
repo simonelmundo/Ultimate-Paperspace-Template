@@ -2830,18 +2830,113 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   fi
   
   #######################################
-  # STEP 9.1: START OLLAMA (AFTER COMFYUI) - DISABLED
+  # STEP 9.1: START OLLAMA (AFTER COMFYUI)
   #######################################
-  # Ollama install/start commented out (e.g. requires zstd; enable if needed)
-  # echo ""
-  # echo "=================================================="
-  # echo "        STEP 9.1: START OLLAMA (AFTER COMFYUI)"
-  # echo "=================================================="
-  # echo ""
-  # check_cuda_for_ollama() { ... }
-  # check_cuda_for_ollama
-  # if ! command -v ollama &> /dev/null; then curl -fsSL https://ollama.com/install.sh | sh; fi
-  # ollama serve > $LOG_DIR/ollama.log 2>&1 & ...
+  echo ""
+  echo "=================================================="
+  echo "        STEP 9.1: START OLLAMA (AFTER COMFYUI)"
+  echo "=================================================="
+  echo ""
+
+  # Function to check CUDA availability and GPU status
+  check_cuda_for_ollama() {
+    log "Checking CUDA availability for Ollama..."
+
+    local cuda_available=false
+    local cuda_version="unknown"
+    local nvidia_gpu_available=false
+    local gpu_name="unknown"
+
+    if command -v nvcc &>/dev/null; then
+        cuda_available=true
+        cuda_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
+        log "CUDA detected: Version $cuda_version"
+    else
+        log "CUDA not detected (nvcc not found)"
+    fi
+
+    if command -v nvidia-smi &>/dev/null; then
+        local nvidia_smi_output
+        nvidia_smi_output=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "")
+        if [[ -n "$nvidia_smi_output" ]]; then
+            nvidia_gpu_available=true
+            gpu_name="$nvidia_smi_output"
+            log "NVIDIA GPU detected: $gpu_name"
+        fi
+    fi
+
+    if [[ "$cuda_available" == "true" && "$nvidia_gpu_available" == "true" ]]; then
+        log "CUDA and GPU detected - Ollama will use GPU acceleration"
+        return 0
+    elif [[ "$cuda_available" == "true" ]]; then
+        log "CUDA detected but no GPU found - Ollama will use CPU"
+        return 1
+    else
+        log "No CUDA detected - Ollama will run in CPU mode"
+        return 2
+    fi
+  }
+
+  # Check CUDA status
+  check_cuda_for_ollama
+  cuda_status=$?
+
+  # Ollama installer extracts with zstd - ensure it is present first
+  if ! command -v zstd &> /dev/null; then
+    log "Installing zstd (required by Ollama installer)..."
+    apt-get update -qq
+    apt-get install -qq -y zstd || {
+      log_error "Failed to install zstd - Ollama install will likely fail"
+    }
+  else
+    log "zstd already installed: $(zstd --version 2>/dev/null | head -1)"
+  fi
+
+  # Install Ollama if not already installed
+  if ! command -v ollama &> /dev/null; then
+    log "Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh || {
+      log_error "Ollama installation failed, continuing..."
+    }
+  else
+    ollama_version=$(ollama --version 2>/dev/null || echo "unknown")
+    log "Ollama already installed: $ollama_version"
+  fi
+
+  if ! command -v ollama &> /dev/null; then
+    log_error "Ollama binary not found - skipping server start"
+  else
+    # Kill any existing Ollama processes
+    if [[ -f "/tmp/ollama.pid" ]]; then
+      pid=$(cat /tmp/ollama.pid 2>/dev/null)
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        log "Stopping existing Ollama process (PID: $pid)..."
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+      rm -f /tmp/ollama.pid
+    fi
+    pkill -f "ollama serve" 2>/dev/null || true
+
+    # Ensure CUDA environment is available for Ollama
+    setup_cuda_env
+
+    # Start Ollama server on port 7009
+    log "Starting Ollama API server on port 7009..."
+    export OLLAMA_HOST=0.0.0.0:7009
+
+    ollama serve > $LOG_DIR/ollama.log 2>&1 &
+    echo $! > /tmp/ollama.pid
+    sleep 3
+
+    if kill -0 $(cat /tmp/ollama.pid) 2>/dev/null; then
+      log "Ollama API server started (PID: $(cat /tmp/ollama.pid))"
+      log "API endpoint: http://localhost:7009/api/generate"
+    else
+      log_error "Failed to start Ollama server"
+    fi
+  fi
 
   #######################################
   # STEP 9.4: INSTALL LORA EASY TRAINING SCRIPTS
