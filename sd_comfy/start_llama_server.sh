@@ -1,6 +1,19 @@
 #!/bin/bash
-# One-shot: ensure llama-cpp-python in Comfy venv, wait for a GGUF if needed, serve on :7009
+# Manage the llama-cpp-python OpenAI server on :7009.
+#
+#   bash start_llama_server.sh stop     # kill the server, free VRAM, do NOT restart
+#   bash start_llama_server.sh start    # launch the server (loaded lazily)
+#   bash start_llama_server.sh          # default: restart (stop + start)
+#
+# The default "restart" shape is kept because sd_comfy/main.sh and older callers
+# rely on a single invocation meaning "make sure it is running".
 set -euo pipefail
+
+ACTION="${1:-restart}"
+case "$ACTION" in
+  start|stop|restart) ;;
+  *) echo "[llama][ERROR] unknown action '$ACTION' (use start|stop|restart)" >&2; exit 2 ;;
+esac
 
 export LOG_DIR="${LOG_DIR:-/tmp/log}"
 export DATA_DIR="${DATA_DIR:-/tmp}"
@@ -32,24 +45,71 @@ pick_gguf() {
   echo "$gguf"
 }
 
-# Stop legacy / previous servers (do not pkill by script filename)
-pkill -f "ollama serve" 2>/dev/null || true
-if [[ -f /tmp/llama-server.pid ]]; then
-  oldpid=$(cat /tmp/llama-server.pid 2>/dev/null || true)
-  if [[ -n "${oldpid:-}" ]] && kill -0 "$oldpid" 2>/dev/null; then
-    kill -TERM "$oldpid" 2>/dev/null || true
-    sleep 1
-    kill -9 "$oldpid" 2>/dev/null || true
+# Stop any running / legacy LLM server and free port $LLAMA_PORT.
+# Shared by the `stop` and `restart` actions - stop_llm_server must NOT start anything.
+stop_llm_server() {
+  # Stop legacy Ollama
+  pkill -f "ollama serve" 2>/dev/null || true
+  if [[ -f /tmp/ollama.pid ]]; then
+    oldpid=$(cat /tmp/ollama.pid 2>/dev/null || true)
+    if [[ -n "${oldpid:-}" ]] && kill -0 "$oldpid" 2>/dev/null; then
+      kill -TERM "$oldpid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$oldpid" 2>/dev/null || true
+    fi
+    rm -f /tmp/ollama.pid
   fi
-  rm -f /tmp/llama-server.pid
-fi
-ps -eo pid=,args= | awk '/llama_cpp\.server|\/llama-server( |$)/ && $0 !~ /start_llama_server/ {print $1}' | while read -r p; do
-  kill -TERM "$p" 2>/dev/null || true
-done
-sleep 1
-if command -v lsof >/dev/null 2>&1; then
-  pids=$(lsof -ti:"$LLAMA_PORT" 2>/dev/null || true)
-  [[ -n "${pids:-}" ]] && kill -9 $pids 2>/dev/null || true
+
+  # Stop the tracked llama server
+  if [[ -f /tmp/llama-server.pid ]]; then
+    oldpid=$(cat /tmp/llama-server.pid 2>/dev/null || true)
+    if [[ -n "${oldpid:-}" ]] && kill -0 "$oldpid" 2>/dev/null; then
+      kill -TERM "$oldpid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$oldpid" 2>/dev/null || true
+    fi
+    rm -f /tmp/llama-server.pid
+  fi
+
+  # Stop the background "wait for GGUF then start" watcher, otherwise it would
+  # relaunch the server seconds after a `stop`.
+  if [[ -f /tmp/llama-server-waiter.pid ]]; then
+    wpid=$(cat /tmp/llama-server-waiter.pid 2>/dev/null || true)
+    if [[ -n "${wpid:-}" ]] && kill -0 "$wpid" 2>/dev/null; then
+      kill -TERM "$wpid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$wpid" 2>/dev/null || true
+    fi
+    rm -f /tmp/llama-server-waiter.pid
+  fi
+
+  # Catch any untracked llama_cpp.server process
+  ps -eo pid=,args= | awk '/llama_cpp\.server|\/llama-server( |$)/ && $0 !~ /start_llama_server/ {print $1}' | while read -r p; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  sleep 1
+
+  # Last resort: whatever still holds the port
+  if command -v lsof >/dev/null 2>&1; then
+    pids=$(lsof -ti:"$LLAMA_PORT" 2>/dev/null || true)
+    [[ -n "${pids:-}" ]] && kill -9 $pids 2>/dev/null || true
+  fi
+}
+
+stop_llm_server
+
+# `stop` is terminal: VRAM is freed and we must not fall through to the start path.
+if [[ "$ACTION" == "stop" ]]; then
+  rm -f /tmp/llama-server.pid /tmp/llama-server-waiter.pid
+  # Mark that a stop was requested so the sd_comfy main.sh GGUF watcher does not
+  # silently relaunch the server on the next boot of the stack.
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -ti:"$LLAMA_PORT" >/dev/null 2>&1; then
+      die "port $LLAMA_PORT still in use after stop"
+    fi
+  fi
+  log "stopped - port $LLAMA_PORT free, VRAM released"
+  exit 0
 fi
 
 [[ -x "$COMFY_PY" ]] || die "Comfy venv python missing: $COMFY_PY"
