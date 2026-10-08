@@ -2886,17 +2886,29 @@ if [[ -z "$INSTALL_ONLY" ]]; then
       log_error "Comfy venv python missing: $py"
       return 1
     fi
+    setup_cuda_env
+    local has_pkg=0 has_cuda=0
     if "$py" -c "import llama_cpp, llama_cpp.server" 2>/dev/null; then
-      log "llama-cpp-python already installed in Comfy venv"
+      has_pkg=1
+      if "$py" -c "from llama_cpp.llama_cpp import llama_supports_gpu_offload; import sys; sys.exit(0 if llama_supports_gpu_offload() else 1)" 2>/dev/null; then
+        has_cuda=1
+      fi
+    fi
+    if [[ "$has_pkg" == "1" && "$has_cuda" == "1" ]]; then
+      log "llama-cpp-python already installed with GPU offload"
       return 0
     fi
-    log "Installing llama-cpp-python[server] into Comfy venv (CUDA build)..."
-    setup_cuda_env
-    # Reuse the same CUDA stack as Comfy Torch - no separate toolkit/cublas-dev needed at runtime
-    if ! "$py" -m pip install --no-cache-dir "llama-cpp-python[server]" \
+    if [[ "$has_pkg" == "1" && "$has_cuda" != "1" ]]; then
+      log "llama-cpp-python is CPU-only - reinstalling with CUDA (fixes 504s from slow CPU inference)"
+      "$py" -m pip uninstall -y llama-cpp-python llama-cpp-python-cuda 2>/dev/null || true
+    else
+      log "Installing llama-cpp-python[server] into Comfy venv (CUDA)..."
+    fi
+    # Prefer CUDA wheel; fall back to source build against Comfy's CUDA stack
+    if ! "$py" -m pip install --no-cache-dir --force-reinstall "llama-cpp-python[server]" \
         --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124; then
       CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 \
-        "$py" -m pip install --no-cache-dir "llama-cpp-python[server]" || {
+        "$py" -m pip install --no-cache-dir --force-reinstall --no-binary=llama-cpp-python "llama-cpp-python[server]" || {
           log_error "llama-cpp-python install failed"
           return 1
         }
@@ -2905,7 +2917,12 @@ if [[ -z "$INSTALL_ONLY" ]]; then
       log_error "llama-cpp-python import failed after install"
       return 1
     }
-    log "llama-cpp-python ready"
+    if "$py" -c "from llama_cpp.llama_cpp import llama_supports_gpu_offload; import sys; sys.exit(0 if llama_supports_gpu_offload() else 1)" 2>/dev/null; then
+      log "llama-cpp-python ready (GPU offload OK)"
+    else
+      log_error "llama-cpp-python GPU offload is False - running CPU-only (slow; raise nginx proxy_read_timeout or fix CUDA wheel)"
+    fi
+    return 0
   }
 
   start_llama_cpp_server() {
