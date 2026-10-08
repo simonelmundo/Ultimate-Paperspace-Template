@@ -2830,111 +2830,145 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   fi
   
   #######################################
-  # STEP 9.1: START OLLAMA (AFTER COMFYUI)
+  # STEP 9.1: START LLAMA.CPP API (AFTER COMFYUI)
+  # Uses Comfy venv + llama-cpp-python OpenAI server.
+  # Serves GGUFs from llm_checkpoints on :7009 (nginx /textgen -> /v1)
   #######################################
   echo ""
   echo "=================================================="
-  echo "        STEP 9.1: START OLLAMA (AFTER COMFYUI)"
+  echo "   STEP 9.1: START LLAMA.CPP (llama-cpp-python)"
   echo "=================================================="
   echo ""
 
-  # Function to check CUDA availability and GPU status
-  check_cuda_for_ollama() {
-    log "Checking CUDA availability for Ollama..."
+  LLAMA_PORT="${LLAMA_PORT:-7009}"
+  LLAMA_CTX="${LLAMA_CTX:-4096}"
+  LLAMA_NGL="${LLAMA_NGL:-99}"
+  LLAMA_CKPT_DIR="${LLAMA_CKPT_DIR:-${MODEL_DIR:-$DATA_DIR/stable-diffusion-models}/llm_checkpoints}"
+  COMFY_PY="${VENV_DIR:-/tmp}/sd_comfy-env/bin/python"
+  mkdir -p "$LOG_DIR" "$LLAMA_CKPT_DIR"
 
-    local cuda_available=false
-    local cuda_version="unknown"
-    local nvidia_gpu_available=false
-    local gpu_name="unknown"
-
-    if command -v nvcc &>/dev/null; then
-        cuda_available=true
-        cuda_version=$(nvcc --version 2>&1 | grep 'release' | awk '{print $6}' | sed 's/^V//' || echo "unknown")
-        log "CUDA detected: Version $cuda_version"
-    else
-        log "CUDA not detected (nvcc not found)"
+  pick_llama_gguf() {
+    if [[ -n "${LLAMA_GGUF:-}" && -f "$LLAMA_GGUF" ]]; then
+      echo "$LLAMA_GGUF"
+      return 0
     fi
-
-    if command -v nvidia-smi &>/dev/null; then
-        local nvidia_smi_output
-        nvidia_smi_output=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "")
-        if [[ -n "$nvidia_smi_output" ]]; then
-            nvidia_gpu_available=true
-            gpu_name="$nvidia_smi_output"
-            log "NVIDIA GPU detected: $gpu_name"
-        fi
+    [[ -d "$LLAMA_CKPT_DIR" ]] || return 1
+    local gguf
+    gguf=$(find "$LLAMA_CKPT_DIR" -maxdepth 1 -type f -name '*.gguf' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+    if [[ -z "$gguf" ]]; then
+      gguf=$(ls -1t "$LLAMA_CKPT_DIR"/*.gguf 2>/dev/null | head -1)
     fi
+    [[ -n "$gguf" && -f "$gguf" ]] || return 1
+    echo "$gguf"
+  }
 
-    if [[ "$cuda_available" == "true" && "$nvidia_gpu_available" == "true" ]]; then
-        log "CUDA and GPU detected - Ollama will use GPU acceleration"
-        return 0
-    elif [[ "$cuda_available" == "true" ]]; then
-        log "CUDA detected but no GPU found - Ollama will use CPU"
-        return 1
-    else
-        log "No CUDA detected - Ollama will run in CPU mode"
-        return 2
+  stop_port_listeners() {
+    local port="$1"
+    local pids
+    pids=$(lsof -ti:"$port" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+      log "Stopping processes on port $port: $pids"
+      kill -TERM $pids 2>/dev/null || true
+      sleep 1
+      kill -9 $pids 2>/dev/null || true
     fi
   }
 
-  # Check CUDA status
-  check_cuda_for_ollama
-  cuda_status=$?
-
-  # Ollama installer extracts with zstd - ensure it is present first
-  if ! command -v zstd &> /dev/null; then
-    log "Installing zstd (required by Ollama installer)..."
-    apt-get update -qq
-    apt-get install -qq -y zstd || {
-      log_error "Failed to install zstd - Ollama install will likely fail"
-    }
-  else
-    log "zstd already installed: $(zstd --version 2>/dev/null | head -1)"
-  fi
-
-  # Install Ollama if not already installed
-  if ! command -v ollama &> /dev/null; then
-    log "Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh || {
-      log_error "Ollama installation failed, continuing..."
-    }
-  else
-    ollama_version=$(ollama --version 2>/dev/null || echo "unknown")
-    log "Ollama already installed: $ollama_version"
-  fi
-
-  if ! command -v ollama &> /dev/null; then
-    log_error "Ollama binary not found - skipping server start"
-  else
-    # Kill any existing Ollama processes
-    if [[ -f "/tmp/ollama.pid" ]]; then
-      pid=$(cat /tmp/ollama.pid 2>/dev/null)
-      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        log "Stopping existing Ollama process (PID: $pid)..."
-        kill -TERM "$pid" 2>/dev/null || true
-        sleep 1
-        kill -9 "$pid" 2>/dev/null || true
-      fi
-      rm -f /tmp/ollama.pid
+  ensure_llama_cpp_python() {
+    local py="$1"
+    if ! [[ -x "$py" ]]; then
+      log_error "Comfy venv python missing: $py"
+      return 1
     fi
-    pkill -f "ollama serve" 2>/dev/null || true
-
-    # Ensure CUDA environment is available for Ollama
+    if "$py" -c "import llama_cpp, llama_cpp.server" 2>/dev/null; then
+      log "llama-cpp-python already installed in Comfy venv"
+      return 0
+    fi
+    log "Installing llama-cpp-python[server] into Comfy venv (CUDA build)..."
     setup_cuda_env
+    # Reuse the same CUDA stack as Comfy Torch - no separate toolkit/cublas-dev needed at runtime
+    CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 \
+      "$py" -m pip install --no-cache-dir "llama-cpp-python[server]" || {
+        log_error "llama-cpp-python install failed"
+        return 1
+      }
+    "$py" -c "import llama_cpp, llama_cpp.server" || {
+      log_error "llama-cpp-python import failed after install"
+      return 1
+    }
+    log "llama-cpp-python ready"
+  }
 
-    # Start Ollama server on port 7009
-    log "Starting Ollama API server on port 7009..."
-    export OLLAMA_HOST=0.0.0.0:7009
+  # Free port 7009 from legacy Ollama / previous LLM servers
+  if [[ -f "/tmp/ollama.pid" ]]; then
+    pid=$(cat /tmp/ollama.pid 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      log "Stopping legacy Ollama (PID: $pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f /tmp/ollama.pid
+  fi
+  pkill -f "ollama serve" 2>/dev/null || true
+  if [[ -f "/tmp/llama-server.pid" ]]; then
+    pid=$(cat /tmp/llama-server.pid 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      log "Stopping previous LLM server (PID: $pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f /tmp/llama-server.pid
+  fi
+  # Match real servers only (not helper script filenames)
+  ps -eo pid=,args= | awk '/llama_cpp\.server|\/llama-server( |$)/ && $0 !~ /start_llama_server/ {print $1}' | while read -r p; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  sleep 1
+  stop_port_listeners "$LLAMA_PORT"
 
-    ollama serve > $LOG_DIR/ollama.log 2>&1 &
-    echo $! > /tmp/ollama.pid
-    sleep 3
+  setup_cuda_env
 
-    if kill -0 $(cat /tmp/ollama.pid) 2>/dev/null; then
-      log "Ollama API server started (PID: $(cat /tmp/ollama.pid))"
-      log "API endpoint: http://localhost:7009/api/generate"
+  LLAMA_GGUF_PATH=$(pick_llama_gguf) || LLAMA_GGUF_PATH=""
+
+  if [[ ! -x "$COMFY_PY" ]]; then
+    log_error "Comfy venv not found at $COMFY_PY - skipping LLM API start"
+  elif [[ -z "$LLAMA_GGUF_PATH" ]]; then
+    log_error "No .gguf in $LLAMA_CKPT_DIR (or LLAMA_GGUF). Skipping LLM API start."
+  elif ! ensure_llama_cpp_python "$COMFY_PY"; then
+    log_error "Could not prepare llama-cpp-python - skipping LLM API start"
+  else
+    LLAMA_ALIAS=$(basename "$LLAMA_GGUF_PATH")
+    LLAMA_ALIAS="${LLAMA_ALIAS%.gguf}"
+
+    log "Starting llama-cpp-python OpenAI server"
+    log "  python : $COMFY_PY"
+    log "  model  : $LLAMA_GGUF_PATH"
+    log "  alias  : $LLAMA_ALIAS"
+    log "  listen : 0.0.0.0:$LLAMA_PORT (nginx /textgen -> /v1)"
+    log "  ctx/ngl: $LLAMA_CTX / $LLAMA_NGL"
+    log "  WARN   : large GGUFs share the GPU with ComfyUI - lower LLAMA_CTX/LLAMA_NGL if you OOM"
+
+    # OpenAI-compatible: /v1/models , /v1/chat/completions
+    nohup "$COMFY_PY" -m llama_cpp.server \
+      --model "$LLAMA_GGUF_PATH" \
+      --model_alias "$LLAMA_ALIAS" \
+      --host 0.0.0.0 \
+      --port "$LLAMA_PORT" \
+      --n_ctx "$LLAMA_CTX" \
+      --n_gpu_layers "$LLAMA_NGL" \
+      > "$LOG_DIR/llama-server.log" 2>&1 &
+    echo $! > /tmp/llama-server.pid
+    sleep 5
+
+    if kill -0 "$(cat /tmp/llama-server.pid)" 2>/dev/null; then
+      log "LLM API started (PID: $(cat /tmp/llama-server.pid))"
+      log "Local API : http://127.0.0.1:${LLAMA_PORT}/v1/models"
+      log "Proxy API : https://<notebook>/textgen/v1/chat/completions"
     else
-      log_error "Failed to start Ollama server"
+      log_error "LLM API failed to stay up - see $LOG_DIR/llama-server.log"
+      tail -n 60 "$LOG_DIR/llama-server.log" 2>/dev/null || true
     fi
   fi
 
