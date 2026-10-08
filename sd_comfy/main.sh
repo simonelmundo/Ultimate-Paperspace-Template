@@ -2843,6 +2843,8 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   LLAMA_PORT="${LLAMA_PORT:-7009}"
   LLAMA_CTX="${LLAMA_CTX:-4096}"
   LLAMA_NGL="${LLAMA_NGL:-99}"
+  # How long the background waiter polls for a .gguf (downloads can finish after Comfy boots)
+  LLAMA_GGUF_WAIT_SEC="${LLAMA_GGUF_WAIT_SEC:-7200}"
   LLAMA_CKPT_DIR="${LLAMA_CKPT_DIR:-${MODEL_DIR:-$DATA_DIR/stable-diffusion-models}/llm_checkpoints}"
   COMFY_PY="${VENV_DIR:-/tmp}/sd_comfy-env/bin/python"
   mkdir -p "$LOG_DIR" "$LLAMA_CKPT_DIR"
@@ -2859,6 +2861,10 @@ if [[ -z "$INSTALL_ONLY" ]]; then
       gguf=$(ls -1t "$LLAMA_CKPT_DIR"/*.gguf 2>/dev/null | head -1)
     fi
     [[ -n "$gguf" && -f "$gguf" ]] || return 1
+    # Ignore tiny/partial downloads (< 1 MiB)
+    local sz
+    sz=$(stat -c%s "$gguf" 2>/dev/null || echo 0)
+    [[ "$sz" -ge 1048576 ]] || return 1
     echo "$gguf"
   }
 
@@ -2887,16 +2893,55 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     log "Installing llama-cpp-python[server] into Comfy venv (CUDA build)..."
     setup_cuda_env
     # Reuse the same CUDA stack as Comfy Torch - no separate toolkit/cublas-dev needed at runtime
-    CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 \
-      "$py" -m pip install --no-cache-dir "llama-cpp-python[server]" || {
-        log_error "llama-cpp-python install failed"
-        return 1
-      }
+    if ! "$py" -m pip install --no-cache-dir "llama-cpp-python[server]" \
+        --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124; then
+      CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 \
+        "$py" -m pip install --no-cache-dir "llama-cpp-python[server]" || {
+          log_error "llama-cpp-python install failed"
+          return 1
+        }
+    fi
     "$py" -c "import llama_cpp, llama_cpp.server" || {
       log_error "llama-cpp-python import failed after install"
       return 1
     }
     log "llama-cpp-python ready"
+  }
+
+  start_llama_cpp_server() {
+    local gguf_path="$1"
+    local alias_name
+    alias_name=$(basename "$gguf_path")
+    alias_name="${alias_name%.gguf}"
+
+    log "Starting llama-cpp-python OpenAI server"
+    log "  python : $COMFY_PY"
+    log "  model  : $gguf_path"
+    log "  alias  : $alias_name"
+    log "  listen : 0.0.0.0:$LLAMA_PORT (nginx /textgen -> /v1)"
+    log "  ctx/ngl: $LLAMA_CTX / $LLAMA_NGL"
+    log "  WARN   : large GGUFs share the GPU with ComfyUI - lower LLAMA_CTX/LLAMA_NGL if you OOM"
+
+    nohup "$COMFY_PY" -m llama_cpp.server \
+      --model "$gguf_path" \
+      --model_alias "$alias_name" \
+      --host 0.0.0.0 \
+      --port "$LLAMA_PORT" \
+      --n_ctx "$LLAMA_CTX" \
+      --n_gpu_layers "$LLAMA_NGL" \
+      > "$LOG_DIR/llama-server.log" 2>&1 &
+    echo $! > /tmp/llama-server.pid
+    sleep 5
+
+    if kill -0 "$(cat /tmp/llama-server.pid)" 2>/dev/null; then
+      log "LLM API started (PID: $(cat /tmp/llama-server.pid))"
+      log "Local API : http://127.0.0.1:${LLAMA_PORT}/v1/models"
+      log "Proxy API : https://<notebook>/textgen/v1/chat/completions"
+      return 0
+    fi
+    log_error "LLM API failed to stay up - see $LOG_DIR/llama-server.log"
+    tail -n 60 "$LOG_DIR/llama-server.log" 2>/dev/null || true
+    return 1
   }
 
   # Free port 7009 from legacy Ollama / previous LLM servers
@@ -2921,6 +2966,13 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     fi
     rm -f /tmp/llama-server.pid
   fi
+  if [[ -f "/tmp/llama-server-waiter.pid" ]]; then
+    wpid=$(cat /tmp/llama-server-waiter.pid 2>/dev/null)
+    if [[ -n "$wpid" ]] && kill -0 "$wpid" 2>/dev/null; then
+      kill -TERM "$wpid" 2>/dev/null || true
+    fi
+    rm -f /tmp/llama-server-waiter.pid
+  fi
   # Match real servers only (not helper script filenames)
   ps -eo pid=,args= | awk '/llama_cpp\.server|\/llama-server( |$)/ && $0 !~ /start_llama_server/ {print $1}' | while read -r p; do
     kill -TERM "$p" 2>/dev/null || true
@@ -2930,46 +2982,46 @@ if [[ -z "$INSTALL_ONLY" ]]; then
 
   setup_cuda_env
 
-  LLAMA_GGUF_PATH=$(pick_llama_gguf) || LLAMA_GGUF_PATH=""
-
   if [[ ! -x "$COMFY_PY" ]]; then
-    log_error "Comfy venv not found at $COMFY_PY - skipping LLM API start"
-  elif [[ -z "$LLAMA_GGUF_PATH" ]]; then
-    log_error "No .gguf in $LLAMA_CKPT_DIR (or LLAMA_GGUF). Skipping LLM API start."
+    log_error "Comfy venv not found at $COMFY_PY - cannot start LLM API"
   elif ! ensure_llama_cpp_python "$COMFY_PY"; then
-    log_error "Could not prepare llama-cpp-python - skipping LLM API start"
+    log_error "Could not prepare llama-cpp-python - cannot start LLM API"
   else
-    LLAMA_ALIAS=$(basename "$LLAMA_GGUF_PATH")
-    LLAMA_ALIAS="${LLAMA_ALIAS%.gguf}"
-
-    log "Starting llama-cpp-python OpenAI server"
-    log "  python : $COMFY_PY"
-    log "  model  : $LLAMA_GGUF_PATH"
-    log "  alias  : $LLAMA_ALIAS"
-    log "  listen : 0.0.0.0:$LLAMA_PORT (nginx /textgen -> /v1)"
-    log "  ctx/ngl: $LLAMA_CTX / $LLAMA_NGL"
-    log "  WARN   : large GGUFs share the GPU with ComfyUI - lower LLAMA_CTX/LLAMA_NGL if you OOM"
-
-    # OpenAI-compatible: /v1/models , /v1/chat/completions
-    nohup "$COMFY_PY" -m llama_cpp.server \
-      --model "$LLAMA_GGUF_PATH" \
-      --model_alias "$LLAMA_ALIAS" \
-      --host 0.0.0.0 \
-      --port "$LLAMA_PORT" \
-      --n_ctx "$LLAMA_CTX" \
-      --n_gpu_layers "$LLAMA_NGL" \
-      > "$LOG_DIR/llama-server.log" 2>&1 &
-    echo $! > /tmp/llama-server.pid
-    sleep 5
-
-    if kill -0 "$(cat /tmp/llama-server.pid)" 2>/dev/null; then
-      log "LLM API started (PID: $(cat /tmp/llama-server.pid))"
-      log "Local API : http://127.0.0.1:${LLAMA_PORT}/v1/models"
-      log "Proxy API : https://<notebook>/textgen/v1/chat/completions"
-    else
-      log_error "LLM API failed to stay up - see $LOG_DIR/llama-server.log"
-      tail -n 60 "$LOG_DIR/llama-server.log" 2>/dev/null || true
-    fi
+    # Do NOT skip when the folder is empty: GGUFs often finish downloading after Comfy boots.
+    # Wait in the background so the rest of main.sh continues, then start as soon as a .gguf appears.
+    (
+      set +e
+      waited=0
+      while true; do
+        gguf_path=$(pick_llama_gguf) || gguf_path=""
+        if [[ -n "$gguf_path" ]]; then
+          # Stable size check: avoid starting on a half-written download
+          s1=$(stat -c%s "$gguf_path" 2>/dev/null || echo 0)
+          sleep 3
+          s2=$(stat -c%s "$gguf_path" 2>/dev/null || echo 0)
+          if [[ "$s1" == "$s2" && "$s1" -ge 1048576 ]]; then
+            log "GGUF ready after ${waited}s: $gguf_path"
+            start_llama_cpp_server "$gguf_path"
+            exit $?
+          fi
+          log "GGUF still growing ($s1 -> $s2 bytes), waiting..."
+        else
+          if (( waited == 0 )); then
+            log "No .gguf yet in $LLAMA_CKPT_DIR - waiting up to ${LLAMA_GGUF_WAIT_SEC}s (will auto-start when it appears)"
+          elif (( waited % 60 == 0 )); then
+            log "Still waiting for .gguf in $LLAMA_CKPT_DIR (${waited}s / ${LLAMA_GGUF_WAIT_SEC}s)..."
+          fi
+        fi
+        if (( waited >= LLAMA_GGUF_WAIT_SEC )); then
+          log_error "Timed out after ${LLAMA_GGUF_WAIT_SEC}s waiting for a .gguf in $LLAMA_CKPT_DIR"
+          exit 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+      done
+    ) >> "$LOG_DIR/llama-server.log" 2>&1 &
+    echo $! > /tmp/llama-server-waiter.pid
+    log "LLM starter launched in background (PID: $(cat /tmp/llama-server-waiter.pid)) - will bind :$LLAMA_PORT when a GGUF is ready"
   fi
 
   #######################################
