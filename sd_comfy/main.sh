@@ -2880,6 +2880,57 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     fi
   }
 
+  # True if llama_cpp reports CUDA GPU offload support.
+  llama_cpp_has_gpu_offload() {
+    local py="$1"
+    "$py" -c "from llama_cpp.llama_cpp import llama_supports_gpu_offload; import sys; sys.exit(0 if llama_supports_gpu_offload() else 1)" 2>/dev/null
+  }
+
+  # Point CMAKE at a real toolkit (12.8 may be missing on fresh Free-A4000 images).
+  resolve_llama_cuda_home() {
+    if [[ -n "${CUDA_HOME:-}" && -x "${CUDA_HOME}/bin/nvcc" ]]; then
+      echo "$CUDA_HOME"
+      return 0
+    fi
+    local cand
+    for cand in /usr/local/cuda-12.8 /usr/local/cuda-12.4 /usr/local/cuda-12.1 /usr/local/cuda-11.8 /usr/local/cuda-11.6 /usr/local/cuda; do
+      if [[ -x "$cand/bin/nvcc" ]]; then
+        echo "$cand"
+        return 0
+      fi
+    done
+    if command -v nvcc >/dev/null 2>&1; then
+      dirname "$(dirname "$(command -v nvcc)")"
+      return 0
+    fi
+    return 1
+  }
+
+  # Build llama-cpp-python from source with GGML_CUDA (pip "CUDA wheels" often still ship CPU).
+  install_llama_cpp_python_cuda_source() {
+    local py="$1"
+    local cuda_home
+    cuda_home=$(resolve_llama_cuda_home) || {
+      log_error "No nvcc/CUDA toolkit found - cannot build llama-cpp-python with GPU"
+      return 1
+    }
+    export CUDA_HOME="$cuda_home"
+    export PATH="$CUDA_HOME/bin:$PATH"
+    export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+    export FORCE_CMAKE=1
+    # A4000 = sm_86; CMAKE_ARGS must include GGML_CUDA or the build is CPU-only
+    export CMAKE_ARGS="${CMAKE_ARGS:--DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86}"
+    log "Building llama-cpp-python from source with CUDA (CUDA_HOME=$CUDA_HOME)"
+    "$py" -m pip uninstall -y llama-cpp-python llama-cpp-python-cuda 2>/dev/null || true
+    "$py" -m pip install --upgrade pip setuptools wheel cmake ninja scikit-build-core >/dev/null 2>&1 || true
+    CMAKE_ARGS="$CMAKE_ARGS" FORCE_CMAKE=1 \
+      "$py" -m pip install --no-cache-dir --force-reinstall --no-binary=llama-cpp-python \
+      "llama-cpp-python[server]" || {
+        log_error "llama-cpp-python CUDA source build failed"
+        return 1
+      }
+  }
+
   ensure_llama_cpp_python() {
     local py="$1"
     if ! [[ -x "$py" ]]; then
@@ -2887,42 +2938,50 @@ if [[ -z "$INSTALL_ONLY" ]]; then
       return 1
     fi
     setup_cuda_env
-    local has_pkg=0 has_cuda=0
-    if "$py" -c "import llama_cpp, llama_cpp.server" 2>/dev/null; then
-      has_pkg=1
-      if "$py" -c "from llama_cpp.llama_cpp import llama_supports_gpu_offload; import sys; sys.exit(0 if llama_supports_gpu_offload() else 1)" 2>/dev/null; then
-        has_cuda=1
-      fi
-    fi
-    if [[ "$has_pkg" == "1" && "$has_cuda" == "1" ]]; then
+
+    # Already good - skip install
+    if "$py" -c "import llama_cpp, llama_cpp.server" 2>/dev/null \
+        && llama_cpp_has_gpu_offload "$py"; then
       log "llama-cpp-python already installed with GPU offload"
       return 0
     fi
-    if [[ "$has_pkg" == "1" && "$has_cuda" != "1" ]]; then
-      log "llama-cpp-python is CPU-only - reinstalling with CUDA (fixes 504s from slow CPU inference)"
+
+    # Optional fast path: prebuilt cu124 wheel ONLY (--only-binary). Without that flag,
+    # pip downloads the sdist and silently compiles a CPU build when no wheel matches.
+    # Pip exit code / "success" is also not enough: a wheel can still be CPU-only.
+    if [[ "${LLAMA_FORCE_CUDA_SOURCE:-0}" != "1" ]]; then
+      log "Trying llama-cpp-python prebuilt CUDA wheel (cu124, binary-only)..."
       "$py" -m pip uninstall -y llama-cpp-python llama-cpp-python-cuda 2>/dev/null || true
+      if "$py" -m pip install --no-cache-dir --force-reinstall --only-binary=:all: \
+          "llama-cpp-python[server]" \
+          --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124; then
+        if "$py" -c "import llama_cpp, llama_cpp.server" 2>/dev/null \
+            && llama_cpp_has_gpu_offload "$py"; then
+          log "llama-cpp-python ready (GPU offload OK via wheel)"
+          return 0
+        fi
+        log "Wheel installed but gpu_offload False - forcing CUDA source build"
+        "$py" -m pip uninstall -y llama-cpp-python llama-cpp-python-cuda 2>/dev/null || true
+      else
+        log "No matching prebuilt CUDA wheel - forcing CUDA source build"
+      fi
     else
-      log "Installing llama-cpp-python[server] into Comfy venv (CUDA)..."
+      log "LLAMA_FORCE_CUDA_SOURCE=1 - skipping wheel, building from source"
     fi
-    # Prefer CUDA wheel; fall back to source build against Comfy's CUDA stack
-    if ! "$py" -m pip install --no-cache-dir --force-reinstall "llama-cpp-python[server]" \
-        --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124; then
-      CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 \
-        "$py" -m pip install --no-cache-dir --force-reinstall --no-binary=llama-cpp-python "llama-cpp-python[server]" || {
-          log_error "llama-cpp-python install failed"
-          return 1
-        }
-    fi
+
+    install_llama_cpp_python_cuda_source "$py" || return 1
+
     "$py" -c "import llama_cpp, llama_cpp.server" || {
-      log_error "llama-cpp-python import failed after install"
+      log_error "llama-cpp-python import failed after CUDA source build"
       return 1
     }
-    if "$py" -c "from llama_cpp.llama_cpp import llama_supports_gpu_offload; import sys; sys.exit(0 if llama_supports_gpu_offload() else 1)" 2>/dev/null; then
-      log "llama-cpp-python ready (GPU offload OK)"
-    else
-      log_error "llama-cpp-python GPU offload is False - running CPU-only (slow; raise nginx proxy_read_timeout or fix CUDA wheel)"
+    if llama_cpp_has_gpu_offload "$py"; then
+      log "llama-cpp-python ready (GPU offload OK via source build)"
+      return 0
     fi
-    return 0
+    # Do NOT start a CPU server - that causes nginx 504s on large GGUFs
+    log_error "llama-cpp-python GPU offload still False after source build - refusing CPU-only LLM"
+    return 1
   }
 
   start_llama_cpp_server() {
