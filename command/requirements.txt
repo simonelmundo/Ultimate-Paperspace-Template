@@ -1,5 +1,10 @@
 requests==2.31.0
-fastapi==0.103.2
+# fastapi 0.103.2 crashes on import with Python 3.10.13 + pydantic 2.x:
+#   AssertionError: Param: task_ids can only be a request body, using Body()
+# (https://github.com/tiangolo/fastapi/issues/...) raised for
+# `task_ids: Annotated[list[int], Body()]` in server/main.py. 0.143.0 is verified
+# working, so keep this pinned rather than floating.
+fastapi==0.143.0
 gradio_client==0.6.0
 peewee==3.16.3
 psutil==5.9.5

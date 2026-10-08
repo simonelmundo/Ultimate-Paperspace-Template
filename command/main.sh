@@ -11,7 +11,15 @@ trap 'error_exit "### ERROR ###"' ERR
 
 echo "### Setting up Command Server ###"
 log "Setting up Command Server"
-if [[ "$REINSTALL_COMMAND" || ! -f "/tmp/command.prepared" ]]; then
+# Rebuild when the sentinel is missing OR the venv is broken. The venv lives in
+# $VENV_DIR (/tmp on Paperspace), so a partial/cleared /tmp can leave the sentinel
+# gone but the env present, or vice-versa - both must be checked or the server
+# enters a uvicorn/fastapi ModuleNotFoundError restart loop.
+command_env_healthy() {
+    [ -x "$VENV_DIR/command-env/bin/python" ] && \
+    "$VENV_DIR/command-env/bin/python" -c 'import uvicorn, fastapi' >/dev/null 2>&1
+}
+if [[ "$REINSTALL_COMMAND" || ! -f "/tmp/command.prepared" || ! command_env_healthy ]]; then
 
     
     rm -rf $VENV_DIR/command-env
@@ -25,6 +33,9 @@ if [[ "$REINSTALL_COMMAND" || ! -f "/tmp/command.prepared" ]]; then
     pip install --upgrade wheel setuptools
     
     pip install -r requirements.txt
+
+    # Fail fast rather than starting a server that cannot import its deps.
+    python -c 'import uvicorn, fastapi' || error_exit "Command Server deps failed to install (uvicorn/fastapi)"
     
     touch /tmp/command.prepared
 else

@@ -1,0 +1,6 @@
+* text=auto
+
+# Shell scripts run inside the Linux container - force LF in both the repo and
+# the working tree so CRLF never lands on a shebang line (which breaks with
+# "syntax error near unexpected token `$'{\r''").
+*.sh text eol=lf
