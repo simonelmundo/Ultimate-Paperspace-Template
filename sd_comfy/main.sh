@@ -606,9 +606,12 @@ readonly DIFFUSERS_PIN="==0.37.1"
 readonly TRANSFORMERS_PIN=">=4.54.0,<4.55.0"
 # diffusers>=0.37 may pull huggingface-hub 1.x; Comfy/transformers require hub <1.0 — re-pin after diffusers.
 readonly HF_HUB_TRANSFORMERS_PIN=">=0.34.0,<1.0"
-# OpenCV 4.13+ requires numpy>=2 (breaks accelerate/scipy/mediapipe in this venv); stay on 4.11 for cv2.ximgproc + numpy 1.x.
+# OpenCV 4.13+ breaks cv2.ximgproc, so stay on 4.11 (works with numpy 2).
 readonly OPENCV_CONTRIB_PIN="==4.11.0.86"
-readonly NUMPY_COMFY_PIN=">=1.26.4,<2.0.0"
+# Do NOT pin numpy<2: ml-dtypes 0.6 already requires numpy>=2, so any later pip
+# resolve (ComfyUI-Manager / node auto-install) swaps numpy under the running
+# interpreter and breaks accelerate with a bogus "circular import dispatch_model".
+readonly NUMPY_COMFY_PIN=">=2.0.0,<2.3"
 readonly ACCELERATE_PIN=">=1.9.0"
 # PyTorch 2.8 ships Triton 3.4 without triton.ops; older bitsandbytes breaks diffusers quantizer imports.
 readonly BITSANDBYTES_TRITON3_PIN=">=0.45.1"
@@ -831,6 +834,11 @@ try:
     import comfy_env  # noqa: F401
 except Exception:
     sys.exit(17)
+try:
+    import numpy  # noqa: F401
+    from accelerate import Accelerator  # noqa: F401 — validate the full accelerate import chain
+except Exception:
+    sys.exit(23)
 try:
     from importlib.metadata import version as pkg_version
     _hub = pkg_version("huggingface-hub")
@@ -2772,8 +2780,8 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   fi
   
   
-  # Stay on 1.25.10 for drag/drop; bump COMFY_FRONTEND_VERSION (e.g. 1.45.7/1.53.6) if node-widget issues arise.
-  COMFY_FRONTEND_VERSION="${COMFY_FRONTEND_VERSION:-1.25.10}"
+  # Latest stable frontend (1.59.0, 2026-10-19); override COMFY_FRONTEND_VERSION if node-widget issues arise.
+  COMFY_FRONTEND_VERSION="${COMFY_FRONTEND_VERSION:-1.59.0}"
   FRONTEND_FLAG="--front-end-version Comfy-Org/ComfyUI_frontend@${COMFY_FRONTEND_VERSION}"
   echo "📦 Using frontend version: ${COMFY_FRONTEND_VERSION}"
   
