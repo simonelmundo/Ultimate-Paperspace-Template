@@ -1,0 +1,4 @@
+requests>=2.31.0
+mcp>=1.6.0,<2
+pydantic>=2.7,<3
+websocket-client>=1.8.0

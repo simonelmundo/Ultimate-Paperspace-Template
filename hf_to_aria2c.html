@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HF → aria2c</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4d;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d8bfd;
+      --ok: #3dd68c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font: 14px/1.45 system-ui, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 6px; font-weight: 650; }
+    p { margin: 0 0 16px; color: var(--muted); }
+    .map {
+      display: flex; flex-wrap: wrap; gap: 8px;
+      margin-bottom: 16px; font-size: 12px; color: var(--muted);
+    }
+    .map span {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+    }
+    .map b { color: var(--ok); font-weight: 600; }
+    label.field { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
+    textarea, pre {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 12px;
+      font: 12px/1.5 ui-monospace, Consolas, monospace;
+    }
+    textarea { min-height: 180px; resize: vertical; margin-bottom: 12px; }
+    pre {
+      min-height: 140px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin: 0;
+    }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+    }
+    button.secondary { background: #2d3a4d; color: var(--text); }
+    .meta { margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+    #models {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 8px;
+      margin-bottom: 16px;
+      max-height: 280px;
+      overflow: auto;
+    }
+    #models:empty::before {
+      content: "Model checkboxes appear here after paste";
+      color: var(--muted);
+      font-size: 12px;
+      padding: 4px;
+    }
+    .model-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .model-item:hover { background: #243044; }
+    .model-item input { margin-top: 3px; accent-color: var(--accent); cursor: pointer; }
+    .model-item .name {
+      font: 12px/1.4 ui-monospace, Consolas, monospace;
+      color: var(--text);
+      word-break: break-all;
+    }
+    .model-item .dest {
+      display: block;
+      margin-top: 2px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .model-item .size { font-size: 11px; color: var(--ok); }
+    .model-item.unchecked .name { color: var(--muted); text-decoration: line-through; }
+  </style>
+</head>
+<body>
+  <h1>Hugging Face → aria2c</h1>
+  <p>Paste ComfyUI “Model Links” markdown. Commands and model checkboxes update automatically.</p>
+
+  <div class="map">
+    <span>text_encoders / loras → <b>lora</b></span>
+    <span>diffusion_models → <b>sd</b></span>
+    <span>vae → <b>vae</b></span>
+    <span>upscale / latent_upscale → <b>upscaler</b></span>
+    <span>controlnet → <b>controlnet</b></span>
+  </div>
+
+  <label class="field" for="input">Paste markdown / links</label>
+  <textarea id="input" placeholder="Paste Model Links section here…"></textarea>
+
+  <div class="row">
+    <button type="button" class="secondary" id="selectAll">Select all</button>
+    <button type="button" class="secondary" id="selectNone">Select none</button>
+    <button type="button" class="secondary" id="copy">Copy commands</button>
+    <button type="button" class="secondary" id="clear">Clear</button>
+  </div>
+
+  <label class="field">Models (uncheck to exclude from commands)</label>
+  <div id="models"></div>
+
+  <div class="meta" id="meta">0 commands</div>
+  <pre id="output"># commands appear here</pre>
+
+  <script>
+    // Matches utils/sd_model_download/download_model.py → dl_web_file (HF path, -x 4)
+    const BASE = "/tmp/stable-diffusion-models";
+    const HF_ARIA2_CONNECTIONS = 4;
+    const HF_TOKEN = "";
+    const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36";
+    const HF_RE = /https?:\/\/huggingface\.co\/[^\s\)\]\"\'<>]+/gi;
+
+    const FOLDER_MAP = {
+      text_encoders: "lora",
+      text_encoder: "lora",
+      clip: "lora",
+      clip_g: "lora",
+      t5: "lora",
+      loras: "lora",
+      lora: "lora",
+      diffusion_models: "sd",
+      diffusion_model: "sd",
+      unet: "sd",
+      checkpoints: "sd",
+      checkpoint: "sd",
+      vae: "vae",
+      latent_upscale_models: "upscaler",
+      upscale_models: "upscaler",
+      upscaler: "upscaler",
+      controlnet: "controlnet",
+      controlnets: "controlnet",
+      embeddings: "embedding",
+      embedding: "embedding",
+    };
+
+    /** url → checked (persist across re-parses) */
+    const checkedState = new Map();
+    let currentItems = [];
+
+    function cleanUrl(raw) {
+      return raw.replace(/[.,;:!?)]+$/, "");
+    }
+
+    function filenameFromUrl(url) {
+      try {
+        const u = new URL(url);
+        const parts = u.pathname.split("/").filter(Boolean);
+        return decodeURIComponent(parts[parts.length - 1] || "model.bin");
+      } catch {
+        return "model.bin";
+      }
+    }
+
+    function folderFromUrl(url) {
+      const lower = url.toLowerCase();
+      for (const key of Object.keys(FOLDER_MAP)) {
+        if (lower.includes("/" + key + "/") || lower.includes("/" + key + "?")) {
+          return FOLDER_MAP[key];
+        }
+      }
+      return null;
+    }
+
+    function parseSections(text) {
+      const lines = text.split(/\r?\n/);
+      let current = null;
+      const hits = [];
+
+      for (const line of lines) {
+        const header =
+          line.match(/^\*\*([^*]+)\*\*\s*$/) ||
+          line.match(/^#{1,3}\s+(.+)$/) ||
+          line.match(/^([a-zA-Z0-9_\-\/]+)\s*$/);
+
+        if (header) {
+          const name = header[1].trim().toLowerCase().replace(/\s+/g, "_");
+          if (FOLDER_MAP[name] || name.includes("encoder") || name.includes("diffusion") ||
+              name.includes("vae") || name.includes("lora") || name.includes("upscale") ||
+              name.includes("control")) {
+            current = name;
+          }
+        }
+
+        const urls = line.match(HF_RE) || [];
+        for (const raw of urls) {
+          hits.push({ url: cleanUrl(raw), section: current });
+        }
+      }
+
+      const all = [...text.matchAll(HF_RE)].map((m) => cleanUrl(m[0]));
+      const seen = new Set(hits.map((h) => h.url));
+      for (const url of all) {
+        if (!seen.has(url)) hits.push({ url, section: null });
+      }
+
+      const out = [];
+      const done = new Set();
+      for (const h of hits) {
+        if (done.has(h.url)) continue;
+        done.add(h.url);
+        out.push(h);
+      }
+      return out;
+    }
+
+    function resolveDir(section, url) {
+      if (section && FOLDER_MAP[section]) return FOLDER_MAP[section];
+      if (section) {
+        for (const [k, v] of Object.entries(FOLDER_MAP)) {
+          if (section.includes(k)) return v;
+        }
+      }
+      const fromUrl = folderFromUrl(url);
+      if (fromUrl) return fromUrl;
+
+      const name = filenameFromUrl(url).toLowerCase();
+      if (name.includes("lora")) return "lora";
+      if (name.includes("vae")) return "vae";
+      if (name.includes("upscale") || name.includes("upscaler")) return "upscaler";
+      if (name.includes("control")) return "controlnet";
+      if (name.includes("encoder") || name.includes("clip") || name.includes("t5") || name.includes("gemma")) {
+        return "lora";
+      }
+      return "sd";
+    }
+
+    function buildAria2cCmd(url, destDir, filename) {
+      const n = HF_ARIA2_CONNECTIONS;
+      const tokenCmd = `--header="Authorization: Bearer ${HF_TOKEN}" `;
+      return (
+        `aria2c --check-certificate=false ${tokenCmd}--file-allocation=none -c ` +
+        `-x ${n} -s ${n} --max-connection-per-server=${n} ` +
+        `--retry-wait=2 --max-tries=10 ` +
+        `--summary-interval=0 --console-log-level=warn --continue ` +
+        `--enable-http-keep-alive=false --user-agent "${USER_AGENT}" ` +
+        `--dir="${destDir}" --out="${filename}" "${url}"`
+      );
+    }
+
+    function parseHfUrl(url) {
+      const m = url.replace("/blob/", "/resolve/").match(
+        /^https?:\/\/huggingface\.co\/([^/]+\/[^/]+)\/resolve\/([^/]+)\/(.+?)(?:[?#]|$)/i
+      );
+      if (!m) return null;
+      return { repo: m[1], revision: m[2], path: decodeURIComponent(m[3]) };
+    }
+
+    function enrich(item) {
+      const filename = filenameFromUrl(item.url);
+      const folder = resolveDir(item.section, item.url);
+      return {
+        ...item,
+        filename,
+        folder,
+        destDir: `${BASE}/${folder}`,
+        hf: parseHfUrl(item.url),
+      };
+    }
+
+    // Size lookup: one batched request per (repo, revision) via HF paths-info.
+    // HF reflects the Origin header, so this works from a local file:// page.
+    let sizeReqId = 0;
+    const sizeCache = new Map();
+
+    function formatBytes(n) {
+      if (n === null || n === undefined) return "";
+      if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(2) + " GiB";
+      if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + " MiB";
+      if (n >= 1024) return (n / 1024).toFixed(0) + " KiB";
+      return n + " B";
+    }
+
+    function setSize(path, bytes) {
+      sizeCache.set(path, bytes);
+      const esc = (window.CSS && CSS.escape) ? CSS.escape(path) : path;
+      const el = document.querySelector(`[data-size-for="${esc}"]`);
+      if (el) el.textContent = bytes === null ? "size unknown" : " - " + formatBytes(bytes);
+    }
+
+    function applyCachedSizes() {
+      for (const item of currentItems) {
+        if (item.hf && sizeCache.has(item.hf.path)) setSize(item.hf.path, sizeCache.get(item.hf.path));
+      }
+    }
+
+    async function fetchSizes(reqId) {
+      const groups = new Map();
+      for (const item of currentItems) {
+        if (!item.hf) continue;
+        const key = item.hf.repo + "@" + item.hf.revision;
+        if (!groups.has(key)) groups.set(key, { repo: item.hf.repo, revision: item.hf.revision, paths: [] });
+        groups.get(key).paths.push(item.hf.path);
+      }
+
+      for (const { repo, revision, paths } of groups.values()) {
+        const todo = paths.filter((p) => !sizeCache.has(p));
+        if (!todo.length) continue;
+        const url = "https://huggingface.co/api/models/" + repo + "/paths-info/" + revision;
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paths: todo }),
+          });
+          const data = res.ok ? await res.json() : [];
+          const found = new Map((Array.isArray(data) ? data : []).map((f) => [f.path, f.size]));
+          for (const p of todo) setSize(p, found.has(p) ? found.get(p) : null);
+        } catch {
+          for (const p of todo) setSize(p, null);
+        }
+        if (reqId !== sizeReqId) return;
+      }
+    }
+
+    function renderChecklist() {
+      const box = document.getElementById("models");
+      box.innerHTML = "";
+      currentItems.forEach((item, i) => {
+        const checked = checkedState.get(item.url) !== false;
+        const row = document.createElement("label");
+        row.className = "model-item" + (checked ? "" : " unchecked");
+        row.innerHTML =
+          `<input type="checkbox" data-i="${i}" ${checked ? "checked" : ""} />` +
+          `<span><span class="name">${item.filename}</span>` +
+          `<span class="size" data-size-for="${item.hf ? item.hf.path : ""}"></span>` +
+          `<span class="dest">→ ${item.folder}/</span></span>`;
+        box.appendChild(row);
+      });
+      applyCachedSizes();
+      box.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+        cb.addEventListener("change", () => {
+          const item = currentItems[Number(cb.dataset.i)];
+          checkedState.set(item.url, cb.checked);
+          cb.closest(".model-item").classList.toggle("unchecked", !cb.checked);
+          renderCommands();
+        });
+      });
+    }
+
+    function renderCommands() {
+      const selected = currentItems.filter((item) => checkedState.get(item.url) !== false);
+      const cmds = selected.map((item) =>
+        buildAria2cCmd(item.url, item.destDir, item.filename)
+      );
+
+      const total = currentItems.length;
+      const n = cmds.length;
+      document.getElementById("meta").textContent =
+        total === 0
+          ? "No Hugging Face URLs found"
+          : `${n} of ${total} model${total === 1 ? "" : "s"} selected`;
+      document.getElementById("output").textContent =
+        n === 0
+          ? total === 0
+            ? "# no huggingface.co links found"
+            : "# no models selected"
+          : cmds.join("\n") + '\necho "✅ All downloads completed"';
+    }
+
+    function convert() {
+      const text = document.getElementById("input").value;
+      const parsed = parseSections(text).map(enrich);
+      const urls = new Set(parsed.map((p) => p.url));
+
+      // Default new models to checked; drop stale keys
+      for (const item of parsed) {
+        if (!checkedState.has(item.url)) checkedState.set(item.url, true);
+      }
+      for (const url of [...checkedState.keys()]) {
+        if (!urls.has(url)) checkedState.delete(url);
+      }
+
+      currentItems = parsed;
+      renderChecklist();
+      renderCommands();
+
+      const reqId = ++sizeReqId;
+      fetchSizes(reqId);
+    }
+
+    function setAll(checked) {
+      for (const item of currentItems) checkedState.set(item.url, checked);
+      renderChecklist();
+      renderCommands();
+    }
+
+    document.getElementById("selectAll").onclick = () => setAll(true);
+    document.getElementById("selectNone").onclick = () => setAll(false);
+    document.getElementById("clear").onclick = () => {
+      document.getElementById("input").value = "";
+      checkedState.clear();
+      currentItems = [];
+      document.getElementById("models").innerHTML = "";
+      document.getElementById("output").textContent = "# commands appear here";
+      document.getElementById("meta").textContent = "0 commands";
+    };
+    document.getElementById("copy").onclick = async () => {
+      const t = document.getElementById("output").textContent;
+      if (!t || t.startsWith("#")) return;
+      await navigator.clipboard.writeText(t);
+      document.getElementById("meta").textContent = "Copied to clipboard";
+    };
+    document.getElementById("input").addEventListener("input", convert);
+  </script>
+</body>
+</html>

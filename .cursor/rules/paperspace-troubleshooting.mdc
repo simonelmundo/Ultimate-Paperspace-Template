@@ -1,0 +1,20 @@
+---
+description: Troubleshooting rules for Paperspace ComfyUI custom node issues
+alwaysApply: true
+---
+
+# Paperspace ComfyUI Troubleshooting
+
+## Rule 1: Custom Node Problems — Update First, Then Reinstall Requirements
+
+When a custom node fails to load or a node type is missing, the **first action** is always:
+
+1. `git -C /storage/stable-diffusion-comfy/custom_nodes/<node-dir> pull` — update the node to latest
+2. Reinstall its requirements into the venv:
+   ```bash
+   source /tmp/sd_comfy-env/bin/activate
+   pip install -r /storage/stable-diffusion-comfy/custom_nodes/<node-dir>/requirements.txt
+   ```
+3. Then restart ComfyUI and check logs again before doing anything else.
+
+Only dig deeper (missing packages, version conflicts, patching) if the node still fails after update + reinstall.

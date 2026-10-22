@@ -1,0 +1,35 @@
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf diffusion_models && ln -s /tmp/stable-diffusion-models/sd diffusion_models
+
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf text_encoders && ln -s /tmp/stable-diffusion-models/lora text_encoders
+
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf sams && ln -s /tmp/stable-diffusion-models/upscaler sams
+
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
+
+cd "/storage/stable-diffusion-comfy/custom_nodes/comfyui_controlnet_aux/ckpts" && rm -rf lllyasviel && ln -s /tmp/stable-diffusion-models/controlnet lllyasviel
+cd /storage/stable-diffusion-comfy/models && rm -rf ipadapter && ln -s /tmp/stable-diffusion-models/upscaler ipadapter
+cd /storage/stable-diffusion-comfy/models && rm -rf clip_vision && ln -s /tmp/stable-diffusion-models/upscaler clip_vision
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf inpaint && ln -s /tmp/stable-diffusion-models/vae inpaint
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf RMBG && ln -s /tmp/stable-diffusion-models/controlnet RMBG
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf sam && ln -s /tmp/stable-diffusion-models/controlnet sam
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf SAM && ln -s /tmp/stable-diffusion-models/controlnet SAM
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf yolo && ln -s /tmp/stable-diffusion-models/controlnet yolo
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf depthanything3 && ln -s /tmp/stable-diffusion-models/controlnet depthanything3
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf rembg && ln -s /tmp/stable-diffusion-models/controlnet rembg
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf SEEDVR2 && ln -s /tmp/stable-diffusion-models/upscaler SEEDVR2
+
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf facexlib && ln -s /tmp/stable-diffusion-models/controlnet facexlib
+
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf vitmatte && ln -s /tmp/stable-diffusion-models/controlnet vitmatte
+
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf ultralytics && ln -s /tmp/stable-diffusion-models/controlnet ultralytics
+
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf onnx && ln -s /tmp/stable-diffusion-models/controlnet onnx
+
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf tensorrt && ln -s /tmp/stable-diffusion-models/controlnet tensorrt
+cd "/storage/text-generation-webui/user_data/" && rm -rf models && ln -s /tmp/stable-diffusion-models/llm_checkpoints models
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf tangoflux && ln -s /tmp/stable-diffusion-models/llm_checkpoints tangoflux
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf vae && ln -s /tmp/stable-diffusion-models/vae vae
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf checkpoints && ln -s /tmp/stable-diffusion-models/sd checkpoints
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf loras && ln -s /tmp/stable-diffusion-models/lora loras
+cd "/storage/stable-diffusion-comfy/models/" && rm -rf controlnet && ln -s /tmp/stable-diffusion-models/controlnet controlnet
