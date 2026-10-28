@@ -47,7 +47,7 @@ export WHEEL_CACHE_DIR="${WHEEL_CACHE_DIR:-/storage/.wheel_cache}"
 export BOOT_CACHE_EXTRA_DIR="${BOOT_CACHE_EXTRA_DIR:-/storage/.comfy_boot_extra}"
 export BOOT_CACHE_MAX_GB="${BOOT_CACHE_MAX_GB:-3}"  # soft target for EXTRA only
 # Skip slow path by default; set UPDATE_CUSTOM_NODES=1 / INSTALL_LORA_ON_START=1 to opt in.
-export SKIP_CUSTOM_NODE_UPDATE="${SKIP_CUSTOM_NODE_UPDATE:-1}"
+export SKIP_CUSTOM_NODE_UPDATE="${SKIP_CUSTOM_NODE_UPDATE:-0}"
 export INSTALL_LORA_ON_START="${INSTALL_LORA_ON_START:-0}"
 mkdir -p "$VENV_DIR" "$PIP_CACHE_DIR" "$WHEEL_CACHE_DIR" "$BOOT_CACHE_EXTRA_DIR"
 
@@ -388,7 +388,7 @@ setup_cuda_env() {
     export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
     export FORCE_CUDA=1
     export CUDA_VISIBLE_DEVICES=0
-    export PYOPENGL_PLATFORM="osmesa"
+    export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
     export WINDOW_BACKEND="headless"
     
     # A4000 optimization: Target Ampere architecture specifically (same as A6000)
@@ -1503,9 +1503,23 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             
             # Snapshot live model/custom_node symlinks before pull may restore placeholders.
             snapshot_comfy_symlinks || true
-            # Autostash any local dirt (patches, symlink placeholder deletions, etc.)
-            # so pull is not blocked by files like comfy/text_encoders/llama.py.
-            if git pull --autostash origin "$current_branch"; then
+            # Save local patches, then revert only modified tracked files so the
+            # pull is not blocked. NOTE: `git pull --autostash` needs git >= 2.29;
+            # this image ships git 2.25 where autostash is rebase-only and aborts
+            # the merge. `git stash` also fails here because the model placeholder
+            # deletions live behind symlinks, so use a patch file instead.
+            preupdate_patch="/tmp/comfy_preupdate_$$.patch"
+            preupdate_files="/tmp/comfy_preupdate_files.txt"
+            git diff --binary --diff-filter=M > "$preupdate_patch" 2>/dev/null || true
+            git diff --name-only --diff-filter=M > "$preupdate_files" 2>/dev/null || true
+            while IFS= read -r f; do
+                [ -n "$f" ] && git checkout -- "$f" 2>/dev/null || true
+            done < "$preupdate_files"
+            if git pull --no-rebase origin "$current_branch"; then
+                if [ -s "$preupdate_patch" ]; then
+                    git apply --3way "$preupdate_patch" >/dev/null 2>&1 \
+                        || echo "⚠️  Local patches not re-applied (saved at $preupdate_patch)"
+                fi
                 echo "✅ ComfyUI successfully updated to latest version!"
                 
                 # Update custom nodes as well
@@ -2795,6 +2809,9 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Forces Comfy's existing plain-KV fallback (Comfy-Org/ComfyUI#15605/#15607).
   # Set COMFY_DISABLE_KITCHEN_FLASH_DECODE=0 to re-enable on machines with driver >= ~570.
   export COMFY_DISABLE_KITCHEN_FLASH_DECODE="${COMFY_DISABLE_KITCHEN_FLASH_DECODE:-1}"
+  # Headless box: PyOpenGL defaults to OSMesa and fails to import OpenGL.EGL
+  # (comfy_extras/nodes_glsl.py). EGL is available on the Paperspace GPU image.
+  export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
   if [[ "${COMFY_DISABLE_KITCHEN_FLASH_DECODE}" != "0" ]]; then
     echo "⚠️  Kitchen flash_attention_decode DISABLED (MiniMax Music3 / old driver workaround)"
     # Re-apply after ComfyUI git pull overwrites llama.py
