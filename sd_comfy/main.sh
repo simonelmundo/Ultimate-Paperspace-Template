@@ -1591,6 +1591,10 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             echo "🔧 Re-applying MiniMax flash decode patch (if needed)..."
             python3 /notebooks/logs/patch_minimax_flash_decode.py >/dev/null 2>&1 || true
         fi
+        if [[ -f /notebooks/sd_comfy/patches/patch_ck_int8.py ]]; then
+            echo "🔧 Re-applying comfy_kitchen INT8 attention guard (if needed)..."
+            python3 /notebooks/sd_comfy/patches/patch_ck_int8.py >/dev/null 2>&1 || true
+        fi
         
         # Show recent commits
         echo ""
@@ -2812,6 +2816,15 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   # Headless box: PyOpenGL defaults to OSMesa and fails to import OpenGL.EGL
   # (comfy_extras/nodes_glsl.py). EGL is available on the Paperspace GPU image.
   export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+  # comfy_kitchen's CUDA kernels are built for CUDA 13 (driver >= ~580); this
+  # image has driver 550. Models that pin comfy_kitchen_int8 attention in their
+  # state dict (MOSS-Image int8_convrot) otherwise die with "detect_k_anchor
+  # kernel launch failed: CUDA driver version is insufficient". Fall back to
+  # ComfyUI's normal attention; set COMFY_DISABLE_CK_INT8=0 on newer drivers.
+  export COMFY_DISABLE_CK_INT8="${COMFY_DISABLE_CK_INT8:-1}"
+  if [[ "${COMFY_DISABLE_CK_INT8}" != "0" ]]; then
+    python3 /notebooks/sd_comfy/patches/patch_ck_int8.py >/dev/null 2>&1 || true
+  fi
   if [[ "${COMFY_DISABLE_KITCHEN_FLASH_DECODE}" != "0" ]]; then
     echo "⚠️  Kitchen flash_attention_decode DISABLED (MiniMax Music3 / old driver workaround)"
     # Re-apply after ComfyUI git pull overwrites llama.py
