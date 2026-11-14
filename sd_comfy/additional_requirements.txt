@@ -17,6 +17,9 @@ python-multipart==0.0.6
 flet==0.23.2
 
 
+-r /storage/stable-diffusion-comfy/custom_nodes/RES4LYF/requirements.txt
+-r /storage/stable-diffusion-comfy/custom_nodes/comfyui-sam3/requirements.txt
+
 # Requirements files to include
 -r /storage/stable-diffusion-comfy/custom_nodes/comfyui-manager/requirements.txt
 -r /storage/stable-diffusion-comfy/requirements.txt

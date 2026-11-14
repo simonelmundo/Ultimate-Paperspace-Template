@@ -1508,12 +1508,12 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
             # this image ships git 2.25 where autostash is rebase-only and aborts
             # the merge. `git stash` also fails here because the model placeholder
             # deletions live behind symlinks, so use a patch file instead.
-            preupdate_patch="/tmp/comfy_preupdate_$$.patch"
+            preupdate_patch="/storage/comfy_local_patches/preupdate_$$.patch"
             preupdate_files="/tmp/comfy_preupdate_files.txt"
-            git diff --binary --diff-filter=M > "$preupdate_patch" 2>/dev/null || true
-            git diff --name-only --diff-filter=M > "$preupdate_files" 2>/dev/null || true
+            git diff HEAD --binary --diff-filter=M > "$preupdate_patch" 2>/dev/null || true
+            git diff HEAD --name-only --diff-filter=M > "$preupdate_files" 2>/dev/null || true
             while IFS= read -r f; do
-                [ -n "$f" ] && git checkout -- "$f" 2>/dev/null || true
+                [ -n "$f" ] && git checkout HEAD -- "$f" 2>/dev/null || true
             done < "$preupdate_files"
             if git pull --no-rebase origin "$current_branch"; then
                 if [ -s "$preupdate_patch" ]; then
@@ -2602,9 +2602,24 @@ else
                 echo "   Local:  $local_commit"
                 echo "   Remote: $remote_commit"
                 echo ""
-                echo "🔄 Updating ComfyUI (git pull --autostash)..."
+                echo "🔄 Updating ComfyUI (preserving local changes)..."
                 snapshot_comfy_symlinks || true
-                if git pull --autostash origin "$current_branch"; then
+                # Same handling as the other update path: this image ships git 2.25, where
+                # autostash only works for rebase, and both staged edits and the symlinked
+                # model placeholders break stash. Save a patch, revert, pull, re-apply.
+                preupdate_patch="/storage/comfy_local_patches/preupdate_$$.patch"
+                preupdate_files="/tmp/comfy_preupdate_files.txt"
+                mkdir -p /storage/comfy_local_patches
+                git diff HEAD --binary --diff-filter=M > "$preupdate_patch" 2>/dev/null || true
+                git diff HEAD --name-only --diff-filter=M > "$preupdate_files" 2>/dev/null || true
+                while IFS= read -r f; do
+                    [ -n "$f" ] && git checkout HEAD -- "$f" 2>/dev/null || true
+                done < "$preupdate_files"
+                if git pull --no-rebase origin "$current_branch"; then
+                    if [ -s "$preupdate_patch" ]; then
+                        git apply --3way "$preupdate_patch" >/dev/null 2>&1 \
+                            || echo "⚠️  Local patches not re-applied (saved at $preupdate_patch)"
+                    fi
                     echo "✅ ComfyUI successfully updated to latest version!"
                 else
                     echo "❌ Failed to update ComfyUI. Please check the repository status."
