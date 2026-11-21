@@ -14,6 +14,7 @@ models/SAM -> /tmp/stable-diffusion-models/controlnet
 models/SEEDVR2 -> /tmp/stable-diffusion-models/upscaler
 models/TTS -> /tmp/stable-diffusion-models/controlnet
 models/checkpoints -> /tmp/stable-diffusion-models/sd
+models/clip -> /tmp/stable-diffusion-models/text_encoders
 models/clip_vision -> /tmp/stable-diffusion-models/text_encoders
 models/controlnet -> /tmp/stable-diffusion-models/controlnet
 models/depthanything3 -> /tmp/stable-diffusion-models/controlnet
