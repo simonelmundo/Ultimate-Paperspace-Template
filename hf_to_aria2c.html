@@ -131,13 +131,17 @@
   <div id="models"></div>
 
   <div class="meta" id="meta">0 commands</div>
+  <label class="inline"><input type="checkbox" id="onePass" checked> one-pass script: check space → free room → download → summary</label>
   <pre id="output"># commands appear here</pre>
 
   <script>
     // Matches utils/sd_model_download/download_model.py → dl_web_file (HF path, -x 4)
     const BASE = "/tmp/stable-diffusion-models";
     const HF_ARIA2_CONNECTIONS = 4;
-    const HF_TOKEN = "";
+    const DEFAULT_HF_TOKEN = ""; // put your HF token here (not committed)
+    let HF_TOKEN = (() => {
+      try { return localStorage.getItem("hf_token") || DEFAULT_HF_TOKEN; } catch { return DEFAULT_HF_TOKEN; }
+    })();
     const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36";
     const HF_RE = /https?:\/\/huggingface\.co\/[^\s\)\]\"\'<>]+/gi;
 
@@ -146,12 +150,9 @@
       text_encoder: "text_encoders",
       clip: "text_encoders",
       clip_g: "text_encoders",
-      clip_vision: "text_encoders",
       t5: "text_encoders",
-      umt5: "text_encoders",
-      gemma: "text_encoders",
-      loras: "lora",
-      lora: "lora",
+      loras: "loras",
+      lora: "loras",
       diffusion_models: "sd",
       diffusion_model: "sd",
       unet: "sd",
@@ -385,12 +386,105 @@
         total === 0
           ? "No Hugging Face URLs found"
           : `${n} of ${total} model${total === 1 ? "" : "s"} selected`;
+      const onePass = document.getElementById("onePass")?.checked;
       document.getElementById("output").textContent =
         n === 0
           ? total === 0
             ? "# no huggingface.co links found"
             : "# no models selected"
-          : cmds.join("\n") + '\necho "✅ All downloads completed"';
+          : onePass
+            ? buildSpaceScript(selected, cmds)
+            : cmds.join("\n") + '\necho "✅ All downloads completed"';
+    }
+
+    /**
+     * One-pass script: measure free space, delete the biggest non-kept models
+     * until the download fits (keeping a reserve), then download and summarise.
+     * NEED_KB comes from the sizes we already resolved for the selected files.
+     */
+    function buildSpaceScript(selected, cmds) {
+      const sizeOf = (i) => (i.hf ? Number(sizeCache.get(i.hf.path) || 0) : 0);
+      const known = selected.every((i) => sizeOf(i) > 0);
+      const needKb = known
+        ? selected.reduce((sum, i) => sum + Math.ceil(sizeOf(i) / 1024), 0)
+        : 0;
+      const keep = selected.map((i) => i.filename).filter(Boolean);
+      const keepRe = keep.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+
+      const lines = [];
+      lines.push("# one pass: check space -> free room -> download -> summary");
+      lines.push("# prefix with DRY=1 to preview deletions and stop before downloading");
+      lines.push('MODELS_DIR="/tmp/stable-diffusion-models"');
+      lines.push(`NEED_KB=${needKb}`);
+      if (!known) lines.push("# WARNING: some sizes are unknown - NEED_KB=0 aborts the run until sizes load");
+      lines.push(`KEEP_RE='${keepRe}'`);
+      lines.push("RESERVE_PCT=20");
+      lines.push('DELETED="/tmp/hf_deleted.$$"; EXPECTED="/tmp/hf_expected.$$"');
+      lines.push(': > "$DELETED"; : > "$EXPECTED"');
+      lines.push("g() { numfmt --to=iec-i --suffix=B --format='%.2f' $(( $1 * 1024 )); }");
+      lines.push("set -- $(df -k / | awk 'NR==2{print $2, $4}')");
+      lines.push("TOTAL=$1; BEFORE=$2");
+      lines.push("RESERVE=$(( TOTAL * RESERVE_PCT / 100 ))");
+      lines.push("SAFE=$(( BEFORE - RESERVE )); SHORT=$(( NEED_KB - SAFE ))");
+      lines.push('echo "=== space ==="');
+      lines.push('echo "free now:  $(g $BEFORE) of $(g $TOTAL)   reserve: $(g $RESERVE)"');
+      lines.push('echo "download:  $(g $NEED_KB)   fits right now: $(g $SAFE)"');
+      lines.push('if [ "$NEED_KB" -le 0 ]; then');
+      lines.push('  echo "size unknown - let the sizes load, then regenerate"; exit 1');
+      lines.push('elif [ "$SHORT" -le 0 ]; then');
+      lines.push('  echo "fits with $(g $(( -SHORT ))) to spare - nothing to delete"');
+      lines.push('elif [ "${DRY:-0}" = "1" ]; then');
+      lines.push('  echo "SHORT by $(g $SHORT) - would delete (biggest first, any folder):"');
+      lines.push("  acc=0");
+      lines.push('  find "$MODELS_DIR" -type f -name \'*.safetensors\' -printf \'%k %p\\n\' 2>/dev/null | grep -vE "$KEEP_RE" | sort -k1,1nr | while read -r kb path; do');
+      lines.push('    [ "$acc" -ge "$SHORT" ] && break');
+      lines.push('    acc=$(( acc + kb ))');
+      lines.push('    echo "  rm -f $path"');
+      lines.push("  done");
+      lines.push("  exit 0");
+      lines.push("else");
+      lines.push('  echo "SHORT by $(g $SHORT) - freeing it (biggest first, any folder):"');
+      lines.push("  acc=0");
+      lines.push('  find "$MODELS_DIR" -type f -name \'*.safetensors\' -printf \'%k %p\\n\' 2>/dev/null | grep -vE "$KEEP_RE" | sort -k1,1nr | while read -r kb path; do');
+      lines.push('    [ "$acc" -ge "$SHORT" ] && break');
+      lines.push('    acc=$(( acc + kb ))');
+      lines.push('    rm -f -- "$path" && printf "%s %s\\n" "$kb" "$path" >> "$DELETED" && echo "  deleted $(g $kb)  $path"');
+      lines.push("  done");
+      lines.push("  set -- $(df -k / | awk 'NR==2{print $2, $4}')");
+      lines.push('  if [ "$2" -le "$BEFORE" ]; then');
+      lines.push('    echo "  ! free space did not grow - a process still holds the file(s):"');
+      lines.push('    echo "    sd_comfy/control.sh restart   then run this again"');
+      lines.push("    exit 1");
+      lines.push("  fi");
+      lines.push("fi");
+      lines.push("");
+      lines.push('echo "=== download ==="');
+      for (const item of selected) lines.push(`echo "${item.destDir}/${item.filename}" >> "$EXPECTED"`);
+      for (const cmd of cmds) lines.push(cmd);
+      lines.push("");
+      lines.push('echo "=== summary ==="');
+      lines.push("set -- $(df -k / | awk 'NR==2{print $2, $4}')");
+      lines.push("AFTER=$2");
+      lines.push('echo "free: $(g $BEFORE) -> $(g $AFTER)"');
+      lines.push('if [ -s "$DELETED" ]; then');
+      lines.push('  echo "deleted:"');
+      lines.push('  awk \'{ s += $1; printf "  %7.2f GiB  %s\\n", $1/1048576, $2 } END { printf "  %7.2f GiB  total freed\\n", s/1048576 }\' "$DELETED"');
+      lines.push("else");
+      lines.push('  echo "deleted: nothing"');
+      lines.push("fi");
+      lines.push('echo "downloaded:"');
+      lines.push("dsum=0");
+      lines.push('while IFS= read -r f; do');
+      lines.push('  if [ -f "$f" ]; then');
+      lines.push('    kb=$(du -k "$f" | cut -f1); dsum=$(( dsum + kb ))');
+      lines.push('    printf "  %s  %s\\n" "$(g $kb)" "$f"');
+      lines.push("  else");
+      lines.push('    printf "  %s  %s\\n" "MISSING" "$f"');
+      lines.push("  fi");
+      lines.push('done < "$EXPECTED"');
+      lines.push('echo "  ---- $(g $dsum) on disk"');
+      lines.push('rm -f "$DELETED" "$EXPECTED"');
+      return lines.join("\n");
     }
 
     function convert() {
@@ -437,6 +531,7 @@
       document.getElementById("meta").textContent = "Copied to clipboard";
     };
     document.getElementById("input").addEventListener("input", convert);
+    document.getElementById("onePass").addEventListener("change", renderCommands);
   </script>
 </body>
 </html>
