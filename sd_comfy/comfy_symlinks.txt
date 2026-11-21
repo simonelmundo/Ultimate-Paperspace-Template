@@ -14,7 +14,7 @@ models/SAM -> /tmp/stable-diffusion-models/controlnet
 models/SEEDVR2 -> /tmp/stable-diffusion-models/upscaler
 models/TTS -> /tmp/stable-diffusion-models/controlnet
 models/checkpoints -> /tmp/stable-diffusion-models/sd
-models/clip_vision -> /tmp/stable-diffusion-models/upscaler
+models/clip_vision -> /tmp/stable-diffusion-models/text_encoders
 models/controlnet -> /tmp/stable-diffusion-models/controlnet
 models/depthanything3 -> /tmp/stable-diffusion-models/controlnet
 models/diffusion_models -> /tmp/stable-diffusion-models/sd
@@ -39,7 +39,7 @@ models/sams -> /tmp/stable-diffusion-models/upscaler
 models/smol -> /tmp/stable-diffusion-models/controlnet
 models/tangoflux -> /tmp/stable-diffusion-models/llm_checkpoints
 models/tensorrt -> /tmp/stable-diffusion-models/controlnet
-models/text_encoders -> /tmp/stable-diffusion-models/lora
+models/text_encoders -> /tmp/stable-diffusion-models/text_encoders
 models/tts -> /tmp/stable-diffusion-models/controlnet
 models/upscale_models -> /tmp/stable-diffusion-models/upscaler
 models/vae -> /tmp/stable-diffusion-models/vae

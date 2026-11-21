@@ -15,11 +15,10 @@ load_dotenv()
 
 model_storage_dir = os.environ['MODEL_DIR']
 hf_token = os.environ.get('HF_TOKEN', '')
-user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
+# Civitai token comes from the notebook env (never commit it).
+civitai_token = os.environ.get('CIVITAI_TOKEN', '')
 
-# Add new environment variable for Civitai token
-civitai_token = 'bf5a73346bccc8ab11cd99e1386a0e1b'
-civitai_token = 'be4ab0abfc4f8ff45247122f0ccd0196'
+user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
 
 # Hugging Face CDN signed URLs + multi-range aria2c often hit 403s; keep HF conservative.
 HF_ARIA2_CONNECTIONS = 4
@@ -296,23 +295,45 @@ def prepare_folder(name):
     os.makedirs(path, exist_ok=True)
     return path
 
+# ComfyUI packs ship text encoders/CLIPs inside the LoRA list; route those to
+# the text_encoders bucket so models/text_encoders sees them.
+TEXT_ENCODER_NAME_RE = re.compile(
+    r'^(qwen|t5|clip_l|clip_g|umt5|open_clip|clip_vision|llama|llava|gemma|bert|mt5)', re.I
+)
+LORA_NAME_RE = re.compile(r'(lora|lightning|4step|4-step|animaedit|bulge|wav2vec)', re.I)
+
+def model_file_name(uri):
+    return os.path.basename(unquote(urlparse(uri.replace('/blob/', '/resolve/')).path))
+
+def is_text_encoder_uri(uri):
+    name = model_file_name(uri)
+    if LORA_NAME_RE.search(name):
+        return False
+    if re.search(r'vae', name, re.I):
+        return False
+    return bool(TEXT_ENCODER_NAME_RE.match(name)) or 'text_encoder' in name.lower()
+
 def collect_jobs():
     """Build (uri, dest_dir) list in category order."""
     categories = [
         ("vae", "VAE_LIST"),
         ("controlnet", "CONTROLNET_LIST"),
         ("upscaler", "UPSCALER_LIST"),
+        ("text_encoders", "TEXT_ENCODER_LIST"),
         ("lora", "LORA_LIST"),
         ("sd", "MODEL_LIST"),
         ("embedding", "EMBEDDING_LIST"),
     ]
     jobs = []
     for folder, env_key in categories:
-        dest_dir = prepare_folder(folder)
+        prepare_folder(folder)
         for uri in os.environ.get(env_key, "").split(','):
             uri = uri.strip()
-            if uri:
-                jobs.append((uri, dest_dir))
+            if not uri:
+                continue
+            # Encoders arrive through the lora list too; keep them in text_encoders.
+            target = "text_encoders" if (folder == "lora" and is_text_encoder_uri(uri)) else folder
+            jobs.append((uri, prepare_folder(target)))
     return jobs
 
 def run_downloads():
