@@ -58,7 +58,7 @@ def probe_remote_size(uri):
             probe_uri = probe_uri.replace('/blob/', '/resolve/')
             if hf_token:
                 headers['Authorization'] = f'Bearer {hf_token}'
-        elif 'civitai.com' in probe_uri and civitai_token and 'token=' not in probe_uri:
+        elif re.search(r'civitai\.(?:com|red)', probe_uri) and civitai_token and 'token=' not in probe_uri:
             sep = '&' if '?' in probe_uri else '?'
             if '/api/download/' in probe_uri:
                 probe_uri = f'{probe_uri}{sep}token={civitai_token}'
@@ -211,13 +211,28 @@ def dl_huggingface(model_uri, token=None, dest_dir=None):
         dest_dir=dest_dir,
     )
 
+def civitai_download_url(model_uri, version_id=None):
+    """Canonical civitai.com download URL: keeps fileId, adds token, works for civitai.red."""
+    if version_id is None:
+        version_id = model_uri.split('/')[-1].split('?')[0]
+    params = []
+    if '?' in model_uri:
+        for part in model_uri.split('?', 1)[1].split('&'):
+            if part and not part.startswith('token='):
+                params.append(part)
+    if civitai_token:
+        params.append(f'token={civitai_token}')
+    query = f"?{'&'.join(params)}" if params else ''
+    return f"https://civitai.com/api/download/models/{version_id}{query}"
+
+
 def downlaod_model(model_uri, dest_dir=None):
     model_uri = model_uri.strip()
     dest_dir = dest_dir or os.getcwd()
     os.makedirs(dest_dir, exist_ok=True)
     headers={'User-Agent': user_agent}
     magnet_match = re.search(r'magnet:\?xt=urn:btih:[\-_A-Za-z0-9&=%.]*', model_uri)
-    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.com\/(models\/\d+|api\/download\/models\/\d+)', model_uri)
+    civitai_match = re.search(r'^https?:\/\/(?:www\.|(?!www))civitai\.(?:com|red)\/(models\/\d+|api\/download\/models\/\d+)', model_uri)
     web_match = is_url(model_uri)
 
     if magnet_match:
@@ -245,11 +260,7 @@ def downlaod_model(model_uri, dest_dir=None):
         )
     elif civitai_match:
         if '/api/download/' in model_uri:
-            model_id = model_uri.split('/')[-1].split('?')[0]  # Extract model ID
-            download_url = f"https://civitai.com/api/download/models/{model_id}"
-            if civitai_token:
-                download_url += f"?token={civitai_token}"
-            dl_web_file(download_url, dest_dir=dest_dir)
+            dl_web_file(civitai_download_url(model_uri), dest_dir=dest_dir)
         else:
             if not is_url(civitai_match[0]):
                 log('URL does not match known civitai.com pattern.')
@@ -259,12 +270,8 @@ def downlaod_model(model_uri, dest_dir=None):
                 model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
                 latest_model = model_data['modelVersions'][0]
 
-                latest_model_url = f"https://civitai.com/api/download/models/{latest_model['id']}"
-                if civitai_token:
-                    latest_model_url += f"?token={civitai_token}"
-
                 log(f'Downloading model: {model_data["name"]}')
-                dl_web_file(latest_model_url, dest_dir=dest_dir)
+                dl_web_file(civitai_download_url(model_uri, version_id=latest_model['id']), dest_dir=dest_dir)
     elif web_match:
         # Always do the web match last
         with requests.get(web_match[0], allow_redirects=True, stream=True, headers=headers) as r:
