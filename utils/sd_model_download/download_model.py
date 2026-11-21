@@ -308,7 +308,6 @@ TEXT_ENCODER_NAME_RE = re.compile(
     r'^(qwen|t5|clip_l|clip_g|umt5|open_clip|clip_vision|llama|llava|gemma|bert|mt5)', re.I
 )
 LORA_NAME_RE = re.compile(r'(lora|lightning|4step|4-step|animaedit|bulge|wav2vec)', re.I)
-AUDIO_ENCODER_NAME_RE = re.compile(r'^(wav2vec|hubert|whisper)', re.I)
 
 def model_file_name(uri):
     return os.path.basename(unquote(urlparse(uri.replace('/blob/', '/resolve/')).path))
@@ -341,8 +340,6 @@ def collect_jobs():
                 continue
             # Encoders arrive through the lora list too; keep them in text_encoders.
             target = "text_encoders" if (folder == "lora" and is_text_encoder_uri(uri)) else folder
-            if AUDIO_ENCODER_NAME_RE.match(model_file_name(uri)):
-                target = "audio"
             jobs.append((uri, prepare_folder(target)))
     return jobs
 
