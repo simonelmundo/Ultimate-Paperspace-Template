@@ -524,11 +524,45 @@
       document.getElementById("output").textContent = "# commands appear here";
       document.getElementById("meta").textContent = "0 commands";
     };
+    async function copyToClipboard(text) {
+      try {
+        if (navigator.clipboard && window.isSecureContext !== false) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch {
+        // fall through to the legacy path (file:// pages have no clipboard API)
+      }
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, text.length);
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+
     document.getElementById("copy").onclick = async () => {
       const t = document.getElementById("output").textContent;
-      if (!t || t.startsWith("#")) return;
-      await navigator.clipboard.writeText(t);
-      document.getElementById("meta").textContent = "Copied to clipboard";
+      const meta = document.getElementById("meta");
+      // only skip the real placeholders, not generated scripts (they start with '#')
+      if (!t || t === "# commands appear here" || t === "# no models selected" || t === "# no huggingface.co links found") {
+        meta.textContent = "Nothing to copy";
+        return;
+      }
+      const ok = await copyToClipboard(t);
+      meta.textContent = ok
+        ? `Copied ${t.split("\n").length} lines`
+        : "Copy blocked by the browser - select the text and press Ctrl+C";
     };
     document.getElementById("input").addEventListener("input", convert);
     document.getElementById("onePass").addEventListener("change", renderCommands);
