@@ -142,11 +142,14 @@
     const HF_RE = /https?:\/\/huggingface\.co\/[^\s\)\]\"\'<>]+/gi;
 
     const FOLDER_MAP = {
-      text_encoders: "lora",
-      text_encoder: "lora",
-      clip: "lora",
-      clip_g: "lora",
-      t5: "lora",
+      text_encoders: "text_encoders",
+      text_encoder: "text_encoders",
+      clip: "text_encoders",
+      clip_g: "text_encoders",
+      clip_vision: "text_encoders",
+      t5: "text_encoders",
+      umt5: "text_encoders",
+      gemma: "text_encoders",
       loras: "lora",
       lora: "lora",
       diffusion_models: "sd",
@@ -162,6 +165,8 @@
       controlnets: "controlnet",
       embeddings: "embedding",
       embedding: "embedding",
+      audio_encoders: "audio",
+      audio_encoder: "audio",
     };
 
     /** url → checked (persist across re-parses) */
