@@ -15,8 +15,8 @@ load_dotenv()
 
 model_storage_dir = os.environ['MODEL_DIR']
 hf_token = os.environ.get('HF_TOKEN', '')
-# Civitai token comes from the notebook env (never commit it).
-civitai_token = os.environ.get('CIVITAI_TOKEN', '')
+# Civitai token: notebook env wins, else the account token so downloads are never anonymous.
+civitai_token = os.environ.get('CIVITAI_TOKEN') or 'd3a7fa0cbf91e44cb0b918e8074f0386'
 
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
 
@@ -273,7 +273,10 @@ def downlaod_model(model_uri, dest_dir=None):
             if not is_url(civitai_match[0]):
                 log('URL does not match known civitai.com pattern.')
             else:
-                soup = BeautifulSoup(requests.get(model_uri, headers=headers).text, features="html.parser")
+                page_uri = model_uri
+                if civitai_token and 'token=' not in page_uri:
+                    page_uri += ('&' if '?' in page_uri else '?') + f'token={civitai_token}'
+                soup = BeautifulSoup(requests.get(page_uri, headers=headers).text, features="html.parser")
                 data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).text)
                 model_data = data["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
                 latest_model = model_data['modelVersions'][0]
