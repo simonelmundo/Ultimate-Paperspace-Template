@@ -363,6 +363,20 @@ def collect_jobs():
             jobs.append((uri, prepare_folder(folder)))
     return jobs
 
+def prune_empty_subdirs(root):
+    """huggingface_hub recreates the file's URL path (e.g. text_encoders/x.safetensors)
+    under the destination; drop those leftovers when a download fails before the move-up."""
+    root = os.path.abspath(root)
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        if dirpath == root or os.path.relpath(dirpath, root).split(os.sep)[0].startswith('.'):
+            continue
+        if not dirnames and not filenames:
+            try:
+                os.rmdir(dirpath)
+            except OSError:
+                pass
+
+
 def run_downloads():
     jobs = collect_jobs()
     if not jobs:
@@ -409,5 +423,8 @@ def run_downloads():
             log(f'Finished sequential download: {label}')
         except Exception as exc:
             log(f'Sequential download failed for {label}: {exc}')
+
+    for dest_dir in {dest for _, dest in jobs}:
+        prune_empty_subdirs(dest_dir)
 
 run_downloads()
