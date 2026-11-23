@@ -260,7 +260,15 @@ def downlaod_model(model_uri, dest_dir=None):
         )
     elif civitai_match:
         if '/api/download/' in model_uri:
-            dl_web_file(civitai_download_url(model_uri), dest_dir=dest_dir)
+            url = civitai_download_url(model_uri)
+            # Anonymous/expired-token Civitai downloads return the HTML login page;
+            # aria2c would happily save that page as the .safetensors.
+            probe = requests.head(url, allow_redirects=True, headers=headers, timeout=30)
+            ctype = probe.headers.get('content-type', '').split(';')[0].strip().lower()
+            if ctype == 'text/html':
+                log(f'Civitai auth required for {model_uri} (got {ctype}). Set CIVITAI_TOKEN; not saving the login page as a model.')
+            else:
+                dl_web_file(url, dest_dir=dest_dir)
         else:
             if not is_url(civitai_match[0]):
                 log('URL does not match known civitai.com pattern.')
