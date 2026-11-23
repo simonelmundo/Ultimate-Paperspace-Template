@@ -333,6 +333,14 @@ def is_text_encoder_uri(uri):
 
 def collect_jobs():
     """Build (uri, dest_dir) list in category order."""
+    # The platform never sends TEXT_ENCODER_LIST: encoders ride inside LORA_LIST,
+    # so build the list here instead of relying on per-URL routing.
+    if not os.environ.get("TEXT_ENCODER_LIST"):
+        os.environ["TEXT_ENCODER_LIST"] = ",".join(
+            uri.strip() for uri in os.environ.get("LORA_LIST", "").split(",")
+            if uri.strip() and is_text_encoder_uri(uri.strip())
+        )
+
     categories = [
         ("vae", "VAE_LIST"),
         ("controlnet", "CONTROLNET_LIST"),
@@ -349,9 +357,10 @@ def collect_jobs():
             uri = uri.strip()
             if not uri:
                 continue
-            # Encoders arrive through the lora list too; keep them in text_encoders.
-            target = "text_encoders" if (folder == "lora" and is_text_encoder_uri(uri)) else folder
-            jobs.append((uri, prepare_folder(target)))
+            # Encoders are in TEXT_ENCODER_LIST; don't also queue them as LoRAs.
+            if folder == "lora" and is_text_encoder_uri(uri):
+                continue
+            jobs.append((uri, prepare_folder(folder)))
     return jobs
 
 def run_downloads():
